@@ -1,0 +1,54 @@
+# =========================
+# data
+# =========================
+data_root: ./data/raw
+split: train
+image_size: 384
+num_workers: 16
+
+# =========================
+# training
+# =========================
+seed: 42
+batch_size: 4
+grad_accum_steps: 2
+
+lr: 5.0e-5
+weight_decay: 1.0e-4
+
+max_steps: 120000
+log_every: 50
+save_every: 2000
+
+# =========================
+# diffusion
+# =========================
+timesteps: 1000
+
+# =========================
+# model (U-Net)
+# =========================
+base_channels: 64
+channel_mults: [1, 2, 3, 4]
+num_res_blocks: 2
+dropout: 0.1
+
+# =========================
+# performance / memory
+# =========================
+amp: true
+grad_checkpoint: false
+grad_clip_norm: 1.0
+
+# =========================
+# self-attention
+# =========================
+attn_resolutions: [48]
+attn_heads: 2
+attn_head_dim: 32
+
+# =========================
+# outputs
+# =========================
+out_dir: ./runs/ddpm_people_384
+resume_ckpt: ""
