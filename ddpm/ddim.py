@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import torch
 from dataclasses import dataclass
-import diffusion
 
 @dataclass(frozen=True)
 class DDIMConfig:
@@ -28,6 +27,7 @@ class DDIM:
         model,
         shape,
         steps: int,
+        progress: bool = True,
     ) -> torch.Tensor:
         """
         shape: (B, C, H, W)
@@ -43,7 +43,12 @@ class DDIM:
         # равномерно выбираем таймстепы
         t_seq = torch.linspace(self.cfg.timesteps - 1, 0, steps, device=self.device).round().long()
 
-        for i in range(len(t_seq) - 1):
+        iterator = range(len(t_seq) - 1)
+        if progress:
+            from tqdm import tqdm
+            iterator = tqdm(iterator, desc="ddim", unit="step")
+
+        for i in iterator:
             t = t_seq[i]
             t_prev = t_seq[i + 1]
 

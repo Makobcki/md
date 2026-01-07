@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+import os
+import random
+
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -36,3 +40,27 @@ def save_ckpt(path: str, obj: Dict[str, Any]) -> None:
 
 def load_ckpt(path: str, device: torch.device) -> Dict[str, Any]:
     return torch.load(path, map_location=device)
+
+
+def seed_everything(seed: int, deterministic: bool = False) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True)
+    else:
+        torch.backends.cudnn.benchmark = True
+
+
+def build_run_metadata() -> Dict[str, Any]:
+    return {
+        "torch_version": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": torch.version.cuda,
+        "cudnn_version": torch.backends.cudnn.version(),
+        "device_count": torch.cuda.device_count(),
+        "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
+    }

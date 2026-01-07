@@ -5,11 +5,10 @@ from pathlib import Path
 
 import torch
 from PIL import Image
-import yaml
 from ddpm.ddim import DDIM, DDIMConfig
 from ddpm.diffusion import DDPM, DiffusionConfig
 from ddpm.model import UNet
-from ddpm.utils import load_ckpt, EMA
+from ddpm.utils import EMA, load_ckpt, seed_everything
 
 
 def to_uint8(x: torch.Tensor) -> torch.Tensor:
@@ -46,13 +45,12 @@ def main() -> None:
     ap.add_argument("--ckpt", required=True, help="path to ckpt_XXXX.pt")
     ap.add_argument("--out", default="./samples/grid.png")
     ap.add_argument("--n", type=int, default=8)
-    ap.add_argument("--steps", type=int, default=1000)
+    ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    seed_everything(args.seed, deterministic=False)
 
     ck = load_ckpt(args.ckpt, device)
     cfg = ck["cfg"]
@@ -90,7 +88,8 @@ def main() -> None:
         betas=ddpm.betas,
     )
 
-    with torch.no_grad(), torch.autocast("cuda", enabled=True):
+    autocast_device = "cuda" if device.type == "cuda" else "cpu"
+    with torch.no_grad(), torch.autocast(autocast_device, enabled=device.type == "cuda"):
         x = ddim.sample(
             model,
             shape=(args.n, 3, int(cfg["image_size"]), int(cfg["image_size"])),

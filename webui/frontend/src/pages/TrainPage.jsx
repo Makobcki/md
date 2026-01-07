@@ -1,0 +1,138 @@
+import React, { useEffect, useState } from "react";
+import { api, wsUrl } from "../api.js";
+import LogViewer from "../components/LogViewer.jsx";
+import LineChart from "../components/LineChart.jsx";
+
+export default function TrainPage() {
+  const [config, setConfig] = useState("");
+  const [status, setStatus] = useState({ active: false });
+  const [logs, setLogs] = useState([]);
+  const [metrics, setMetrics] = useState([]);
+  const [runId, setRunId] = useState(null);
+  const [command, setCommand] = useState([]);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    api.getConfig().then((data) => setConfig(data.content));
+    const poll = async () => {
+      const stat = await api.getStatus();
+      setStatus(stat);
+      if (stat.active && stat.run.run_type === "train") {
+        setRunId(stat.run.run_id);
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 3000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!runId) return;
+    const ws = new WebSocket(wsUrl(`/ws/logs/${runId}`));
+    ws.onmessage = (event) => {
+      const payload = JSON.parse(event.data);
+      if (payload.type === "log") {
+        setLogs((prev) => [...prev.slice(-200), `[${payload.stream}] ${payload.line}`]);
+      }
+    };
+    return () => ws.close();
+  }, [runId]);
+
+  useEffect(() => {
+    if (!runId) return;
+    const ws = new WebSocket(wsUrl(`/ws/metrics/${runId}`));
+    ws.onmessage = (event) => {
+      try {
+        const metric = JSON.parse(event.data);
+        if (metric.type === "metric") {
+          setMetrics((prev) => [...prev.slice(-200), metric]);
+        }
+      } catch (e) {
+        console.warn(e);
+      }
+    };
+    return () => ws.close();
+  }, [runId]);
+
+  const handleSave = async () => {
+    setError("");
+    try {
+      await api.updateConfig(config);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleStart = async () => {
+    setError("");
+    try {
+      const resp = await api.startTrain();
+      setRunId(resp.run_id);
+      setCommand(resp.command);
+      setLogs([]);
+      setMetrics([]);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleStop = async () => {
+    setError("");
+    try {
+      await api.stopTrain();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const lastMetric = metrics[metrics.length - 1];
+
+  return (
+    <div className="container">
+      <div className="card">
+        <h2>Train</h2>
+        {error && <div className="muted">{error}</div>}
+        {status.active && status.run.run_type !== "train" && (
+          <div className="muted">Другой job уже выполняется: {status.run.run_type}</div>
+        )}
+        <div className="row">
+          <button onClick={handleStart} disabled={status.active}>Start</button>
+          <button className="danger" onClick={handleStop} disabled={!status.active}>Stop</button>
+          <span className="status-pill">{status.active ? "running" : "stopped"}</span>
+          {lastMetric && (
+            <>
+              <span>elapsed: {Math.round(lastMetric.elapsed_sec)}s</span>
+              <span>ETA: {Math.round(lastMetric.eta_sec)}s</span>
+            </>
+          )}
+        </div>
+        {command.length > 0 && (
+          <div className="muted">Command: {command.join(" ")}</div>
+        )}
+      </div>
+
+      <div className="card">
+        <h3>train.yaml</h3>
+        <textarea
+          value={config}
+          onChange={(e) => setConfig(e.target.value)}
+          rows={18}
+          style={{ width: "100%" }}
+        />
+        <div className="row">
+          <button onClick={handleSave}>Save</button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>Loss vs Step</h3>
+        <LineChart data={metrics.map((m) => ({ step: m.step, loss: m.loss }))} />
+      </div>
+
+      <div className="card">
+        <h3>Live logs</h3>
+        <LogViewer lines={logs} />
+      </div>
+    </div>
+  );
+}
