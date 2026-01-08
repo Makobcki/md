@@ -4,7 +4,7 @@
 data_root: ./data/raw
 split: train
 image_size: 384
-num_workers: 16
+num_workers: 8
 
 # =========================
 # training
@@ -20,6 +20,8 @@ weight_decay: 1.0e-4
 max_steps: 120000
 log_every: 50
 save_every: 2000
+
+min_snr_gamma: 5.0
 
 # =========================
 # diffusion
@@ -39,7 +41,7 @@ dropout: 0.1
 # =========================
 amp: true
 compile: false
-grad_checkpoint: false
+grad_checkpoint: true
 grad_clip_norm: 1.0
 
 # =========================
@@ -54,3 +56,4 @@ attn_head_dim: 32
 # =========================
 out_dir: ./runs/ddpm_people_384
 resume_ckpt: ""
+

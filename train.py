@@ -24,25 +24,69 @@ def load_yaml(path: str) -> dict:
 
 
 def get_snr_weights(ddpm, t, snr_gamma=5.0):
-    alpha_bar = ddpm.alpha_bar[t]
-    snr = alpha_bar / (1.0 - alpha_bar)
-
-    # Для v-prediction формула весов: min(SNR, gamma) / (SNR + 1)
-    # Это делает обучение гораздо стабильнее
-    weights = torch.stack([snr, torch.ones_like(t) * snr_gamma], dim=1).min(dim=1)[0] / (snr + 1)
-    return weights.to(t.device)
+    eps = 1e-8
+    alpha_bar = ddpm.alpha_bar[t].clamp(min=eps, max=1.0 - eps)
+    snr = alpha_bar / (1.0 - alpha_bar + eps)
+    gamma = torch.full_like(snr, float(snr_gamma))
+    return torch.minimum(snr, gamma) / (snr + eps)
 
 
 def _seed_worker(worker_id: int) -> None:
     worker_seed = torch.initial_seed() % 2**32
     seed_everything(worker_seed, deterministic=False)
 
+def _yaml_safe(obj):
+    """Рекурсивно приводит объект к типам, которые точно сериализуются в YAML."""
+    # базовые типы
+    if obj is None or type(obj) in (bool, int, float, str):
+        return obj
+
+    # любые "похожие на строку" (TorchVersion, numpy.str_, etc.) -> строго builtin str
+    if isinstance(obj, str):
+        return str(obj)
+
+    # bytes -> строка (чтобы не словить бинарные теги)
+    if isinstance(obj, (bytes, bytearray)):
+        return obj.decode("utf-8", errors="replace")
+
+    # Path / device / dtype / любые странные объекты -> str
+    from pathlib import Path
+    if isinstance(obj, Path):
+        return str(obj)
+
+    # dict
+    if isinstance(obj, dict):
+        return {str(_yaml_safe(k)): _yaml_safe(v) for k, v in obj.items()}
+
+    # list/tuple/set
+    if isinstance(obj, (list, tuple, set)):
+        return [_yaml_safe(x) for x in obj]
+
+    # numpy scalar (если вдруг)
+    try:
+        import numpy as np  # optional
+        if isinstance(obj, np.generic):
+            return obj.item()
+    except Exception:
+        pass
+
+    # torch scalar / tensor 0-dim
+    try:
+        import torch
+        if isinstance(obj, torch.Tensor):
+            if obj.ndim == 0:
+                return obj.item()
+            return f"<tensor shape={tuple(obj.shape)} dtype={obj.dtype} device={obj.device}>"
+    except Exception:
+        pass
+
+    # fallback: строковое представление
+    return str(obj)
 
 def _save_yaml(path: Path, obj: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(obj, f, sort_keys=False, allow_unicode=True)
-
+        yaml.safe_dump(_yaml_safe(obj), f, sort_keys=False, allow_unicode=True)
 
 def _get_autocast_device(device: torch.device) -> str:
     return "cuda" if device.type == "cuda" else "cpu"
@@ -55,7 +99,7 @@ def main() -> None:
     ap.add_argument("--resume", default=None)
     args = ap.parse_args()
 
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
     webui_mode = os.environ.get("WEBUI") == "1"
     webui_run_dir = os.environ.get("WEBUI_RUN_DIR")
 
@@ -229,6 +273,8 @@ def main() -> None:
             v_target = torch.sqrt(diffusion.alpha_bar[t])[:, None, None, None] * noise - \
                        torch.sqrt(1 - diffusion.alpha_bar[t])[:, None, None, None] * x1
 
+
+
             with torch.amp.autocast(_get_autocast_device(device), enabled=bool(cfg.get("amp", False))):
                 pred = model(xt, t)
 
@@ -238,18 +284,19 @@ def main() -> None:
                 # Усредняем по пространству [C, H, W], оставляя размер [B]
                 loss_mse = loss_mse.mean(dim=[1, 2, 3])
 
-                # Теперь веса Min-SNR корректно умножаются на лосс каждого элемента батча
-                weights = get_snr_weights(diffusion, t, snr_gamma=5.0)
-                loss = (loss_mse * weights).mean()
+                # if not torch.isfinite(loss_mse):
+                #     raise RuntimeError(f"NaN loss at step {step}")
 
+                # Теперь веса Min-SNR корректно умножаются на лосс каждого элемента батча
+                snr_gamma = float(cfg.get("min_snr_gamma", 5.0))
+                weights = get_snr_weights(diffusion, t, snr_gamma=snr_gamma)
+
+                loss = (loss_mse * weights).mean()
                 loss = loss / grad_accum
 
             total_loss += loss.detach().item()
 
             scaler.scale(loss).backward()
-
-            if not torch.isfinite(loss):
-                raise RuntimeError(f"NaN loss at step {step}")
 
         # gradient clipping
         grad_clip = float(cfg.get("grad_clip_norm", 0.0))

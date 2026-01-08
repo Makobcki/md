@@ -42,6 +42,7 @@ class DDIM:
 
         # равномерно выбираем таймстепы
         t_seq = torch.linspace(self.cfg.timesteps - 1, 0, steps, device=self.device).round().long()
+        t_seq = torch.cat([t_seq, torch.tensor([-1], device=self.device)])
 
         iterator = range(len(t_seq) - 1)
         if progress:
@@ -63,8 +64,12 @@ class DDIM:
             # eps = sqrt(1-a)*x_t + sqrt(a)*v
             eps = sqrt_1m * x + sqrt_a * v
 
-            a_t = self.alpha_bar[t]
-            a_prev = self.alpha_bar[t_prev]
+            a_t = self.alpha_bar[int(t.item())]
+            a_prev = torch.tensor(
+                1.0,
+                device=self.device,
+                dtype=self.alpha_bar.dtype
+            ) if int(t_prev.item()) < 0 else self.alpha_bar[int(t_prev.item())]
 
             a_t = a_t.view(1, 1, 1, 1)
             a_prev = a_prev.view(1, 1, 1, 1)
@@ -73,19 +78,20 @@ class DDIM:
             x0 = (x - torch.sqrt(1 - a_t) * eps) / torch.sqrt(a_t)
             x0 = x0.clamp(-1, 1)  # 🔥 важный стабилизатор
 
+            eps_num = 1e-8
             # DDIM формула
             sigma = (
-                self.cfg.eta
-                * torch.sqrt((1 - a_prev) / (1 - a_t))
-                * torch.sqrt(1 - a_t / a_prev)
+                    self.cfg.eta
+                    * torch.sqrt((1 - a_prev) / (1 - a_t + eps_num))
+                    * torch.sqrt(torch.clamp(1 - a_t / (a_prev + eps_num), min=0.0))
             )
 
             noise = torch.randn_like(x) if self.cfg.eta > 0 else 0.0
 
             x = (
-                torch.sqrt(a_prev) * x0
-                + torch.sqrt(1 - a_prev - sigma**2) * eps
-                + sigma * noise
+                    torch.sqrt(a_prev) * x0
+                    + torch.sqrt(torch.clamp(1 - a_prev - sigma ** 2, min=0.0)) * eps
+                    + sigma * noise
             )
 
         return x
