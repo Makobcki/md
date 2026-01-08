@@ -86,6 +86,8 @@ export default function TrainPage() {
   };
 
   const lastMetric = metrics[metrics.length - 1];
+  const progressMax = lastMetric?.max_steps || 0;
+  const progressValue = lastMetric?.step ?? 0;
 
   return (
     <div className="container">
@@ -103,9 +105,17 @@ export default function TrainPage() {
             <>
               <span>elapsed: {Math.round(lastMetric.elapsed_sec)}s</span>
               <span>ETA: {Math.round(lastMetric.eta_sec)}s</span>
+              <span>s/step: {lastMetric.sec_per_step?.toFixed(3)}</span>
             </>
           )}
         </div>
+        {status.active && (
+          <progress
+            style={{ width: "100%" }}
+            value={progressMax ? progressValue : undefined}
+            max={progressMax || undefined}
+          />
+        )}
         {command.length > 0 && (
           <div className="muted">Command: {command.join(" ")}</div>
         )}

@@ -314,53 +314,56 @@ def main() -> None:
 
         ema.update(model)
 
-        if step % log_every == 0:
-            if device.type == "cuda":
-                torch.cuda.synchronize()
-            now = time.perf_counter()
-            elapsed = now - last_log_time
-            steps_done = step - last_log_step if step > last_log_step else 1
-            images = steps_done * int(cfg["batch_size"]) * grad_accum
-            img_per_sec = images / max(elapsed, 1e-9)
-            peak_mem = (
-                torch.cuda.max_memory_allocated(device) / (1024**2)
-                if device.type == "cuda"
-                else 0.0
-            )
-            total_elapsed = now - start_time
-            steps_left = int(cfg["max_steps"]) - step - 1
-            step_time = (now - last_step_time) / max(steps_done, 1)
-            eta_h = round(steps_left * step_time / 360, 3)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        now = time.perf_counter()
+        elapsed = now - last_log_time
+        steps_done = step - last_log_step if step > last_log_step else 1
+        images = steps_done * int(cfg["batch_size"]) * grad_accum
+        img_per_sec = images / max(elapsed, 1e-9)
+        peak_mem = (
+            torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+            if device.type == "cuda"
+            else 0.0
+        )
+        total_elapsed = now - start_time
+        steps_left = int(cfg["max_steps"]) - step - 1
+        step_time = (now - last_step_time) / max(steps_done, 1)
+        eta_sec = steps_left * step_time
 
-            if not webui_mode:
-                pbar.set_postfix({"loss": total_loss, "img/s": f"{img_per_sec:.1f}", "mem(MB)": f"{peak_mem:.0f}"})
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "step": step,
-                    "loss": total_loss,
-                    "img_per_sec": img_per_sec,
-                    "peak_mem_mb": peak_mem,
-                    "elapsed_sec": total_elapsed,
-                    "eta_h": eta_h,
-                }, ensure_ascii=False) + "\n")
-            if webui_mode:
-                metric_line = json.dumps({
-                    "type": "metric",
-                    "step": step,
-                    "loss": total_loss,
-                    "elapsed_sec": total_elapsed,
-                    "eta_h": eta_h,
-                }, ensure_ascii=False)
-                print(metric_line)
-                if metrics_path:
-                    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(metrics_path, "a", encoding="utf-8") as f:
-                        f.write(metric_line + "\n")
-            last_log_time = now
-            last_log_step = step
-            last_step_time = now
-            if device.type == "cuda":
-                torch.cuda.reset_peak_memory_stats(device)
+        if not webui_mode:
+            pbar.set_postfix({"loss": total_loss, "img/s": f"{img_per_sec:.1f}", "mem(MB)": f"{peak_mem:.0f}"})
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "step": step,
+                "loss": total_loss,
+                "img_per_sec": img_per_sec,
+                "peak_mem_mb": peak_mem,
+                "elapsed_sec": total_elapsed,
+                "eta_sec": eta_sec,
+                "sec_per_step": step_time,
+                "max_steps": int(cfg["max_steps"]),
+            }, ensure_ascii=False) + "\n")
+        if webui_mode:
+            metric_line = json.dumps({
+                "type": "metric",
+                "step": step,
+                "loss": total_loss,
+                "elapsed_sec": total_elapsed,
+                "eta_sec": eta_sec,
+                "sec_per_step": step_time,
+                "max_steps": int(cfg["max_steps"]),
+            }, ensure_ascii=False)
+            print(metric_line)
+            if metrics_path:
+                metrics_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(metrics_path, "a", encoding="utf-8") as f:
+                    f.write(metric_line + "\n")
+        last_log_time = now
+        last_log_step = step
+        last_step_time = now
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
 
         pbar.update(1)
 

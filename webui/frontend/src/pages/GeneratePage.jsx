@@ -123,6 +123,9 @@ export default function GeneratePage() {
           <button className="danger" onClick={handleStop} disabled={!status.active}>Stop</button>
           <span className="status-pill">{status.active ? "running" : "stopped"}</span>
         </div>
+        {status.active && status.run.run_type === "sample" && (
+          <progress style={{ width: "100%" }} />
+        )}
         {commandText && <div className="muted">Command: {commandText}</div>}
       </div>
 

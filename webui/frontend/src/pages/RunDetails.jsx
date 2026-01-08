@@ -12,6 +12,7 @@ export default function RunDetails() {
   const [stderr, setStderr] = useState([]);
   const [metrics, setMetrics] = useState([]);
   const [checkpoints, setCheckpoints] = useState([]);
+  const [samples, setSamples] = useState([]);
 
   useEffect(() => {
     const load = async () => {
@@ -29,6 +30,12 @@ export default function RunDetails() {
       setMetrics(metricsData.items || []);
       const ckptData = await api.listCheckpoints();
       setCheckpoints(ckptData.items || []);
+      const sampleData = await api.listSamples();
+      setSamples(
+        (sampleData.items || []).filter((path) =>
+          path.includes(`/webui_runs/${runId}/samples/`)
+        )
+      );
     };
     load();
   }, [runId]);
@@ -72,6 +79,20 @@ export default function RunDetails() {
               <li key={ckpt} className="muted">{ckpt}</li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {samples.length > 0 && (
+        <div className="card">
+          <h3>Samples</h3>
+          <div className="grid gallery">
+            {samples.map((item) => {
+              const marker = "webui_runs/";
+              const idx = item.indexOf(marker);
+              const url = idx === -1 ? null : `http://127.0.0.1:8000/runs/${item.slice(idx + marker.length)}`;
+              return url ? <img key={item} src={url} alt="sample" /> : null;
+            })}
+          </div>
         </div>
       )}
 

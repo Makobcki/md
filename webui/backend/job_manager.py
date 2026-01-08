@@ -23,6 +23,7 @@ class RunRecord:
     status: str
     command: List[str]
     created_at: str
+    pid: Optional[int]
     started_at: str
     ended_at: Optional[str]
     exit_code: Optional[int]
@@ -57,7 +58,13 @@ class JobManager:
             return
         data = json.loads(self.state_path.read_text(encoding="utf-8"))
         for item in data.get("runs", []):
+            if "pid" not in item:
+                item["pid"] = None
             self.runs[item["run_id"]] = RunRecord(**item)
+        for run in self.runs.values():
+            if run.status == "running" and run.pid and self._pid_alive(run.pid):
+                self.current_run_id = run.run_id
+                break
 
     def _save_state(self) -> None:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -66,6 +73,13 @@ class JobManager:
 
     def _new_run_id(self) -> str:
         return f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+    def _pid_alive(self, pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
 
     def _write_notes(self, run_dir: Path, notes: Dict[str, Any]) -> None:
         notes_path = run_dir / "notes.json"
@@ -87,6 +101,14 @@ class JobManager:
         if not self.current_run_id:
             return {"active": False}
         run = self.runs[self.current_run_id]
+        if run.pid and not self._pid_alive(run.pid) and self.process is None:
+            run.status = "failed"
+            run.exit_code = -1
+            run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            run.pid = None
+            self.current_run_id = None
+            self._save_state()
+            return {"active": False}
         return {"active": True, "run": asdict(run)}
 
     def list_checkpoints(self) -> List[str]:
@@ -120,6 +142,7 @@ class JobManager:
         self.process = proc
         self.current_run_id = run.run_id
         run.status = "running"
+        run.pid = proc.pid
         run.started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         self._save_state()
 
@@ -155,6 +178,7 @@ class JobManager:
             stderr_f.close()
             run.exit_code = proc.returncode
             run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            run.pid = None
             if run.status == "stopping" and proc.returncode == 0:
                 run.status = "stopped"
             elif proc.returncode == 0:
@@ -176,6 +200,10 @@ class JobManager:
         with self.lock:
             if self.process is not None:
                 raise RuntimeError("Another job is running.")
+            if self.current_run_id:
+                run = self.runs[self.current_run_id]
+                if run.pid and self._pid_alive(run.pid):
+                    raise RuntimeError("Another job is running.")
             run_id = self._new_run_id()
             run_dir = self.runs_dir / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -198,6 +226,7 @@ class JobManager:
                 status="queued",
                 command=cmd,
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                pid=None,
                 started_at="",
                 ended_at=None,
                 exit_code=None,
@@ -224,6 +253,10 @@ class JobManager:
         with self.lock:
             if self.process is not None:
                 raise RuntimeError("Another job is running.")
+            if self.current_run_id:
+                run = self.runs[self.current_run_id]
+                if run.pid and self._pid_alive(run.pid):
+                    raise RuntimeError("Another job is running.")
             run_id = self._new_run_id()
             run_dir = self.runs_dir / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -236,9 +269,23 @@ class JobManager:
                 "sample.py",
             ]
             output_path = args.get("out")
+            notes: Dict[str, Any] = {"args": args}
             if not output_path:
-                output_path = str(samples_dir / "sample.png")
-                args["out"] = output_path
+                output_path = samples_dir / "sample.png"
+            else:
+                output_path = Path(output_path)
+                if output_path.is_absolute():
+                    resolved = output_path.resolve()
+                    try:
+                        resolved.relative_to(self.repo_root.resolve())
+                    except ValueError:
+                        output_path = samples_dir / output_path.name
+                        notes["warning"] = "output path outside repo; rewritten into run samples"
+                    else:
+                        output_path = resolved
+                else:
+                    output_path = samples_dir / output_path.name
+            args["out"] = str(output_path)
 
             for key, value in args.items():
                 flag = f"--{key}"
@@ -254,6 +301,7 @@ class JobManager:
                 status="queued",
                 command=cmd,
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                pid=None,
                 started_at="",
                 ended_at=None,
                 exit_code=None,
@@ -262,12 +310,12 @@ class JobManager:
                 log_stdout=str(run_dir / "logs" / "sample.log"),
                 log_stderr=str(run_dir / "logs" / "sample.err.log"),
                 metrics_path=None,
-                output_path=output_path,
-                notes={"args": args},
+                output_path=str(output_path),
+                notes=notes,
             )
             self.runs[run_id] = run
             self._save_state()
-            self._write_notes(run_dir, {"type": "sample", "args": args, "output": output_path})
+            self._write_notes(run_dir, {"type": "sample", "args": args, "output": str(output_path), **notes})
 
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
@@ -277,6 +325,46 @@ class JobManager:
     def stop_current(self, timeout_int: int = 8, timeout_term: int = 5) -> Optional[RunRecord]:
         with self.lock:
             if self.process is None or self.current_run_id is None:
+                if self.current_run_id:
+                    run = self.runs[self.current_run_id]
+                    if run.pid and self._pid_alive(run.pid):
+                        run.status = "stopping"
+                        self._save_state()
+                        try:
+                            os.kill(run.pid, signal.SIGINT)
+                        except OSError:
+                            return run
+                        deadline = time.time() + timeout_int
+                        while time.time() < deadline:
+                            if not self._pid_alive(run.pid):
+                                run.status = "stopped"
+                                run.exit_code = 0
+                                run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                                run.pid = None
+                                self.current_run_id = None
+                                self._save_state()
+                                return run
+                            time.sleep(0.2)
+                        try:
+                            os.kill(run.pid, signal.SIGTERM)
+                        except OSError:
+                            return run
+                        deadline = time.time() + timeout_term
+                        while time.time() < deadline:
+                            if not self._pid_alive(run.pid):
+                                run.status = "stopped"
+                                run.exit_code = 0
+                                run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                                run.pid = None
+                                self.current_run_id = None
+                                self._save_state()
+                                return run
+                            time.sleep(0.2)
+                        try:
+                            os.kill(run.pid, signal.SIGKILL)
+                        except OSError:
+                            return run
+                        return run
                 return None
             run = self.runs[self.current_run_id]
             run.status = "stopping"
