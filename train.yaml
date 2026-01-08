@@ -5,10 +5,11 @@ data_root: ./data/raw
 split: train
 image_size: 384
 num_workers: 8
+prefetch_factor: 2
 
 # =========================
-# training
-# =========================
+# training===
+# ======================
 seed: 42
 deterministic: false
 batch_size: 4

@@ -91,14 +91,11 @@ class ResizePadCrop:
         if w3 == s and h3 == s:
             return img
 
-        if self.mode == "center":
-            x0 = (w3 - s) // 2
-            y0 = (h3 - s) // 2
-        else:
-            x0 = random.randint(0, w3 - s)
-            y0 = random.randint(0, h3 - s)
-
-        return img.crop((x0, y0, x0 + s, y0 + s))
+        if self.mode == "random":
+            w2, h2 = img.size
+            x0 = random.randint(0, w2 - s)
+            y0 = random.randint(0, h2 - s)
+            return img.crop((x0, y0, x0 + s, y0 + s))
 
 
 class ImageFolderRecursive(Dataset):

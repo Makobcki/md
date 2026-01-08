@@ -28,7 +28,7 @@ def get_snr_weights(ddpm, t, snr_gamma=5.0):
     alpha_bar = ddpm.alpha_bar[t].clamp(min=eps, max=1.0 - eps)
     snr = alpha_bar / (1.0 - alpha_bar + eps)
     gamma = torch.full_like(snr, float(snr_gamma))
-    return torch.minimum(snr, gamma) / (snr + eps)
+    return torch.minimum(snr, gamma) / (snr + 1.0)
 
 
 def _seed_worker(worker_id: int) -> None:
@@ -149,7 +149,7 @@ def main() -> None:
         "generator": generator,
     }
     if use_workers:
-        dl_kwargs["prefetch_factor"] = 4
+        dl_kwargs["prefetch_factor"] = int(cfg.get("prefetch_factor", 2))
 
     dl = DataLoader(ds, **dl_kwargs)
 
@@ -330,7 +330,7 @@ def main() -> None:
             total_elapsed = now - start_time
             steps_left = int(cfg["max_steps"]) - step - 1
             step_time = (now - last_step_time) / max(steps_done, 1)
-            eta_sec = steps_left * step_time
+            eta_h = round(steps_left * step_time / 360, 3)
 
             if not webui_mode:
                 pbar.set_postfix({"loss": total_loss, "img/s": f"{img_per_sec:.1f}", "mem(MB)": f"{peak_mem:.0f}"})
@@ -341,7 +341,7 @@ def main() -> None:
                     "img_per_sec": img_per_sec,
                     "peak_mem_mb": peak_mem,
                     "elapsed_sec": total_elapsed,
-                    "eta_sec": eta_sec,
+                    "eta_h": eta_h,
                 }, ensure_ascii=False) + "\n")
             if webui_mode:
                 metric_line = json.dumps({
@@ -349,7 +349,7 @@ def main() -> None:
                     "step": step,
                     "loss": total_loss,
                     "elapsed_sec": total_elapsed,
-                    "eta_sec": eta_sec,
+                    "eta_h": eta_h,
                 }, ensure_ascii=False)
                 print(metric_line)
                 if metrics_path:
