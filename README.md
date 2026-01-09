@@ -13,13 +13,13 @@
 
 ## Возможности
 
-- 🧠 **U-Net** с residual blocks и spatial self-attention  
-- 🔁 **v-prediction** (как в современных diffusion-моделях)  
-- ⚖️ **Min-SNR loss weighting** — стабильное обучение  
-- 🌊 **DDIM sampling** (быстро и детерминированно)  
-- 🧮 **EMA** для качественного инференса  
-- 🚀 Оптимизирован под **8 GB VRAM** (AMP, SDPA, grad-checkpoint)  
-- 📦 Полностью **оффлайн**, без внешних зависимостей и API  
+- **U-Net** с residual blocks и spatial self-attention  
+- **v-prediction** (как в современных diffusion-моделях)  
+- **Min-SNR loss weighting** — стабильное обучение  
+- **DDIM sampling** (быстро и детерминированно)  
+- **EMA** для качественного инференса  
+- Оптимизирован под **8 GB VRAM** (AMP, SDPA, grad-checkpoint)  
+- Полностью **оффлайн**, без внешних зависимостей и API  
 
 ---
 
