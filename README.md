@@ -24,9 +24,9 @@
 ---
 
 ## Структура проекта
-
+```
 md
-├─ train.py            # обучение
+├─ train.py # обучение
 ├─ sample.py           # инференс (DDIM)
 ├─ sanity_check.py     # быстрый тест пайплайна
 ├─ train.yaml          # конфигурация обучения
@@ -40,7 +40,7 @@ md
 │  └─ utils.py         # EMA, ckpt, seed, metadata
 └─ runs/
 └─ ...              # чекпоинты и логи
-
+```
 
 ---
 
@@ -64,7 +64,7 @@ pip install torch torchvision pyyaml pillow numpy tqdm
 
 Ожидаемая структура:
 
-
+```
 data/raw/
 └─ people/
    ├─ train/
@@ -73,7 +73,7 @@ data/raw/
    │  └─ ...
    ├─ val/
    └─ test/
-
+```
 
 * изображения RGB,
 * произвольные разрешения (будут приведены к `image_size`),
