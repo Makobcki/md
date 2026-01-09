@@ -88,6 +88,25 @@ def _save_yaml(path: Path, obj: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(_yaml_safe(obj), f, sort_keys=False, allow_unicode=True)
 
+def _normalize_state_dict_keys(sd: dict) -> dict:
+    """
+    Делает state_dict совместимым между:
+    - torch.compile (ключи начинаются с _orig_mod.)
+    - DDP (ключи начинаются с module.)
+    """
+    if not isinstance(sd, dict):
+        return sd
+
+    out = {}
+    for k, v in sd.items():
+        nk = k
+        if nk.startswith("_orig_mod."):
+            nk = nk[len("_orig_mod."):]
+        if nk.startswith("module."):
+            nk = nk[len("module."):]
+        out[nk] = v
+    return out
+
 def _get_autocast_device(device: torch.device) -> str:
     return "cuda" if device.type == "cuda" else "cpu"
 
@@ -114,6 +133,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.set_float32_matmul_precision("high")
@@ -153,7 +173,7 @@ def main() -> None:
 
     dl = DataLoader(ds, **dl_kwargs)
 
-    model = UNet(
+    base_model = UNet(
         image_channels=3,
         base_channels=int(cfg["base_channels"]),
         channel_mults=tuple(cfg["channel_mults"]),
@@ -165,18 +185,19 @@ def main() -> None:
         attn_head_dim=int(cfg.get("attn_head_dim", 32)),
     ).to(device, memory_format=torch.channels_last)
 
+    model = base_model
     if bool(cfg.get("compile", False)) and hasattr(torch, "compile"):
-        model = torch.compile(model)
+        model = torch.compile(base_model)
 
     opt = torch.optim.AdamW(
-        model.parameters(),
+        base_model.parameters(),
         lr=float(cfg["lr"]),
         weight_decay=float(cfg["weight_decay"]),
         fused=(device.type == "cuda"),
     )
 
     scaler = torch.amp.GradScaler("cuda", enabled=bool(cfg["amp"]) and device.type == "cuda")
-    ema = EMA(model, decay=0.999)
+    ema = EMA(base_model, decay=0.999)
 
     diffusion = DDPM(DiffusionConfig(timesteps=int(cfg["timesteps"])), device=device)
 
@@ -185,8 +206,8 @@ def main() -> None:
     if resume:
         ck = load_ckpt(resume, device)
 
-        model_sd = model.state_dict()
-        ck_sd = ck["model"]
+        model_sd = base_model.state_dict()
+        ck_sd = _normalize_state_dict_keys(ck["model"])
 
         filtered = {}
         skipped = 0
@@ -202,20 +223,29 @@ def main() -> None:
                     exp = tuple(model_sd[k].shape) if k in model_sd else None
                     skipped_keys.append((k, tuple(v.shape), exp))
 
-        missing, unexpected = model.load_state_dict(filtered, strict=False)
+        missing, unexpected = base_model.load_state_dict(filtered, strict=False)
 
-        print(f"[LOAD] matched={len(filtered)} skipped={skipped}")
-        print(f"[LOAD] missing={len(missing)} unexpected={len(unexpected)}")
+        matched = len(filtered)
+        total = len(model_sd)
+        if matched == 0:
+            raise RuntimeError(
+                "Resume failed: matched=0. Похоже, чекпоинт сохранён из torch.compile "
+                "(ключи _orig_mod.*) или архитектура не совпадает. "
+                "Добавь нормализацию ключей state_dict (strip _orig_mod./module.)."
+            )
+
+        print(f"[LOAD] matched={matched} skipped={skipped} total={total}")
+        print(f"[LOAD] missing={len(missing)} unexpected={len(unexpected)} total={total}")
         print("[LOAD] first skipped examples:")
         for k, got, exp in skipped_keys:
             print("  ", k, "got", got, "expected", exp)
-        print(f"[LOAD] missing={len(missing)} unexpected={len(unexpected)}")
+        print(f"[LOAD] missing={len(missing)} unexpected={len(unexpected)} total={total}")
 
         # ВАЖНО: НЕ грузим optimizer/scaler/ema после изменения архитектуры
         if "opt" in ck and "scaler" in ck and "ema" in ck:
             opt.load_state_dict(ck["opt"])
             scaler.load_state_dict(ck["scaler"])
-            ema.shadow = ck["ema"]
+            ema.shadow = _normalize_state_dict_keys(ck["ema"])
         start_step = int(ck["step"]) + 1  # можно оставить 0, чтобы не путаться
 
         print("[RESUME] Loaded model.")
@@ -241,7 +271,9 @@ def main() -> None:
     last_log_step = start_step
     last_step_time = start_time
     if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(False)
 
     stop_requested = {"value": False}
 
@@ -280,18 +312,16 @@ def main() -> None:
 
                 # ВАЖНО: reduction="none", чтобы получить лосс для каждого примера в батче
                 loss_mse = F.mse_loss(pred, v_target, reduction="none")
-
-                # Усредняем по пространству [C, H, W], оставляя размер [B]
                 loss_mse = loss_mse.mean(dim=[1, 2, 3])
 
-                # if not torch.isfinite(loss_mse):
-                #     raise RuntimeError(f"NaN loss at step {step}")
-
-                # Теперь веса Min-SNR корректно умножаются на лосс каждого элемента батча
                 snr_gamma = float(cfg.get("min_snr_gamma", 5.0))
                 weights = get_snr_weights(diffusion, t, snr_gamma=snr_gamma)
 
                 loss = (loss_mse * weights).mean()
+
+                if not torch.isfinite(loss):
+                    raise RuntimeError(f"NaN/Inf loss at step {step}: {loss.item()}")
+
                 loss = loss / grad_accum
 
             total_loss += loss.detach().item()
@@ -312,58 +342,60 @@ def main() -> None:
         else:
             opt.step()
 
-        ema.update(model)
+        ema.update(base_model)
 
-        if device.type == "cuda":
-            torch.cuda.synchronize()
-        now = time.perf_counter()
-        elapsed = now - last_log_time
-        steps_done = step - last_log_step if step > last_log_step else 1
-        images = steps_done * int(cfg["batch_size"]) * grad_accum
-        img_per_sec = images / max(elapsed, 1e-9)
-        peak_mem = (
-            torch.cuda.max_memory_allocated(device) / (1024 ** 2)
-            if device.type == "cuda"
-            else 0.0
-        )
-        total_elapsed = now - start_time
-        steps_left = int(cfg["max_steps"]) - step - 1
-        step_time = (now - last_step_time) / max(steps_done, 1)
-        eta_sec = steps_left * step_time
+        if step % log_every == 0:
+            if device.type == "cuda":
+                torch.cuda.synchronize()
 
-        if not webui_mode:
-            pbar.set_postfix({"loss": total_loss, "img/s": f"{img_per_sec:.1f}", "mem(MB)": f"{peak_mem:.0f}"})
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
+            now = time.perf_counter()
+            elapsed = now - last_log_time
+            steps_done = step - last_log_step if step > last_log_step else 1
+            images = steps_done * int(cfg["batch_size"]) * grad_accum
+            img_per_sec = images / max(elapsed, 1e-9)
+
+            peak_mem = (
+                torch.cuda.max_memory_allocated(device) / (1024 ** 2)
+                if device.type == "cuda"
+                else 0.0
+            )
+
+            total_elapsed = now - start_time
+            steps_left = int(cfg["max_steps"]) - step - 1
+            step_time = elapsed / max(steps_done, 1)
+            eta_h = round(steps_left * step_time / 3600, 3)
+
+            if not webui_mode:
+                pbar.set_postfix({"loss": total_loss, "img/s": f"{img_per_sec:.1f}", "mem(MB)": f"{peak_mem:.0f}"})
+
+            line = json.dumps({
+                "type": "metric",
                 "step": step,
                 "loss": total_loss,
                 "img_per_sec": img_per_sec,
                 "peak_mem_mb": peak_mem,
                 "elapsed_sec": total_elapsed,
-                "eta_sec": eta_sec,
-                "sec_per_step": step_time,
-                "max_steps": int(cfg["max_steps"]),
-            }, ensure_ascii=False) + "\n")
-        if webui_mode:
-            metric_line = json.dumps({
-                "type": "metric",
-                "step": step,
-                "loss": total_loss,
-                "elapsed_sec": total_elapsed,
-                "eta_sec": eta_sec,
+                "eta_h": eta_h,
                 "sec_per_step": step_time,
                 "max_steps": int(cfg["max_steps"]),
             }, ensure_ascii=False)
-            print(metric_line)
-            if metrics_path:
-                metrics_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(metrics_path, "a", encoding="utf-8") as f:
-                    f.write(metric_line + "\n")
-        last_log_time = now
-        last_log_step = step
-        last_step_time = now
-        if device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(device)
+
+            # 1 файл — 1 строка
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+
+            if webui_mode:
+                print(line)
+                if metrics_path:
+                    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(metrics_path, "a", encoding="utf-8") as f:
+                        f.write(line + "\n")
+
+            last_log_time = now
+            last_log_step = step
+
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
 
         pbar.update(1)
 
@@ -371,7 +403,7 @@ def main() -> None:
             stop_path = out_dir / f"ckpt_stop_{step:07d}.pt"
             save_ckpt(str(stop_path), {
                 "step": step,
-                "model": model.state_dict(),
+                "model": base_model.state_dict(),
                 "opt": opt.state_dict(),
                 "scaler": scaler.state_dict(),
                 "ema": ema.shadow,

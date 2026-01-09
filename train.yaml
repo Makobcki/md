@@ -41,8 +41,8 @@ dropout: 0.1
 # performance / memory
 # =========================
 amp: true
-compile: false
-grad_checkpoint: true
+compile: true
+grad_checkpoint: false
 grad_clip_norm: 1.0
 
 # =========================
@@ -56,5 +56,5 @@ attn_head_dim: 32
 # outputs
 # =========================
 out_dir: ./runs/ddpm_people_384
-resume_ckpt: ""
+resume_ckpt: "./runs/ddpm_people_384/ckpt_stop_0070391.pt"
 
