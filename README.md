@@ -54,8 +54,8 @@ pip install torch torchvision pyyaml pillow numpy tqdm
 
 Рекомендуется:
 
-* Python **3.10+**
-* PyTorch **≥ 2.1**
+* Python **3.13+**
+* PyTorch **2.1+**
 * CUDA **12+**
 
 ---
