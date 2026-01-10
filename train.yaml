@@ -40,6 +40,7 @@ text_layers: 4
 text_heads: 4
 text_max_len: 64
 vocab_size: 50000
+use_scale_shift_norm: true
 
 cond_drop_prob: 0.10
 
@@ -49,3 +50,6 @@ grad_clip_norm: 1.0
 ema_decay: 0.999
 resume_ckpt: ""
 deterministic: false
+sanity_overfit_steps: 100
+sanity_overfit_images: 2
+sanity_overfit_max_loss: 0.1

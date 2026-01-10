@@ -12,6 +12,7 @@ from PIL import Image
 
 from ddpm.data import SimpleTokenizer, TextConfig
 from ddpm.model import UNet, UNetConfig
+from ddpm.utils import EMA, load_ckpt
 
 
 @dataclass(frozen=True)
@@ -127,14 +128,16 @@ def main():
         torch.backends.cuda.enable_mem_efficient_sdp(True)
         torch.backends.cuda.enable_math_sdp(False)
 
-    ck = torch.load(args.ckpt, map_location="cpu")
+    ck = load_ckpt(args.ckpt, device)
     cfg = ck.get("cfg", {})
-    vocab_path = cfg.get("vocab_path")
-    if not vocab_path:
-        raise RuntimeError("Checkpoint cfg must contain vocab_path (path to vocab.json).")
 
-    with open(vocab_path, "r", encoding="utf-8") as f:
-        vocab = json.load(f)
+    vocab = ck.get("tokenizer_vocab")
+    if vocab is None:
+        vocab_path = cfg.get("vocab_path")
+        if not vocab_path:
+            raise RuntimeError("Checkpoint must contain tokenizer_vocab or vocab_path.")
+        with open(vocab_path, "r", encoding="utf-8") as f:
+            vocab = json.load(f)
 
     text_cfg = TextConfig(
         vocab_size=len(vocab),
@@ -158,18 +161,16 @@ def main():
         text_layers=int(cfg.get("text_layers", 4)),
         text_heads=int(cfg.get("text_heads", 4)),
         text_max_len=int(cfg.get("text_max_len", 64)),
+        use_scale_shift_norm=bool(cfg.get("use_scale_shift_norm", False)),
     )
 
     model = UNet(unet_cfg).to(device)
     model.load_state_dict(ck["model"], strict=True)
 
     if ck.get("ema") is not None:
-        ema_sd = ck["ema"]
-        msd = model.state_dict()
-        for k, v in ema_sd.items():
-            if k in msd and msd[k].shape == v.shape:
-                msd[k].copy_(v)
-        model.load_state_dict(msd, strict=False)
+        ema = EMA(model)
+        ema.shadow = ck["ema"]
+        ema.copy_to(model)
 
     model.eval()
 
