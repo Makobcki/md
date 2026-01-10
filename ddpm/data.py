@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -21,6 +22,7 @@ class DanbooruConfig:
     root: str  # ./data/raw/Danbooru
     image_dir: str = "image_512"
     meta_dir: str = "meta"
+    tags_dir: str = "tags"
     caption_field: str = "caption_llava_34b_no_tags_short"
     min_tag_count: int = 8          # danbooru_post.tag_count >= min_tag_count
     require_512: bool = True        # пропускать всё, что не 512x512
@@ -31,6 +33,7 @@ class DanbooruConfig:
 
 
 _ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+_GENDER_TAG_RE = re.compile(r"^\d+(?:boy|boys|girl|girls)$")
 
 
 # ----------------------------
@@ -78,21 +81,37 @@ def _load_failed_list(path: Path) -> set[str]:
     return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
 
 
+def _read_tags_file(path: Path) -> Optional[tuple[list[str], list[str]]]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip() or line == ""]
+    if not lines:
+        return None
+    first = lines[0] if len(lines) > 0 else ""
+    second = lines[1] if len(lines) > 1 else ""
+    primary = [t.strip() for t in first.split(",") if t.strip()]
+    gender = [t for t in second.split() if _GENDER_TAG_RE.match(t)]
+    return primary, gender
+
+
 def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
     """
     Возвращает (train_entries, val_entries).
-    entry: {"md5":..., "img":..., "caption":...}
+    entry: {"md5":..., "img":..., "caption":..., "tags_primary":..., "tags_gender":...}
     """
     root = Path(cfg.root)
     meta_dir = root / cfg.meta_dir
     img_dir = root / cfg.image_dir
+    tags_dir = root / cfg.tags_dir
     cache_dir = root / cfg.cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
     failed = _load_failed_list(root / cfg.failed_list)
 
     cache_key = (
         f"danbooru_index_{cfg.caption_field}_tags{cfg.min_tag_count}"
-        f"_req512{int(cfg.require_512)}_val{cfg.val_ratio}.jsonl"
+        f"_req512{int(cfg.require_512)}_val{cfg.val_ratio}_tagsdir{cfg.tags_dir}.jsonl"
     )
     cache_path = cache_dir / cache_key
 
@@ -139,6 +158,14 @@ def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
             continue
         img_path = candidates[0]
 
+        tags_path = tags_dir / f"{md5}.txt"
+        if not tags_path.exists():
+            continue
+        tag_data = _read_tags_file(tags_path)
+        if not tag_data:
+            continue
+        tags_primary, tags_gender = tag_data
+
         if cfg.require_512:
             try:
                 with Image.open(img_path) as im:
@@ -147,7 +174,13 @@ def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
             except Exception:
                 continue
 
-        entry = {"md5": md5, "img": str(img_path), "caption": cap}
+        entry = {
+            "md5": md5,
+            "img": str(img_path),
+            "caption": cap,
+            "tags_primary": tags_primary,
+            "tags_gender": tags_gender,
+        }
         split = "val" if _split_is_val(md5, cfg.val_ratio) else "train"
         if split == "val":
             val_entries.append(entry)
@@ -196,15 +229,35 @@ class DanbooruDataset(Dataset):
         e = self.entries[idx]
         img = self._load_image(e["img"])
         cap = e["caption"]
+        tags_primary = list(e.get("tags_primary", []))
+        tags_gender = list(e.get("tags_gender", []))
 
         # classifier-free guidance training: drop text sometimes
-        if self.cond_drop_prob > 0 and self.rng.random() < self.cond_drop_prob:
+        drop_cond = self.cond_drop_prob > 0 and self.rng.random() < self.cond_drop_prob
+        if drop_cond:
             cap = ""
 
         if self.tokenizer is None:
             return img, cap
 
-        ids, mask = self.tokenizer.encode(cap)
+        text = cap
+        if drop_cond:
+            text = ""
+        elif cap:
+            ids_cap, mask_cap = self.tokenizer.encode(cap)
+            cap_len = int(mask_cap.sum().item()) - 2  # exclude BOS/EOS
+            if cap_len < 40:
+                extra_tags = tags_primary[:5]
+            else:
+                extra_tags = []
+            all_tags = extra_tags + tags_gender
+            if all_tags:
+                tag_text = " ".join(all_tags).strip()
+                text = f"{tag_text} {cap}".strip()
+        elif tags_gender:
+            text = " ".join(tags_gender).strip()
+
+        ids, mask = self.tokenizer.encode(text)
         return img, ids, mask
 
 
