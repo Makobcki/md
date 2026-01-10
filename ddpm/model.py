@@ -1,270 +1,304 @@
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-def timestep_embedding(timesteps: torch.Tensor, dim: int) -> torch.Tensor:
+def _gn_groups(c: int) -> int:
+    for g in (32, 16, 8, 4, 2):
+        if c % g == 0:
+            return g
+    return 1
+
+
+def timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
     """
-    Sinusoidal embedding: [B] -> [B, dim]
+    sinusoidal embedding: [B] -> [B, dim]
     """
     half = dim // 2
     freqs = torch.exp(
-        -math.log(10000) * torch.arange(0, half, dtype=torch.float32, device=timesteps.device) / half
+        -math.log(10_000.0) * torch.arange(0, half, device=t.device, dtype=torch.float32) / float(half)
     )
-    args = timesteps.float()[:, None] * freqs[None]
-    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    args = t.float().unsqueeze(1) * freqs.unsqueeze(0)
+    emb = torch.cat([torch.cos(args), torch.sin(args)], dim=1)
     if dim % 2 == 1:
-        emb = F.pad(emb, (0, 1))
+        emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=1)
     return emb
 
 
-class SiLU(nn.Module):
+class TextEncoder(nn.Module):
+    def __init__(self, vocab_size: int, dim: int, n_layers: int, n_heads: int, max_len: int):
+        super().__init__()
+        self.dim = dim
+        self.max_len = max_len
+
+        self.tok = nn.Embedding(vocab_size, dim)
+        self.pos = nn.Embedding(max_len, dim)
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=dim,
+            nhead=n_heads,
+            dim_feedforward=dim * 4,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.enc = nn.TransformerEncoder(enc_layer, num_layers=n_layers)
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, ids: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
+        b, t = ids.shape
+        pos = torch.arange(0, t, device=ids.device).unsqueeze(0).expand(b, t)
+        x = self.tok(ids) + self.pos(pos)
+        key_padding = ~attn_mask  # True for PAD
+        x = self.enc(x, src_key_padding_mask=key_padding)
+        return self.norm(x)
+
+
+class SelfAttention2d(nn.Module):
+    def __init__(self, in_ch: int, heads: int, head_dim: int):
+        super().__init__()
+        inner = heads * head_dim
+        self.heads = heads
+        self.head_dim = head_dim
+        self.inner = inner
+
+        self.norm = nn.GroupNorm(_gn_groups(in_ch), in_ch, eps=1e-6)
+        self.to_qkv = nn.Conv2d(in_ch, 3 * inner, kernel_size=1, bias=False)
+        self.to_out = nn.Conv2d(inner, in_ch, kernel_size=1, bias=True)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.sigmoid(x)
+        b, c, h, w = x.shape
+        x_in = x
+        x = self.norm(x)
+        qkv = self.to_qkv(x)
+        q, k, v = qkv.chunk(3, dim=1)
+
+        hw = h * w
+        q = q.view(b, self.heads, self.head_dim, hw).transpose(2, 3)  # [B, heads, HW, d]
+        k = k.view(b, self.heads, self.head_dim, hw).transpose(2, 3)
+        v = v.view(b, self.heads, self.head_dim, hw).transpose(2, 3)
+
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+        out = out.transpose(2, 3).contiguous().view(b, self.inner, h, w)
+        out = self.to_out(out)
+        return x_in + out
 
 
-def _gn(ch: int) -> nn.GroupNorm:
-    # безопасно для любых ch: groups <= ch и делит ch
-    # для типичных ch (64/128/192/256) GroupNorm(32, ch) ок
-    groups = 32
-    while ch % groups != 0:
-        groups //= 2
-        if groups <= 1:
-            groups = 1
-            break
-    return nn.GroupNorm(groups, ch)
+class CrossAttention2d(nn.Module):
+    def __init__(self, in_ch: int, ctx_dim: int, heads: int, head_dim: int):
+        super().__init__()
+        inner = heads * head_dim
+        self.heads = heads
+        self.head_dim = head_dim
+        self.inner = inner
+
+        self.norm = nn.GroupNorm(_gn_groups(in_ch), in_ch, eps=1e-6)
+
+        self.to_q = nn.Conv2d(in_ch, inner, kernel_size=1, bias=False)
+        self.to_kv = nn.Linear(ctx_dim, 2 * inner, bias=False)
+        self.to_out = nn.Conv2d(inner, in_ch, kernel_size=1, bias=True)
+
+    def forward(self, x: torch.Tensor, ctx: torch.Tensor, ctx_mask: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.shape
+        x_in = x
+        x = self.norm(x)
+
+        q = self.to_q(x)  # [B, inner, H, W]
+        hw = h * w
+        q = q.view(b, self.heads, self.head_dim, hw).transpose(2, 3)  # [B, heads, HW, d]
+
+        kv = self.to_kv(ctx)  # [B, T, 2*inner]
+        k, v = kv.chunk(2, dim=-1)
+        k = k.view(b, -1, self.heads, self.head_dim).transpose(1, 2)  # [B, heads, T, d]
+        v = v.view(b, -1, self.heads, self.head_dim).transpose(1, 2)
+
+        # boolean mask for SDPA: True = keep, False = mask
+        attn_mask = ctx_mask.unsqueeze(1).unsqueeze(1)  # [B,1,1,T]
+
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+        out = out.transpose(2, 3).contiguous().view(b, self.inner, h, w)
+        out = self.to_out(out)
+        return x_in + out
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, tdim: int, dropout: float) -> None:
+    def __init__(self, in_ch: int, out_ch: int, time_dim: int, dropout: float):
         super().__init__()
-        self.norm1 = _gn(in_ch)
-        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.norm1 = nn.GroupNorm(_gn_groups(in_ch), in_ch, eps=1e-6)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
 
-        self.tproj = nn.Linear(tdim, out_ch)
+        self.tproj = nn.Linear(time_dim, out_ch)
+        self.norm2 = nn.GroupNorm(_gn_groups(out_ch), out_ch, eps=1e-6)
+        self.drop = nn.Dropout(dropout)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
 
-        self.norm2 = _gn(out_ch)
-        self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.skip = nn.Conv2d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else nn.Identity()
+        self.act = nn.SiLU()
 
-        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
-        self.act = SiLU()
-
-    def forward(self, x, t_emb=None):
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
         h = self.conv1(self.act(self.norm1(x)))
-
-        if t_emb is not None:
-            # t_emb: [B, emb_dim] → [B, C, 1, 1]
-            h = h + self.tproj(t_emb)[:, :, None, None]
-
-        h = self.conv2(self.act(self.norm2(h)))
-        return h + self.skip(x)
+        h = h + self.tproj(self.act(t_emb)).unsqueeze(-1).unsqueeze(-1)
+        h = self.conv2(self.drop(self.act(self.norm2(h))))
+        return self.skip(x) + h
 
 
 class Downsample(nn.Module):
-    def __init__(self, ch: int) -> None:
+    def __init__(self, ch: int):
         super().__init__()
-        self.conv = nn.Conv2d(ch, ch, 3, stride=2, padding=1)
+        self.conv = nn.Conv2d(ch, ch, kernel_size=3, stride=2, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
 
 
 class Upsample(nn.Module):
-    def __init__(self, ch: int) -> None:
+    def __init__(self, ch: int):
         super().__init__()
-        self.conv = nn.Conv2d(ch, ch, 3, padding=1)
+        self.conv = nn.Conv2d(ch, ch, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.interpolate(x, scale_factor=2.0, mode="nearest")
+        x = F.interpolate(x, scale_factor=2, mode="nearest")
         return self.conv(x)
 
 
-class SelfAttention2d(nn.Module):
-    """
-    Multi-head self-attention over spatial tokens (H*W).
-    """
-    def __init__(self, channels: int, heads: int = 4, head_dim: int = 32) -> None:
-        super().__init__()
-        inner = heads * head_dim
-        self.heads = heads
-        self.head_dim = head_dim
-
-        self.norm = _gn(channels)
-        self.to_qkv = nn.Conv2d(channels, inner * 3, 1, bias=False)
-        self.to_out = nn.Conv2d(inner, channels, 1)
-
-        # стабилизация
-        nn.init.zeros_(self.to_out.weight)
-        nn.init.zeros_(self.to_out.bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, c, h, w = x.shape
-        n = h * w
-
-        x_in = x
-        x = self.norm(x)
-
-        qkv = self.to_qkv(x)
-        q, k, v = qkv.chunk(3, dim=1)
-
-        # [B, heads, N, D]
-        q = q.view(b, self.heads, self.head_dim, n).permute(0, 1, 3, 2)
-        k = k.view(b, self.heads, self.head_dim, n).permute(0, 1, 3, 2)
-        v = v.view(b, self.heads, self.head_dim, n).permute(0, 1, 3, 2)
-
-        # Flash / SDPA (no NxN matrix)
-        # dropout_p=0.0 важно для train-стабильности
-        out = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=0.0,
-            is_causal=False
-        )  # [B, heads, N, D]
-
-        out = out.permute(0, 1, 3, 2).contiguous()
-        out = out.view(b, self.heads * self.head_dim, h, w)
-
-        return x_in + self.to_out(out)
+@dataclass(frozen=True)
+class UNetConfig:
+    image_channels: int = 3
+    base_channels: int = 64
+    channel_mults: Tuple[int, ...] = (1, 2, 3, 4)
+    num_res_blocks: int = 2
+    dropout: float = 0.1
+    attn_resolutions: Tuple[int, ...] = (32, 16)
+    attn_heads: int = 4
+    attn_head_dim: int = 32
+    vocab_size: int = 50_000
+    text_dim: int = 256
+    text_layers: int = 4
+    text_heads: int = 4
+    text_max_len: int = 64
 
 
 class UNet(nn.Module):
-    def __init__(
-        self,
-        image_channels: int = 3,
-        base_channels: int = 64,
-        channel_mults: Tuple[int, ...] = (1, 2, 3, 4),
-        num_res_blocks: int = 2,
-        dropout: float = 0.1,
-        grad_checkpoint: bool = False,
-        attn_resolutions: Tuple[int, ...] = (48,),
-        attn_heads: int = 4,
-        attn_head_dim: int = 32,
-    ) -> None:
+    """
+    UNet predicts v (v-prediction) with text conditioning (cross-attention).
+    """
+    def __init__(self, cfg: UNetConfig):
         super().__init__()
-        self.grad_checkpoint = grad_checkpoint
-        self.attn_resolutions = set(attn_resolutions)
+        self.cfg = cfg
 
-        tdim = base_channels * 4
+        time_dim = cfg.base_channels * 4
         self.time_mlp = nn.Sequential(
-            nn.Linear(base_channels, tdim),
-            SiLU(),
-            nn.Linear(tdim, tdim),
+            nn.Linear(cfg.base_channels, time_dim),
+            nn.SiLU(),
+            nn.Linear(time_dim, time_dim),
         )
 
-        self.in_conv = nn.Conv2d(image_channels, base_channels, 3, padding=1)
+        self.text_enc = TextEncoder(
+            vocab_size=cfg.vocab_size,
+            dim=cfg.text_dim,
+            n_layers=cfg.text_layers,
+            n_heads=cfg.text_heads,
+            max_len=cfg.text_max_len,
+        )
 
-        # --- Down ---
+        chs = [cfg.base_channels * m for m in cfg.channel_mults]
+        self.in_conv = nn.Conv2d(cfg.image_channels, chs[0], kernel_size=3, padding=1)
+
+        # Down
         self.down_blocks = nn.ModuleList()
+        self.down_sa = nn.ModuleList()
+        self.down_ca = nn.ModuleList()
         self.downsamples = nn.ModuleList()
-        self.down_attn = nn.ModuleList()
 
-        ch = base_channels
-        levels = []
-        for mult in channel_mults:
-            levels.append(base_channels * mult)
+        cur = chs[0]
+        for level, ch in enumerate(chs):
+            for _ in range(cfg.num_res_blocks):
+                self.down_blocks.append(ResBlock(cur, ch, time_dim=time_dim, dropout=cfg.dropout))
+                cur = ch
+                self.down_sa.append(SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim))
+                self.down_ca.append(CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim))
+            if level != len(chs) - 1:
+                self.downsamples.append(Downsample(cur))
 
-        for li, out_ch in enumerate(levels):
-            for _ in range(num_res_blocks):
-                self.down_blocks.append(ResBlock(ch, out_ch, tdim, dropout))
-                self.down_attn.append(SelfAttention2d(out_ch, attn_heads, attn_head_dim))
-                ch = out_ch
-            if li != len(levels) - 1:
-                self.downsamples.append(Downsample(ch))
+        # Mid
+        self.mid1 = ResBlock(cur, cur, time_dim=time_dim, dropout=cfg.dropout)
+        self.mid_sa = SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim)
+        self.mid_ca = CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim)
+        self.mid2 = ResBlock(cur, cur, time_dim=time_dim, dropout=cfg.dropout)
 
-        # --- Middle ---
-        self.mid1 = ResBlock(ch, ch, tdim, dropout)
-        self.mid_attn = SelfAttention2d(ch, attn_heads, attn_head_dim)
-        self.mid2 = ResBlock(ch, ch, tdim, dropout)
-
-        # --- Up ---
-        self.upsamples = nn.ModuleList()
+        # Up
         self.up_blocks = nn.ModuleList()
-        self.up_attn = nn.ModuleList()
+        self.up_sa = nn.ModuleList()
+        self.up_ca = nn.ModuleList()
+        self.upsamples = nn.ModuleList()
 
-        for li, out_ch in enumerate(reversed(levels)):
-            if li != 0:
-                self.upsamples.append(Upsample(ch))
-            for _ in range(num_res_blocks):
-                # skip всегда имеет out_ch каналов на этом уровне
-                self.up_blocks.append(ResBlock(ch + out_ch, out_ch, tdim, dropout))
-                self.up_attn.append(SelfAttention2d(out_ch, attn_heads, attn_head_dim))
-                ch = out_ch
+        for level in reversed(range(len(chs))):
+            ch = chs[level]
+            for _ in range(cfg.num_res_blocks):
+                self.up_blocks.append(ResBlock(cur + ch, ch, time_dim=time_dim, dropout=cfg.dropout))
+                cur = ch
+                self.up_sa.append(SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim))
+                self.up_ca.append(CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim))
+            if level != 0:
+                self.upsamples.append(Upsample(cur))
 
-        self.out_norm = _gn(ch)
-        self.out_conv = nn.Conv2d(ch, image_channels, 3, padding=1)
-        self.act = SiLU()
+        self.out_norm = nn.GroupNorm(_gn_groups(cur), cur, eps=1e-6)
+        self.out_conv = nn.Conv2d(cur, cfg.image_channels, kernel_size=3, padding=1)
+        self.act = nn.SiLU()
 
-        # Для корректного управления порядком samples
-        self._levels = levels
-        self._num_res_blocks = num_res_blocks
+    def _maybe_attend(self, x: torch.Tensor, sa: nn.Module, ca: nn.Module, ctx: torch.Tensor, ctx_mask: torch.Tensor) -> torch.Tensor:
+        h, w = x.shape[-2], x.shape[-1]
+        if (h in self.cfg.attn_resolutions) or (w in self.cfg.attn_resolutions):
+            x = sa(x)
+            x = ca(x, ctx, ctx_mask)
+        return x
 
-    def _maybe_ckpt(self, module: nn.Module, *args):
-        if self.grad_checkpoint and self.training:
-            return torch.utils.checkpoint.checkpoint(module, *args, use_reentrant=False)
-        return module(*args)
+    def forward(self, x: torch.Tensor, t: torch.Tensor, txt_ids: torch.Tensor, txt_mask: torch.Tensor) -> torch.Tensor:
+        te = timestep_embedding(t, self.cfg.base_channels)
+        te = self.time_mlp(te)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        # time emb
-        t_emb = timestep_embedding(t, self.in_conv.out_channels)
-        t_emb = self.time_mlp(t_emb)
+        ctx = self.text_enc(txt_ids, txt_mask)
 
         h = self.in_conv(x)
+        skips = []
 
-        # хранить skip ТОЛЬКО после ResBlock (это критично)
-        skips: List[torch.Tensor] = []
-
-        # --- Down ---
-        dbi = 0
+        bi = 0
         dsi = 0
-        for li, out_ch in enumerate(self._levels):
-            for _ in range(self._num_res_blocks):
-                h = self._maybe_ckpt(self.down_blocks[dbi], h, t_emb)
-
-                # attention только если текущий spatial есть в списке
-                hh, ww = h.shape[-2], h.shape[-1]
-                if hh in self.attn_resolutions and ww in self.attn_resolutions:
-                    h = self._maybe_ckpt(self.down_attn[dbi], h)
-
-                skips.append(h)  # только тут
-                dbi += 1
-
-            if li != len(self._levels) - 1:
+        for level in range(len(self.cfg.channel_mults)):
+            for _ in range(self.cfg.num_res_blocks):
+                h = self.down_blocks[bi](h, te)
+                h = self._maybe_attend(h, self.down_sa[bi], self.down_ca[bi], ctx, txt_mask)
+                skips.append(h)
+                bi += 1
+            if level != len(self.cfg.channel_mults) - 1:
                 h = self.downsamples[dsi](h)
                 dsi += 1
 
-        # --- Middle ---
-        h = self._maybe_ckpt(self.mid1, h, t_emb)
-        hh, ww = h.shape[-2], h.shape[-1]
-        if hh in self.attn_resolutions and ww in self.attn_resolutions:
-            h = self._maybe_ckpt(self.mid_attn, h)
-        h = self._maybe_ckpt(self.mid2, h, t_emb)
+        h = self.mid1(h, te)
+        h = self.mid_sa(h)
+        h = self.mid_ca(h, ctx, txt_mask)
+        h = self.mid2(h, te)
 
-        # --- Up ---
-        ubi = 0
+        ui = 0
         usi = 0
-        for li, out_ch in enumerate(reversed(self._levels)):
-            if li != 0:
+        for level in reversed(range(len(self.cfg.channel_mults))):
+            for _ in range(self.cfg.num_res_blocks):
+                skip = skips.pop()
+                if skip.shape[-2:] != h.shape[-2:]:
+                    skip = F.interpolate(skip, size=h.shape[-2:], mode="nearest")
+                h = torch.cat([h, skip], dim=1)
+                h = self.up_blocks[ui](h, te)
+                h = self._maybe_attend(h, self.up_sa[ui], self.up_ca[ui], ctx, txt_mask)
+                ui += 1
+            if level != 0:
                 h = self.upsamples[usi](h)
                 usi += 1
 
-            for _ in range(self._num_res_blocks):
-                skip = skips.pop()  # ✅ порядок строго обратный
-                # На всякий пожарный: привести spatial (может быть 1px разница из-за stride/ceil)
-                if skip.shape[-2:] != h.shape[-2:]:
-                    skip = F.interpolate(skip, size=h.shape[-2:], mode="nearest")
-
-                h = torch.cat([h, skip], dim=1)
-                h = self._maybe_ckpt(self.up_blocks[ubi], h, t_emb)
-
-                hh, ww = h.shape[-2], h.shape[-1]
-                if hh in self.attn_resolutions and ww in self.attn_resolutions:
-                    h = self._maybe_ckpt(self.up_attn[ubi], h)
-
-                ubi += 1
-
-        return self.out_conv(self.act(self.out_norm(h)))
+        h = self.out_conv(self.act(self.out_norm(h)))
+        return h

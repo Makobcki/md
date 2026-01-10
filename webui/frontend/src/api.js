@@ -1,4 +1,4 @@
-const API_BASE = "http://0.0.0.0:8000";
+const API_BASE = "http://127.0.0.1:8000";
 
 export async function fetchJson(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -35,5 +35,5 @@ export const api = {
 };
 
 export function wsUrl(path) {
-  return `ws://0.0.0.0:8000${path}`;
+  return `ws://127.0.0.1:8000${path}`;
 }
