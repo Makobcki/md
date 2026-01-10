@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
 from PIL import Image
 
-from ddpm.data import SimpleTokenizer, TextConfig
+from ddpm.text import BPETokenizer, TextConfig
 from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
 from ddpm.utils import EMA, load_ckpt
@@ -122,6 +121,57 @@ def heun_sample(
     return x0_final
 
 
+@torch.no_grad()
+def dpm_solver_sample(
+    model: UNet,
+    diffusion: Diffusion,
+    shape: Tuple[int, int, int, int],
+    txt_ids: torch.Tensor,
+    txt_mask: torch.Tensor,
+    steps: int = 30,
+    cfg_scale: float = 5.0,
+    uncond_ids: Optional[torch.Tensor] = None,
+    uncond_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    device = diffusion.device
+    b, _, _, _ = shape
+    x = torch.randn(shape, device=device)
+
+    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps, device=device).long()
+
+    def model_v(x_in: torch.Tensor, t_in: torch.Tensor) -> torch.Tensor:
+        v_cond = model(x_in, t_in, txt_ids, txt_mask)
+        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
+            v_un = model(x_in, t_in, uncond_ids, uncond_mask)
+            return v_un + cfg_scale * (v_cond - v_un)
+        return v_cond
+
+    for i in range(len(t_schedule) - 1):
+        t = t_schedule[i].repeat(b)
+        t_next = t_schedule[i + 1].repeat(b)
+
+        sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1)
+        sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1)
+
+        v = model_v(x, t)
+        x0 = diffusion.v_to_x0(x, t, v)
+        d = (x - x0) / sigma
+
+        # DPM-Solver++ (2nd order midpoint) style update in sigma space
+        sigma_mid = torch.sqrt(sigma * sigma_next)
+        t_mid = ((t + t_next) // 2).clamp(min=0)
+        x_mid = x + d * (sigma_mid - sigma)
+        v_mid = model_v(x_mid, t_mid)
+        x0_mid = diffusion.v_to_x0(x_mid, t_next, v_mid)
+        d_mid = (x_mid - x0_mid) / sigma_mid
+        x = x + d_mid * (sigma_next - sigma)
+
+    t_final = t_schedule[-1].repeat(b)
+    v_final = model_v(x, t_final)
+    x0_final = diffusion.v_to_x0(x, t_final, v_final)
+    return x0_final
+
+
 def _to_pil(x: torch.Tensor) -> Image.Image:
     x = (x.clamp(-1, 1) + 1.0) * 0.5
     x = (x * 255.0).byte().permute(1, 2, 0).cpu().numpy()
@@ -151,21 +201,19 @@ def main():
     ck = load_ckpt(args.ckpt, device)
     cfg = ck.get("cfg", {})
 
-    vocab = ck.get("tokenizer_vocab")
-    if vocab is None:
-        vocab_path = cfg.get("vocab_path")
-        if not vocab_path:
-            raise RuntimeError("Checkpoint must contain tokenizer_vocab or vocab_path.")
-        with open(vocab_path, "r", encoding="utf-8") as f:
-            vocab = json.load(f)
+    vocab_path = cfg.get("text_vocab_path")
+    merges_path = cfg.get("text_merges_path")
+    if not vocab_path or not merges_path:
+        raise RuntimeError("Checkpoint missing text_vocab_path/text_merges_path.")
 
     text_cfg = TextConfig(
-        vocab_size=len(vocab),
+        vocab_path=str(vocab_path),
+        merges_path=str(merges_path),
         max_len=int(cfg.get("text_max_len", 64)),
         lowercase=True,
         strip_punct=True,
     )
-    tok = SimpleTokenizer(vocab=vocab, text_cfg=text_cfg)
+    tok = BPETokenizer.from_files(vocab_path, merges_path, text_cfg)
 
     unet_cfg = UNetConfig(
         image_channels=3,
@@ -176,7 +224,7 @@ def main():
         attn_resolutions=tuple(cfg.get("attn_resolutions", [32, 16])),
         attn_heads=int(cfg.get("attn_heads", 4)),
         attn_head_dim=int(cfg.get("attn_head_dim", 32)),
-        vocab_size=len(vocab),
+        vocab_size=len(tok.vocab),
         text_dim=int(cfg.get("text_dim", 256)),
         text_layers=int(cfg.get("text_layers", 4)),
         text_heads=int(cfg.get("text_heads", 4)),

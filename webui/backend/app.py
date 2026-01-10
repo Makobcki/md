@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import yaml
 
 from .argparse_reader import parse_argparse_args
 from .job_manager import JobManager
@@ -62,6 +63,15 @@ app.add_middleware(
 
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/runs", StaticFiles(directory=str(RUNS_DIR)), name="runs")
+
+
+def _get_out_dir() -> Path:
+    cfg_path = ROOT_DIR / "train.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    out_dir = Path(cfg.get("out_dir", "./runs"))
+    if not out_dir.is_absolute():
+        out_dir = ROOT_DIR / out_dir
+    return out_dir
 
 
 class SampleRequest(BaseModel):
@@ -157,6 +167,34 @@ def update_train_config(payload: Dict[str, Any]) -> Dict[str, Any]:
 @app.get("/api/checkpoints")
 def list_checkpoints() -> Dict[str, Any]:
     return {"items": job_manager.list_checkpoints()}
+
+
+@app.get("/api/out_dir/summary")
+def get_out_dir_summary() -> Dict[str, Any]:
+    out_dir = _get_out_dir()
+    train_log = out_dir / "train_log.jsonl"
+    config_snapshot = out_dir / "config_snapshot.yaml"
+    run_meta = out_dir / "run_meta.yaml"
+
+    def _tail(path: Path, limit: int = 200) -> str:
+        if not path.exists():
+            return ""
+        lines = path.read_text(encoding="utf-8").splitlines()
+        return "\n".join(lines[-limit:])
+
+    return {
+        "out_dir": str(out_dir),
+        "train_log": {"path": str(train_log), "tail": _tail(train_log)},
+        "config_snapshot": {
+            "path": str(config_snapshot),
+            "content": config_snapshot.read_text(encoding="utf-8") if config_snapshot.exists() else "",
+        },
+        "run_meta": {
+            "path": str(run_meta),
+            "content": run_meta.read_text(encoding="utf-8") if run_meta.exists() else "",
+        },
+        "checkpoints": sorted([str(p) for p in out_dir.rglob("*.pt")]) if out_dir.exists() else [],
+    }
 
 
 @app.get("/api/sample/args")

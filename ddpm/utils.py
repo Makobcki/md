@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import os
 import random
@@ -10,7 +10,6 @@ import numpy as np
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, Mapping, MutableMapping
 
 
 _KNOWN_PREFIXES = ("_orig_mod.", "module.")
@@ -137,7 +136,7 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
 
 
 def build_run_metadata() -> Dict[str, Any]:
-    return {
+    meta = {
         "torch_version": torch.__version__,
         "cuda_available": torch.cuda.is_available(),
         "cuda_version": torch.version.cuda,
@@ -145,6 +144,15 @@ def build_run_metadata() -> Dict[str, Any]:
         "device_count": torch.cuda.device_count(),
         "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
     }
+    try:
+        import subprocess
+
+        meta["git_commit"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(Path.cwd()), stderr=subprocess.DEVNULL
+        ).decode("utf-8").strip()
+    except Exception:
+        meta["git_commit"] = None
+    return meta
 
 def strip_state_dict_prefixes(sd: dict, prefixes=("_orig_mod.", "module.")) -> dict:
     out = {}

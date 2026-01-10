@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-from ddpm.data import SimpleTokenizer, TextConfig
+from ddpm.text import BPETokenizer, TextConfig
 from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
 from ddpm.utils import EMA, load_ckpt, save_ckpt, seed_everything
@@ -24,14 +24,10 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seed_everything(args.seed, deterministic=True)
 
-    vocab = {
-        SimpleTokenizer.PAD: 0,
-        SimpleTokenizer.UNK: 1,
-        SimpleTokenizer.BOS: 2,
-        SimpleTokenizer.EOS: 3,
-    }
-    text_cfg = TextConfig(vocab_size=len(vocab), max_len=8, lowercase=True, strip_punct=True)
-    tokenizer = SimpleTokenizer(vocab=vocab, text_cfg=text_cfg)
+    vocab_path = "ddpm/bpe/vocab.json"
+    merges_path = "ddpm/bpe/merges.txt"
+    text_cfg = TextConfig(vocab_path=vocab_path, merges_path=merges_path, max_len=8, lowercase=True, strip_punct=True)
+    tokenizer = BPETokenizer.from_files(vocab_path, merges_path, text_cfg)
 
     unet_cfg = UNetConfig(
         image_channels=3,
@@ -42,7 +38,7 @@ def main() -> None:
         attn_resolutions=(16,),
         attn_heads=2,
         attn_head_dim=16,
-        vocab_size=len(vocab),
+        vocab_size=len(tokenizer.vocab),
         text_dim=64,
         text_layers=2,
         text_heads=2,
@@ -72,6 +68,12 @@ def main() -> None:
         if not torch.isfinite(alpha_bar_t).all():
             raise RuntimeError("alpha_bar[t] has NaN/Inf in sanity check")
         v_target = diffusion.v_target(x0, t, noise)
+        eps = diffusion.v_to_eps(xt, t, v_target)
+        x0_recon = diffusion.v_to_x0(xt, t, v_target)
+        if not torch.allclose(eps, noise, atol=1e-4, rtol=1e-4):
+            raise RuntimeError("v_to_eps mismatch in sanity check")
+        if not torch.allclose(x0_recon, x0, atol=1e-4, rtol=1e-4):
+            raise RuntimeError("v_to_x0 mismatch in sanity check")
 
         with torch.amp.autocast("cuda" if device.type == "cuda" else "cpu", enabled=device.type == "cuda"):
             pred = model(xt, t, ids, mask)
@@ -92,12 +94,13 @@ def main() -> None:
         "optimizer": opt.state_dict(),
         "scaler": scaler.state_dict(),
         "ema": ema.shadow,
-        "tokenizer_vocab": vocab,
         "cfg": {
             "image_size": args.image_size,
             "timesteps": diffusion.cfg.timesteps,
             "text_max_len": text_cfg.max_len,
             "prediction_type": "v",
+            "text_vocab_path": vocab_path,
+            "text_merges_path": merges_path,
         },
     })
 

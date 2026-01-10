@@ -3,15 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+from ddpm.text import BPETokenizer
 # ----------------------------
 # Configs
 # ----------------------------
@@ -27,90 +27,10 @@ class DanbooruConfig:
     val_ratio: float = 0.01         # 99/1
     seed: int = 42
     cache_dir: str = ".cache"       # внутри root
+    failed_list: str = "failed/md5.txt"
 
 
-@dataclass(frozen=True)
-class TextConfig:
-    vocab_size: int = 50_000
-    max_len: int = 64
-    lowercase: bool = True
-    strip_punct: bool = True
-
-
-# ----------------------------
-# Tokenizer (simple & offline)
-# ----------------------------
-
-_PUNCT_RE = re.compile(r"[^\w\s]+", flags=re.UNICODE)
-
-
-def _normalize_text(s: str, lowercase: bool, strip_punct: bool) -> str:
-    s = s.strip()
-    if lowercase:
-        s = s.lower()
-    if strip_punct:
-        s = _PUNCT_RE.sub(" ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-class SimpleTokenizer:
-    """
-    Простой оффлайн-токенизатор: whitespace + vocab по частотам.
-    """
-    PAD = "<pad>"
-    UNK = "<unk>"
-    BOS = "<bos>"
-    EOS = "<eos>"
-
-    def __init__(self, vocab: Dict[str, int], text_cfg: TextConfig):
-        self.vocab = vocab
-        self.text_cfg = text_cfg
-
-        self.pad_id = self.vocab[self.PAD]
-        self.unk_id = self.vocab[self.UNK]
-        self.bos_id = self.vocab[self.BOS]
-        self.eos_id = self.vocab[self.EOS]
-
-    @staticmethod
-    def build(captions: List[str], text_cfg: TextConfig) -> "SimpleTokenizer":
-        freq: Dict[str, int] = {}
-        for cap in captions:
-            cap = _normalize_text(cap, text_cfg.lowercase, text_cfg.strip_punct)
-            if not cap:
-                continue
-            for tok in cap.split(" "):
-                if not tok:
-                    continue
-                freq[tok] = freq.get(tok, 0) + 1
-
-        vocab_tokens = [SimpleTokenizer.PAD, SimpleTokenizer.UNK, SimpleTokenizer.BOS, SimpleTokenizer.EOS]
-        items = sorted(freq.items(), key=lambda kv: (-kv[1], kv[0]))
-        for tok, _ in items:
-            vocab_tokens.append(tok)
-            if len(vocab_tokens) >= int(text_cfg.vocab_size):
-                break
-
-        vocab = {t: i for i, t in enumerate(vocab_tokens)}
-        return SimpleTokenizer(vocab, text_cfg)
-
-    def encode(self, caption: str) -> Tuple[torch.LongTensor, torch.BoolTensor]:
-        cap = _normalize_text(caption, self.text_cfg.lowercase, self.text_cfg.strip_punct)
-        toks = cap.split(" ") if cap else []
-        ids = [self.bos_id]
-        for t in toks:
-            ids.append(self.vocab.get(t, self.unk_id))
-        ids.append(self.eos_id)
-
-        max_len = int(self.text_cfg.max_len)
-        ids = ids[:max_len]
-        attn_mask = [True] * len(ids)
-
-        while len(ids) < max_len:
-            ids.append(self.pad_id)
-            attn_mask.append(False)
-
-        return torch.tensor(ids, dtype=torch.long), torch.tensor(attn_mask, dtype=torch.bool)
+_ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 # ----------------------------
@@ -152,6 +72,12 @@ def _split_is_val(md5: str, val_ratio: float) -> bool:
     return r < float(val_ratio)
 
 
+def _load_failed_list(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+
 def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
     """
     Возвращает (train_entries, val_entries).
@@ -162,6 +88,7 @@ def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
     img_dir = root / cfg.image_dir
     cache_dir = root / cfg.cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
+    failed = _load_failed_list(root / cfg.failed_list)
 
     cache_key = (
         f"danbooru_index_{cfg.caption_field}_tags{cfg.min_tag_count}"
@@ -197,6 +124,9 @@ def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
         if not isinstance(md5, str) or len(md5) < 6:
             continue
 
+        if md5 in failed:
+            continue
+
         if _extract_tag_count(meta) < int(cfg.min_tag_count):
             continue
 
@@ -204,7 +134,7 @@ def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
         if not cap:
             continue
 
-        candidates = list(img_dir.glob(f"{md5}.*"))
+        candidates = [p for p in img_dir.glob(f"{md5}.*") if p.suffix.lower() in _ALLOWED_EXTS]
         if not candidates:
             continue
         img_path = candidates[0]
@@ -238,13 +168,11 @@ class DanbooruDataset(Dataset):
     def __init__(
         self,
         entries: List[dict],
-        text_cfg: TextConfig,
-        tokenizer: Optional[SimpleTokenizer],
+        tokenizer: Optional[BPETokenizer],
         cond_drop_prob: float,
         seed: int,
     ):
         self.entries = entries
-        self.text_cfg = text_cfg
         self.tokenizer = tokenizer
         self.cond_drop_prob = float(cond_drop_prob)
         self.rng = random.Random(int(seed))
