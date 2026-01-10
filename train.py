@@ -318,7 +318,9 @@ def main() -> None:
     if resume:
         ck = load_ckpt(resume, device)
         model.load_state_dict(ck["model"], strict=True)
-        if "opt" in ck:
+        if "optimizer" in ck:
+            opt.load_state_dict(ck["optimizer"])
+        elif "opt" in ck:
             opt.load_state_dict(ck["opt"])
         elif "optimizer" in ck:
             opt.load_state_dict(ck["optimizer"])
@@ -523,7 +525,7 @@ def main() -> None:
             save_ckpt(str(stop_path), {
                 "step": step,
                 "model": model.state_dict(),
-                "opt": opt.state_dict(),
+                "optimizer": opt.state_dict(),
                 "scaler": scaler.state_dict(),
                 "ema": ema.shadow,
                 "tokenizer_vocab": tokenizer.vocab,
@@ -538,7 +540,7 @@ def main() -> None:
             save_ckpt(str(ckpt_path), {
                 "step": step,
                 "model": model.state_dict(),
-                "opt": opt.state_dict(),
+                "optimizer": opt.state_dict(),
                 "scaler": scaler.state_dict(),
                 "ema": ema.shadow,
                 "tokenizer_vocab": tokenizer.vocab,
@@ -551,7 +553,7 @@ def main() -> None:
     save_ckpt(str(final_path), {
         "step": max_steps - 1,
         "model": model.state_dict(),
-        "opt": opt.state_dict(),
+        "optimizer": opt.state_dict(),
         "scaler": scaler.state_dict(),
         "ema": ema.shadow,
         "tokenizer_vocab": tokenizer.vocab,

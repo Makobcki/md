@@ -89,7 +89,7 @@ def main() -> None:
     save_ckpt(str(out_path), {
         "step": args.steps,
         "model": model.state_dict(),
-        "opt": opt.state_dict(),
+        "optimizer": opt.state_dict(),
         "scaler": scaler.state_dict(),
         "ema": ema.shadow,
         "tokenizer_vocab": vocab,
@@ -102,7 +102,7 @@ def main() -> None:
     })
 
     ck = load_ckpt(str(out_path), device)
-    assert "model" in ck and "opt" in ck and "scaler" in ck and "ema" in ck
+    assert "model" in ck and "optimizer" in ck and "scaler" in ck and "ema" in ck
     print(f"[OK] sanity check saved and loaded {out_path}")
 
 
