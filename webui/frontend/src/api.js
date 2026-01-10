@@ -1,4 +1,4 @@
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = window.location.origin;
 
 export async function fetchJson(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -28,7 +28,8 @@ export const api = {
   getOutDirSummary: () => fetchJson("/api/out_dir/summary"),
   listSamples: () => fetchJson("/api/samples"),
   getSampleArgs: () => fetchJson("/api/sample/args"),
-  startTrain: () => fetchJson("/api/train/start", { method: "POST" }),
+  startTrain: (payload = {}) =>
+    fetchJson("/api/train/start", { method: "POST", body: JSON.stringify(payload) }),
   stopTrain: () => fetchJson("/api/train/stop", { method: "POST" }),
   startSample: (args) =>
     fetchJson("/api/sample/start", { method: "POST", body: JSON.stringify({ args }) }),
@@ -36,5 +37,6 @@ export const api = {
 };
 
 export function wsUrl(path) {
-  return `ws://127.0.0.1:8000${path}`;
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${window.location.host}${path}`;
 }

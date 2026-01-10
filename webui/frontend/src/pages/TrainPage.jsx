@@ -11,9 +11,16 @@ export default function TrainPage() {
   const [runId, setRunId] = useState(null);
   const [command, setCommand] = useState([]);
   const [error, setError] = useState("");
+  const [checkpoints, setCheckpoints] = useState([]);
+  const [resumeCkpt, setResumeCkpt] = useState("");
 
   useEffect(() => {
-    api.getConfig().then((data) => setConfig(data.content));
+    const load = async () => {
+      const [cfg, ckpts] = await Promise.all([api.getConfig(), api.listCheckpoints()]);
+      setConfig(cfg.content);
+      setCheckpoints(ckpts.items || []);
+    };
+    load();
     const poll = async () => {
       const stat = await api.getStatus();
       setStatus(stat);
@@ -66,7 +73,8 @@ export default function TrainPage() {
   const handleStart = async () => {
     setError("");
     try {
-      const resp = await api.startTrain();
+      const payload = resumeCkpt ? { resume: resumeCkpt } : {};
+      const resp = await api.startTrain(payload);
       setRunId(resp.run_id);
       setCommand(resp.command);
       setLogs([]);
@@ -118,6 +126,21 @@ export default function TrainPage() {
             max={progressMax || undefined}
           />
         )}
+        <div className="row">
+          <label>Resume checkpoint</label>
+          <select
+            value={resumeCkpt}
+            onChange={(e) => setResumeCkpt(e.target.value)}
+            disabled={status.active}
+          >
+            <option value="">(none)</option>
+            {checkpoints.map((ckpt) => (
+              <option key={ckpt} value={ckpt}>
+                {ckpt}
+              </option>
+            ))}
+          </select>
+        </div>
         {command.length > 0 && (
           <div className="muted">Command: {command.join(" ")}</div>
         )}

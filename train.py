@@ -33,13 +33,14 @@ def _webui_metrics_path() -> Path | None:
     return Path(run_dir) / "metrics" / "train_metrics.jsonl"
 
 
-def _emit_metric_line(
+def _emit_event_line(
     *,
-    line: str,
+    payload: dict,
     log_path: Path,
     metrics_path: Path | None,
     webui_mode: bool,
 ) -> None:
+    line = json.dumps(payload, ensure_ascii=False)
     # всегда пишем локальный jsonl
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as f:
@@ -48,7 +49,7 @@ def _emit_metric_line(
     # webui: печатаем в stdout + (опционально) отдельный metrics файл
     if webui_mode:
         print(line, flush=True)
-        if metrics_path:
+        if metrics_path and payload.get("type") == "metric":
             metrics_path.parent.mkdir(parents=True, exist_ok=True)
             with open(metrics_path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
@@ -81,6 +82,16 @@ def _find_bad_grads(model: torch.nn.Module) -> list[str]:
         if not torch.isfinite(param.grad).all():
             bad.append(name)
     return bad
+
+
+def _grad_norm(model: torch.nn.Module) -> float:
+    total = 0.0
+    for param in model.parameters():
+        if param.grad is None:
+            continue
+        param_norm = param.grad.detach().data.norm(2)
+        total += float(param_norm.item()) ** 2
+    return total ** 0.5
 
 
 def _sanity_overfit(
@@ -211,6 +222,7 @@ def main() -> None:
         root=str(cfg.data_root),
         image_dir=str(cfg.image_dir),
         meta_dir=str(cfg.meta_dir),
+        tags_dir=str(cfg.tags_dir),
         caption_field=str(cfg.caption_field),
         min_tag_count=int(cfg.min_tag_count),
         require_512=bool(cfg.require_512),
@@ -391,9 +403,23 @@ def main() -> None:
         ema=ema,
     )
 
+    _emit_event_line(
+        payload={
+            "type": "status",
+            "status": "start",
+            "step": start_step,
+            "resume": bool(resume),
+            "out_dir": str(out_dir),
+        },
+        log_path=log_path,
+        metrics_path=metrics_path,
+        webui_mode=webui_mode,
+    )
+
     for step in range(start_step, max_steps):
         opt.zero_grad(set_to_none=True)
         total_loss = 0.0
+        last_batch_stats = {"x_std": None, "v_std": None}
 
         for _ in range(grad_accum):
             try:
@@ -415,6 +441,8 @@ def main() -> None:
             _assert_finite("alpha_bar[t]", alpha_bar_t)
             xt = diff.q_sample(x0, t, noise)
             v_tgt = diff.v_target(x0, t, noise)
+            last_batch_stats["x_std"] = float(x0.detach().std().cpu().item())
+            last_batch_stats["v_std"] = float(v_tgt.detach().std().cpu().item())
 
             with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 v_pred = model(xt, t, txt_ids, txt_mask)
@@ -447,10 +475,12 @@ def main() -> None:
             total_loss += float(loss.detach().cpu())
             scaler.scale(loss).backward()
 
+        if scaler.is_enabled():
+            scaler.unscale_(opt)
         if grad_clip > 0:
-            if scaler.is_enabled():
-                scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip))
+        else:
+            grad_norm = _grad_norm(model)
 
         if scaler.is_enabled():
             scaler.step(opt)
@@ -513,6 +543,12 @@ def main() -> None:
                 "type": "metric",
                 "step": step,
                 "loss": float(total_loss),
+                "lr": float(opt.param_groups[0]["lr"]),
+                "grad_norm": float(grad_norm),
+                "x_std": last_batch_stats["x_std"],
+                "v_std": last_batch_stats["v_std"],
+                "ema_decay": float(cfg.ema_decay),
+                "cfg_drop_prob": float(cfg.cond_drop_prob),
                 "img_per_sec": float(img_per_sec),
                 "peak_mem_mb": float(peak_mem),
                 "elapsed_sec": float(total_elapsed),
@@ -520,10 +556,8 @@ def main() -> None:
                 "sec_per_step": float(sec_per_step),
                 "max_steps": int(cfg.max_steps),
             }
-            line = json.dumps(payload, ensure_ascii=False)
-
-            _emit_metric_line(
-                line=line,
+            _emit_event_line(
+                payload=payload,
                 log_path=log_path,
                 metrics_path=metrics_path,
                 webui_mode=webui_mode,
@@ -546,6 +580,17 @@ def main() -> None:
                 "cfg": cfg_dict,
                 "meta": build_run_metadata(),
             })
+            _emit_event_line(
+                payload={
+                    "type": "status",
+                    "status": "stopped",
+                    "step": step,
+                    "ckpt": str(stop_path),
+                },
+                log_path=log_path,
+                metrics_path=metrics_path,
+                webui_mode=webui_mode,
+            )
             print(f"[STOP] saved {stop_path}")
             return
 
@@ -560,6 +605,16 @@ def main() -> None:
                 "cfg": cfg_dict,
                 "meta": build_run_metadata(),
             })
+            _emit_event_line(
+                payload={
+                    "type": "log",
+                    "message": f"saved {ckpt_path}",
+                    "step": step,
+                },
+                log_path=log_path,
+                metrics_path=metrics_path,
+                webui_mode=webui_mode,
+            )
             print(f"[OK] saved {ckpt_path}")
 
     final_path = out_dir / "ckpt_final.pt"
@@ -572,6 +627,17 @@ def main() -> None:
         "cfg": cfg_dict,
         "meta": build_run_metadata(),
     })
+    _emit_event_line(
+        payload={
+            "type": "status",
+            "status": "done",
+            "step": max_steps - 1,
+            "ckpt": str(final_path),
+        },
+        log_path=log_path,
+        metrics_path=metrics_path,
+        webui_mode=webui_mode,
+    )
     print(f"[DONE] saved {final_path}")
 
 

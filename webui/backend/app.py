@@ -55,8 +55,8 @@ job_manager = JobManager(ROOT_DIR, ws_manager)
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -77,6 +77,9 @@ def _get_out_dir() -> Path:
 class SampleRequest(BaseModel):
     args: Dict[str, Any]
 
+
+class TrainRequest(BaseModel):
+    resume: Optional[str] = None
 
 @app.on_event("startup")
 async def _startup() -> None:
@@ -210,9 +213,10 @@ def list_samples() -> Dict[str, Any]:
 
 
 @app.post("/api/train/start")
-def start_train() -> Dict[str, Any]:
+def start_train(req: TrainRequest | None = None) -> Dict[str, Any]:
     try:
-        run = job_manager.start_train()
+        resume = req.resume if req else None
+        run = job_manager.start_train(resume=resume)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"run_id": run.run_id, "command": run.command}
@@ -261,3 +265,9 @@ async def ws_metrics(websocket: WebSocket, run_id: str) -> None:
             await websocket.receive_text()
     except WebSocketDisconnect:
         ws_manager.disconnect(run_id, "metrics", websocket)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("webui.backend.app:app", host="0.0.0.0", port=8000)

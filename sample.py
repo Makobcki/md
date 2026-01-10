@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 import argparse
+import json
+import random
 from pathlib import Path
 
 import torch
 from torchvision.utils import save_image
 
 from ddpm.config import TrainConfig
-from ddpm.ddim import ddim_sample, dpm_solver_sample, heun_sample
+from ddpm.ddim import (
+    ddpm_ancestral_sample,
+    ddim_sample,
+    dpm_solver_sample,
+    euler_sample,
+    heun_sample,
+)
 from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
 from ddpm.text import BPETokenizer, TextConfig
@@ -26,15 +34,27 @@ def main() -> None:
     ap.add_argument("--neg", default="", help="Deprecated; use --neg_prompt")
     ap.add_argument("--neg_prompt", default="")
     ap.add_argument("--cfg", type=float, default=5.0)
-    ap.add_argument("--sampler", default="dpm_solver", choices=("dpm_solver", "heun", "ddim"))
-    ap.add_argument("--seed", type=int, default=123)
+    ap.add_argument(
+        "--sampler",
+        default="ddim",
+        choices=("ddim", "ddpm", "euler", "heun", "dpm_solver"),
+    )
+    ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    torch.manual_seed(args.seed)
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(args.seed)
+
+    def _emit_event(payload: dict) -> None:
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+    if args.seed is None:
+        base_seed = random.SystemRandom().randint(0, 2**31 - 1)
+    else:
+        base_seed = int(args.seed)
+    seeds = [base_seed + i for i in range(args.n)]
+    _emit_event({"type": "status", "status": "start", "seed": base_seed, "n": args.n})
+
     ck = load_ckpt(args.ckpt, device)
 
     cfg = TrainConfig.from_dict(ck["cfg"]).to_dict()
@@ -94,46 +114,75 @@ def main() -> None:
     neg_prompt = args.neg_prompt if args.neg_prompt else args.neg
     if prompt:
         cond_ids, cond_mask = tokenizer.encode(prompt)
-        cond_ids = cond_ids.unsqueeze(0).repeat(args.n, 1).to(device)
-        cond_mask = cond_mask.unsqueeze(0).repeat(args.n, 1).to(device)
+        cond_ids = cond_ids.unsqueeze(0).to(device)
+        cond_mask = cond_mask.unsqueeze(0).to(device)
         uncond_text = neg_prompt.strip() if neg_prompt.strip() else ""
         uncond_ids, uncond_mask = tokenizer.encode(uncond_text)
-        uncond_ids = uncond_ids.unsqueeze(0).repeat(args.n, 1).to(device)
-        uncond_mask = uncond_mask.unsqueeze(0).repeat(args.n, 1).to(device)
+        uncond_ids = uncond_ids.unsqueeze(0).to(device)
+        uncond_mask = uncond_mask.unsqueeze(0).to(device)
         cfg_scale = float(args.cfg)
     else:
         cond_ids, cond_mask = tokenizer.encode("")
-        cond_ids = cond_ids.unsqueeze(0).repeat(args.n, 1).to(device)
-        cond_mask = cond_mask.unsqueeze(0).repeat(args.n, 1).to(device)
+        cond_ids = cond_ids.unsqueeze(0).to(device)
+        cond_mask = cond_mask.unsqueeze(0).to(device)
         uncond_ids = None
         uncond_mask = None
         cfg_scale = 0.0
 
     sampler = getattr(args, "sampler", "heun")
-    sample_kwargs = dict(
-        model=model,
-        diffusion=diffusion,
-        shape=(args.n, 3, int(cfg.get("image_size", 512)), int(cfg.get("image_size", 512))),
-        txt_ids=cond_ids,
-        txt_mask=cond_mask,
-        steps=args.steps,
-        cfg_scale=cfg_scale,
-        uncond_ids=uncond_ids,
-        uncond_mask=uncond_mask,
-    )
-    if sampler == "ddim":
-        x = ddim_sample(eta=0.0, clamp_x0=True, **sample_kwargs)
-    elif sampler == "dpm_solver":
-        x = dpm_solver_sample(**sample_kwargs)
-    elif sampler == "heun":
-        x = heun_sample(**sample_kwargs)
-    else:
-        raise ValueError(f"Unknown sampler: {sampler}")
+    h = int(cfg.get("image_size", 512))
+    w = int(cfg.get("image_size", 512))
+    per_image_steps = args.steps if sampler in {"ddim", "ddpm"} else max(args.steps - 1, 1)
+    total_steps = per_image_steps * max(args.n, 1)
+
+    samples = []
+    for i, seed in enumerate(seeds):
+        gen = torch.Generator(device=device)
+        gen.manual_seed(seed)
+        noise = torch.randn((1, 3, h, w), device=device, generator=gen)
+        def _progress_cb(step: int, _total: int, image_index: int = i) -> None:
+            _emit_event({
+                "type": "metric",
+                "step": image_index * per_image_steps + step,
+                "max_steps": total_steps,
+                "sampler": sampler,
+            })
+
+        sample_kwargs = dict(
+            model=model,
+            diffusion=diffusion,
+            shape=(1, 3, h, w),
+            txt_ids=cond_ids,
+            txt_mask=cond_mask,
+            steps=args.steps,
+            cfg_scale=cfg_scale,
+            uncond_ids=uncond_ids,
+            uncond_mask=uncond_mask,
+            noise=noise,
+            generator=gen,
+            progress_cb=_progress_cb,
+        )
+        if sampler == "ddim":
+            x = ddim_sample(eta=0.0, clamp_x0=True, **sample_kwargs)
+        elif sampler == "ddpm":
+            x = ddpm_ancestral_sample(**sample_kwargs)
+        elif sampler == "euler":
+            x = euler_sample(**sample_kwargs)
+        elif sampler == "dpm_solver":
+            x = dpm_solver_sample(**sample_kwargs)
+        elif sampler == "heun":
+            x = heun_sample(**sample_kwargs)
+        else:
+            raise ValueError(f"Unknown sampler: {sampler}")
+        samples.append(x)
+
+    x = torch.cat(samples, dim=0)
 
     x = (x.clamp(-1, 1) + 1) / 2
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     save_image(x, out, nrow=int((args.n) ** 0.5))
+    _emit_event({"type": "status", "status": "done", "path": str(out)})
     print(f"[OK] saved {out}")
 
 

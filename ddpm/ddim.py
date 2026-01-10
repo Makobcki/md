@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 from PIL import Image
@@ -22,14 +22,20 @@ def ddim_sample(
     txt_mask: torch.Tensor,
     steps: int = 50,
     eta: float = 0.0,
-    cfg_scale: float = 6.0,
+    cfg_scale: float = 5.0,
     uncond_ids: Optional[torch.Tensor] = None,
     uncond_mask: Optional[torch.Tensor] = None,
     clamp_x0: bool = True,
+    noise: Optional[torch.Tensor] = None,
+    generator: Optional[torch.Generator] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> torch.Tensor:
     device = diffusion.device
     b, c, h, w = shape
-    x = torch.randn(shape, device=device)
+    if noise is None:
+        x = torch.randn(shape, device=device, generator=generator)
+    else:
+        x = noise.to(device)
 
     T = diffusion.cfg.timesteps
     ts = torch.linspace(T - 1, 0, steps, device=device).long()
@@ -51,6 +57,8 @@ def ddim_sample(
 
         if i == len(ts) - 1:
             x = x0
+            if progress_cb:
+                progress_cb(i + 1, len(ts))
             break
 
         t_prev = ts[i + 1].repeat(b)
@@ -58,11 +66,16 @@ def ddim_sample(
         a_prev = diffusion.alpha_bar[t_prev].view(-1, 1, 1, 1)
 
         sigma = eta * torch.sqrt((1.0 - a_prev) / (1.0 - a_t) * (1.0 - a_t / a_prev))
-        noise = torch.randn_like(x) if eta > 0 else torch.zeros_like(x)
+        noise = torch.randn_like(x, generator=generator) if eta > 0 else torch.zeros_like(x)
 
         dir_xt = torch.sqrt(torch.clamp(1.0 - a_prev - sigma ** 2, min=0.0)) * eps
         x = torch.sqrt(a_prev) * x0 + dir_xt + sigma * noise
 
+        if progress_cb:
+            progress_cb(i + 1, len(ts))
+
+    if progress_cb and len(ts) == 0:
+        progress_cb(0, 0)
     return x
 
 
@@ -77,14 +90,21 @@ def heun_sample(
     cfg_scale: float = 5.0,
     uncond_ids: Optional[torch.Tensor] = None,
     uncond_mask: Optional[torch.Tensor] = None,
+    noise: Optional[torch.Tensor] = None,
+    generator: Optional[torch.Generator] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> torch.Tensor:
     device = diffusion.device
     b, _, _, _ = shape
-    x = torch.randn(shape, device=device)
+    if noise is None:
+        x = torch.randn(shape, device=device, generator=generator)
+    else:
+        x = noise.to(device)
 
     t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps, device=device).long()
 
-    for i in range(len(t_schedule) - 1):
+    total_steps = max(len(t_schedule) - 1, 0)
+    for i in range(total_steps):
         t = t_schedule[i].repeat(b)
         t_next = t_schedule[i + 1].repeat(b)
         sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1)
@@ -112,6 +132,9 @@ def heun_sample(
         d_next = (x_euler - x0_next) / sigma_next
         x = x + 0.5 * (d + d_next) * (sigma_next - sigma)
 
+        if progress_cb:
+            progress_cb(i + 1, total_steps)
+
     t_final = t_schedule[-1].repeat(b)
     v_final = model(x, t_final, txt_ids, txt_mask)
     if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
@@ -132,10 +155,16 @@ def dpm_solver_sample(
     cfg_scale: float = 5.0,
     uncond_ids: Optional[torch.Tensor] = None,
     uncond_mask: Optional[torch.Tensor] = None,
+    noise: Optional[torch.Tensor] = None,
+    generator: Optional[torch.Generator] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> torch.Tensor:
     device = diffusion.device
     b, _, _, _ = shape
-    x = torch.randn(shape, device=device)
+    if noise is None:
+        x = torch.randn(shape, device=device, generator=generator)
+    else:
+        x = noise.to(device)
 
     t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps, device=device).long()
 
@@ -146,7 +175,8 @@ def dpm_solver_sample(
             return v_un + cfg_scale * (v_cond - v_un)
         return v_cond
 
-    for i in range(len(t_schedule) - 1):
+    total_steps = max(len(t_schedule) - 1, 0)
+    for i in range(total_steps):
         t = t_schedule[i].repeat(b)
         t_next = t_schedule[i + 1].repeat(b)
 
@@ -166,10 +196,123 @@ def dpm_solver_sample(
         d_mid = (x_mid - x0_mid) / sigma_mid
         x = x + d_mid * (sigma_next - sigma)
 
+        if progress_cb:
+            progress_cb(i + 1, total_steps)
+
     t_final = t_schedule[-1].repeat(b)
     v_final = model_v(x, t_final)
     x0_final = diffusion.v_to_x0(x, t_final, v_final)
     return x0_final
+
+
+@torch.no_grad()
+def euler_sample(
+    model: UNet,
+    diffusion: Diffusion,
+    shape: Tuple[int, int, int, int],
+    txt_ids: torch.Tensor,
+    txt_mask: torch.Tensor,
+    steps: int = 30,
+    cfg_scale: float = 5.0,
+    uncond_ids: Optional[torch.Tensor] = None,
+    uncond_mask: Optional[torch.Tensor] = None,
+    noise: Optional[torch.Tensor] = None,
+    generator: Optional[torch.Generator] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> torch.Tensor:
+    device = diffusion.device
+    b, _, _, _ = shape
+    if noise is None:
+        x = torch.randn(shape, device=device, generator=generator)
+    else:
+        x = noise.to(device)
+
+    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps, device=device).long()
+    total_steps = max(len(t_schedule) - 1, 0)
+
+    for i in range(total_steps):
+        t = t_schedule[i].repeat(b)
+        t_next = t_schedule[i + 1].repeat(b)
+        sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1)
+        sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1)
+
+        v_cond = model(x, t, txt_ids, txt_mask)
+        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
+            v_un = model(x, t, uncond_ids, uncond_mask)
+            v = v_un + cfg_scale * (v_cond - v_un)
+        else:
+            v = v_cond
+
+        x0 = diffusion.v_to_x0(x, t, v)
+        d = (x - x0) / sigma
+        x = x + d * (sigma_next - sigma)
+
+        if progress_cb:
+            progress_cb(i + 1, total_steps)
+
+    t_final = t_schedule[-1].repeat(b)
+    v_final = model(x, t_final, txt_ids, txt_mask)
+    if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
+        v_un_final = model(x, t_final, uncond_ids, uncond_mask)
+        v_final = v_un_final + cfg_scale * (v_final - v_un_final)
+    x0_final = diffusion.v_to_x0(x, t_final, v_final)
+    return x0_final
+
+
+@torch.no_grad()
+def ddpm_ancestral_sample(
+    model: UNet,
+    diffusion: Diffusion,
+    shape: Tuple[int, int, int, int],
+    txt_ids: torch.Tensor,
+    txt_mask: torch.Tensor,
+    steps: int = 50,
+    cfg_scale: float = 5.0,
+    uncond_ids: Optional[torch.Tensor] = None,
+    uncond_mask: Optional[torch.Tensor] = None,
+    noise: Optional[torch.Tensor] = None,
+    generator: Optional[torch.Generator] = None,
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> torch.Tensor:
+    device = diffusion.device
+    if noise is None:
+        x = torch.randn(shape, device=device, generator=generator)
+    else:
+        x = noise.to(device)
+    b = x.shape[0]
+
+    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps, device=device).long()
+
+    for i in range(len(t_schedule)):
+        t = t_schedule[i].repeat(b)
+
+        v_cond = model(x, t, txt_ids, txt_mask)
+        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
+            v_un = model(x, t, uncond_ids, uncond_mask)
+            v = v_un + cfg_scale * (v_cond - v_un)
+        else:
+            v = v_cond
+
+        x0 = diffusion.v_to_x0(x, t, v)
+        eps = diffusion.v_to_eps(x, t, v)
+
+        if i == len(t_schedule) - 1:
+            x = x0
+            if progress_cb:
+                progress_cb(i + 1, len(t_schedule))
+            break
+
+        t_prev = t_schedule[i + 1].repeat(b)
+        a_t = diffusion.alpha_bar[t].view(-1, 1, 1, 1)
+        a_prev = diffusion.alpha_bar[t_prev].view(-1, 1, 1, 1)
+
+        sigma = torch.sqrt(torch.clamp((1.0 - a_prev) / (1.0 - a_t) * (1.0 - a_t / a_prev), min=0.0))
+        noise = torch.randn_like(x, generator=generator) if sigma.max() > 0 else torch.zeros_like(x)
+        dir_xt = torch.sqrt(torch.clamp(1.0 - a_prev - sigma ** 2, min=0.0)) * eps
+        x = torch.sqrt(a_prev) * x0 + dir_xt + sigma * noise
+
+        if progress_cb:
+            progress_cb(i + 1, len(t_schedule))
 
 
 def _to_pil(x: torch.Tensor) -> Image.Image:
