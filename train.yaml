@@ -6,6 +6,7 @@ min_tag_count: 8
 require_512: true
 val_ratio: 0.01
 cache_dir: .cache
+failed_list: failed/md5.txt
 
 seed: 42
 out_dir: ./runs/danbooru_512
@@ -40,12 +41,16 @@ text_dim: 256
 text_layers: 4
 text_heads: 4
 text_max_len: 128
-vocab_size: 50000
+text_vocab_path: ddpm/bpe/vocab.json
+text_merges_path: ddpm/bpe/merges.txt
+tokenizer_type: bpe
 use_scale_shift_norm: true
+grad_checkpointing: false
 
 cond_drop_prob: 0.10
 
 amp: true
+amp_dtype: fp16
 compile: false
 grad_clip_norm: 1.0
 ema_decay: 0.999

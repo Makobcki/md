@@ -118,8 +118,8 @@ class CrossAttention2d(nn.Module):
         k = k.view(b, -1, self.heads, self.head_dim).transpose(1, 2)  # [B, heads, T, d]
         v = v.view(b, -1, self.heads, self.head_dim).transpose(1, 2)
 
-        # boolean mask for SDPA: True = keep, False = mask
-        attn_mask = ctx_mask.unsqueeze(1).unsqueeze(1)  # [B,1,1,T]
+        # boolean mask for SDPA: True = mask
+        attn_mask = (~ctx_mask).unsqueeze(1).unsqueeze(1)  # [B,1,1,T]
 
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
         out = out.transpose(2, 3).contiguous().view(b, self.inner, h, w)
@@ -192,6 +192,7 @@ class UNetConfig:
     text_heads: int = 4
     text_max_len: int = 64
     use_scale_shift_norm: bool = False
+    grad_checkpointing: bool = False
 
 
 class UNet(nn.Module):
@@ -273,6 +274,11 @@ class UNet(nn.Module):
             x = ca(x, ctx, ctx_mask)
         return x
 
+    def _checkpointed(self, fn, *args):
+        if self.cfg.grad_checkpointing and self.training:
+            return torch.utils.checkpoint.checkpoint(fn, *args, use_reentrant=False)
+        return fn(*args)
+
     def forward(self, x: torch.Tensor, t: torch.Tensor, txt_ids: torch.Tensor, txt_mask: torch.Tensor) -> torch.Tensor:
         te = timestep_embedding(t, self.cfg.base_channels)
         te = self.time_mlp(te)
@@ -286,18 +292,18 @@ class UNet(nn.Module):
         dsi = 0
         for level in range(len(self.cfg.channel_mults)):
             for _ in range(self.cfg.num_res_blocks):
-                h = self.down_blocks[bi](h, te)
-                h = self._maybe_attend(h, self.down_sa[bi], self.down_ca[bi], ctx, txt_mask)
+                h = self._checkpointed(self.down_blocks[bi], h, te)
+                h = self._checkpointed(self._maybe_attend, h, self.down_sa[bi], self.down_ca[bi], ctx, txt_mask)
                 skips.append(h)
                 bi += 1
             if level != len(self.cfg.channel_mults) - 1:
-                h = self.downsamples[dsi](h)
+                h = self._checkpointed(self.downsamples[dsi], h)
                 dsi += 1
 
-        h = self.mid1(h, te)
-        h = self.mid_sa(h)
-        h = self.mid_ca(h, ctx, txt_mask)
-        h = self.mid2(h, te)
+        h = self._checkpointed(self.mid1, h, te)
+        h = self._checkpointed(self.mid_sa, h)
+        h = self._checkpointed(self.mid_ca, h, ctx, txt_mask)
+        h = self._checkpointed(self.mid2, h, te)
 
         ui = 0
         usi = 0
@@ -307,11 +313,11 @@ class UNet(nn.Module):
                 if skip.shape[-2:] != h.shape[-2:]:
                     skip = F.interpolate(skip, size=h.shape[-2:], mode="nearest")
                 h = torch.cat([h, skip], dim=1)
-                h = self.up_blocks[ui](h, te)
-                h = self._maybe_attend(h, self.up_sa[ui], self.up_ca[ui], ctx, txt_mask)
+                h = self._checkpointed(self.up_blocks[ui], h, te)
+                h = self._checkpointed(self._maybe_attend, h, self.up_sa[ui], self.up_ca[ui], ctx, txt_mask)
                 ui += 1
             if level != 0:
-                h = self.upsamples[usi](h)
+                h = self._checkpointed(self.upsamples[usi], h)
                 usi += 1
 
         h = self.out_conv(self.act(self.out_norm(h)))

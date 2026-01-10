@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import torch
 from torchvision.utils import save_image
 
-from ddpm.data import SimpleTokenizer, TextConfig
-from ddpm.ddim import ddim_sample, heun_sample
+from ddpm.config import TrainConfig
+from ddpm.ddim import ddim_sample, dpm_solver_sample, heun_sample
 from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
+from ddpm.text import BPETokenizer, TextConfig
 from ddpm.utils import EMA, load_ckpt
 
 
@@ -21,19 +21,23 @@ def main() -> None:
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--n", type=int, default=8)
-    ap.add_argument("--steps", type=int, default=200)
+    ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--prompt", default="")
     ap.add_argument("--neg", default="", help="Deprecated; use --neg_prompt")
     ap.add_argument("--neg_prompt", default="")
     ap.add_argument("--cfg", type=float, default=5.0)
-    ap.add_argument("--sampler", default="heun", choices=("heun", "ddim"))
+    ap.add_argument("--sampler", default="dpm_solver", choices=("dpm_solver", "heun", "ddim"))
+    ap.add_argument("--seed", type=int, default=123)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(args.seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(args.seed)
     ck = load_ckpt(args.ckpt, device)
 
-    cfg = ck["cfg"]
+    cfg = TrainConfig.from_dict(ck["cfg"]).to_dict()
     diffusion = Diffusion(
         DiffusionConfig(
             timesteps=int(cfg.get("timesteps", 1000)),
@@ -44,22 +48,19 @@ def main() -> None:
         device=device,
     )
 
-    tokenizer_vocab = ck.get("tokenizer_vocab")
-    if tokenizer_vocab is None:
-        vocab_path = cfg.get("vocab_path")
-        if not vocab_path:
-            raise RuntimeError("Checkpoint missing tokenizer_vocab or vocab_path.")
-        vocab = json.loads(Path(vocab_path).read_text(encoding="utf-8"))
-    else:
-        vocab = tokenizer_vocab
+    vocab_path = cfg.get("text_vocab_path")
+    merges_path = cfg.get("text_merges_path")
+    if not vocab_path or not merges_path:
+        raise RuntimeError("Checkpoint missing text_vocab_path/text_merges_path.")
 
     text_cfg = TextConfig(
-        vocab_size=len(vocab),
+        vocab_path=str(vocab_path),
+        merges_path=str(merges_path),
         max_len=int(cfg.get("text_max_len", 64)),
         lowercase=True,
         strip_punct=True,
     )
-    tokenizer = SimpleTokenizer(vocab=vocab, text_cfg=text_cfg)
+    tokenizer = BPETokenizer.from_files(vocab_path, merges_path, text_cfg)
 
     unet_cfg = UNetConfig(
         image_channels=3,
@@ -70,7 +71,7 @@ def main() -> None:
         attn_resolutions=tuple(cfg.get("attn_resolutions", [32, 16])),
         attn_heads=int(cfg.get("attn_heads", 4)),
         attn_head_dim=int(cfg.get("attn_head_dim", 32)),
-        vocab_size=len(vocab),
+        vocab_size=len(tokenizer.vocab),
         text_dim=int(cfg.get("text_dim", 256)),
         text_layers=int(cfg.get("text_layers", 4)),
         text_heads=int(cfg.get("text_heads", 4)),
@@ -122,6 +123,8 @@ def main() -> None:
     )
     if sampler == "ddim":
         x = ddim_sample(eta=0.0, clamp_x0=True, **sample_kwargs)
+    elif sampler == "dpm_solver":
+        x = dpm_solver_sample(**sample_kwargs)
     elif sampler == "heun":
         x = heun_sample(**sample_kwargs)
     else:

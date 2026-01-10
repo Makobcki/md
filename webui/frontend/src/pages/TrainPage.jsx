@@ -104,8 +104,10 @@ export default function TrainPage() {
           {lastMetric && (
             <>
               <span>elapsed: {Math.round(lastMetric.elapsed_sec)}s</span>
-              <span>ETA: {Math.round(lastMetric.eta_sec)}s</span>
+              <span>ETA: {lastMetric.eta_h?.toFixed(2)}h</span>
               <span>s/step: {lastMetric.sec_per_step?.toFixed(3)}</span>
+              <span>img/s: {lastMetric.img_per_sec?.toFixed(2)}</span>
+              <span>VRAM: {lastMetric.peak_mem_mb?.toFixed(0)} MB</span>
             </>
           )}
         </div>

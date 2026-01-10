@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from tqdm import tqdm
@@ -14,11 +15,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import yaml
 
-from ddpm.data import DanbooruConfig, TextConfig, SimpleTokenizer, DanbooruDataset, build_or_load_index, collate_with_tokenizer
-
-from ddpm.model import UNet, UNetConfig
+from ddpm.config import TrainConfig
+from ddpm.data import DanbooruConfig, DanbooruDataset, build_or_load_index, collate_with_tokenizer
 from ddpm.diffusion import Diffusion, DiffusionConfig
-from ddpm.utils import EMA, load_ckpt, save_ckpt, build_run_metadata
+from ddpm.model import UNet, UNetConfig
+from ddpm.text import BPETokenizer, TextConfig
+from ddpm.utils import EMA, build_run_metadata, load_ckpt, save_ckpt, seed_everything
 
 def _is_webui_mode() -> bool:
     return os.environ.get("WEBUI") == "1"
@@ -53,21 +55,6 @@ def _emit_metric_line(
 
 
 
-def load_yaml(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def seed_everything(seed: int, deterministic: bool = False) -> None:
-    import random
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-
 def get_min_snr_weights(alpha_bar_t: torch.Tensor, gamma: float = 5.0) -> torch.Tensor:
     eps = 1e-8
     a = alpha_bar_t.clamp(min=eps, max=1.0 - eps)
@@ -86,15 +73,25 @@ def _assert_in_range(name: str, x: torch.Tensor, lo: float, hi: float, eps: floa
         raise RuntimeError(f"{name} is out of range [{lo}, {hi}]")
 
 
+def _find_bad_grads(model: torch.nn.Module) -> list[str]:
+    bad = []
+    for name, param in model.named_parameters():
+        if param.grad is None:
+            continue
+        if not torch.isfinite(param.grad).all():
+            bad.append(name)
+    return bad
+
+
 def _sanity_overfit(
     *,
     model: UNet,
-    tokenizer: SimpleTokenizer,
-    text_cfg: TextConfig,
+    tokenizer: BPETokenizer,
     entries: list[dict],
     diff: Diffusion,
     device: torch.device,
     use_amp: bool,
+    amp_dtype: torch.dtype,
     steps: int,
     max_images: int,
     max_loss: float,
@@ -113,7 +110,6 @@ def _sanity_overfit(
     sanity_entries = entries[:max_images]
     sanity_ds = DanbooruDataset(
         entries=sanity_entries,
-        text_cfg=text_cfg,
         tokenizer=tokenizer,
         cond_drop_prob=0.0,
         seed=0,
@@ -146,13 +142,16 @@ def _sanity_overfit(
         xt = diff.q_sample(x0, t, noise)
         v_tgt = diff.v_target(x0, t, noise)
 
-        with torch.amp.autocast("cuda", enabled=use_amp):
+        with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
             v_pred = model(xt, t, txt_ids, txt_mask)
             if v_pred.shape != v_tgt.shape or v_pred.dtype != v_tgt.dtype:
                 raise RuntimeError("v_pred/v_target shape or dtype mismatch in sanity overfit")
             loss = F.mse_loss(v_pred, v_tgt)
 
         scaler.scale(loss).backward()
+        bad_grads = _find_bad_grads(model)
+        if bad_grads:
+            raise RuntimeError(f"Sanity overfit grads contain NaN/Inf: {bad_grads[:5]}")
         scaler.step(opt)
         scaler.update()
         ema.update(model)
@@ -180,15 +179,16 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=None)
     args = ap.parse_args()
 
-    cfg = load_yaml(args.config)
+    cfg = TrainConfig.from_yaml(args.config)
     if args.seed is not None:
-        cfg["seed"] = int(args.seed)
+        cfg = replace(cfg, seed=int(args.seed))
     if args.resume:
-        cfg["resume_ckpt"] = args.resume
+        cfg = replace(cfg, resume_ckpt=str(args.resume))
+    cfg_dict = cfg.to_dict()
 
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
-    out_dir = Path(cfg["out_dir"])
+    out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -202,66 +202,63 @@ def main() -> None:
         torch.backends.cuda.enable_mem_efficient_sdp(True)
         torch.backends.cuda.enable_math_sdp(False)
 
-    seed_everything(int(cfg["seed"]), deterministic=bool(cfg.get("deterministic", False)))
+    seed_everything(int(cfg.seed), deterministic=bool(cfg.deterministic))
 
     # ----------------------------
     # Dataset + vocab
     # ----------------------------
     dcfg = DanbooruConfig(
-        root=str(cfg["data_root"]),
-        image_dir=str(cfg.get("image_dir", "image_512")),
-        meta_dir=str(cfg.get("meta_dir", "meta")),
-        caption_field=str(cfg.get("caption_field", "caption_llava_34b_no_tags_short")),
-        min_tag_count=int(cfg.get("min_tag_count", 8)),
-        require_512=bool(cfg.get("require_512", True)),
-        val_ratio=float(cfg.get("val_ratio", 0.01)),
-        seed=int(cfg["seed"]),
-        cache_dir=str(cfg.get("cache_dir", ".cache")),
+        root=str(cfg.data_root),
+        image_dir=str(cfg.image_dir),
+        meta_dir=str(cfg.meta_dir),
+        caption_field=str(cfg.caption_field),
+        min_tag_count=int(cfg.min_tag_count),
+        require_512=bool(cfg.require_512),
+        val_ratio=float(cfg.val_ratio),
+        seed=int(cfg.seed),
+        cache_dir=str(cfg.cache_dir),
+        failed_list=str(cfg.failed_list),
     )
 
     text_cfg = TextConfig(
-        vocab_size=int(cfg.get("vocab_size", 50_000)),
-        max_len=int(cfg.get("text_max_len", 64)),
+        vocab_path=str(cfg.text_vocab_path),
+        merges_path=str(cfg.text_merges_path),
+        max_len=int(cfg.text_max_len),
         lowercase=True,
         strip_punct=True,
     )
 
     train_entries, _val_entries = build_or_load_index(dcfg)
 
-    vocab_path = out_dir / "vocab.json"
-    if vocab_path.exists():
-        with open(vocab_path, "r", encoding="utf-8") as f:
-            vocab = json.load(f)
-        tokenizer = SimpleTokenizer(vocab=vocab, text_cfg=text_cfg)
-    else:
-        captions = [e["caption"] for e in train_entries]
-        tokenizer = SimpleTokenizer.build(captions, text_cfg)
-        with open(vocab_path, "w", encoding="utf-8") as f:
-            json.dump(tokenizer.vocab, f, ensure_ascii=False)
+    tokenizer = BPETokenizer.from_files(
+        vocab_path=cfg.text_vocab_path,
+        merges_path=cfg.text_merges_path,
+        cfg=text_cfg,
+    )
 
-    cfg["vocab_path"] = str(vocab_path)
-    cfg["text_max_len"] = int(text_cfg.max_len)
+    cfg_dict["text_max_len"] = int(text_cfg.max_len)
     with open(out_dir / "config_snapshot.yaml", "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+        yaml.safe_dump(cfg_dict, f, sort_keys=False, allow_unicode=True)
+    with open(out_dir / "run_meta.yaml", "w", encoding="utf-8") as f:
+        yaml.safe_dump(build_run_metadata(), f, sort_keys=False, allow_unicode=True)
 
     ds = DanbooruDataset(
         entries=train_entries,
-        text_cfg=text_cfg,
         tokenizer=tokenizer,
-        cond_drop_prob=float(cfg.get("cond_drop_prob", 0.1)),
-        seed=int(cfg["seed"]),
+        cond_drop_prob=float(cfg.cond_drop_prob),
+        seed=int(cfg.seed),
     )
 
-    nw = int(cfg.get("num_workers", 8))
+    nw = int(cfg.num_workers)
     dl = DataLoader(
         ds,
-        batch_size=int(cfg["batch_size"]),
+        batch_size=int(cfg.batch_size),
         shuffle=True,
         num_workers=nw,
         pin_memory=True,
         drop_last=True,
         persistent_workers=nw > 0,
-        prefetch_factor=int(cfg.get("prefetch_factor", 2)) if nw > 0 else None,
+        prefetch_factor=int(cfg.prefetch_factor) if nw > 0 else None,
         collate_fn=collate_with_tokenizer,
     )
 
@@ -270,57 +267,57 @@ def main() -> None:
     # ----------------------------
     unet_cfg = UNetConfig(
         image_channels=3,
-        base_channels=int(cfg.get("base_channels", 64)),
-        channel_mults=tuple(cfg.get("channel_mults", [1, 2, 3, 4])),
-        num_res_blocks=int(cfg.get("num_res_blocks", 2)),
-        dropout=float(cfg.get("dropout", 0.1)),
-        attn_resolutions=tuple(cfg.get("attn_resolutions", [32, 16])),
-        attn_heads=int(cfg.get("attn_heads", 4)),
-        attn_head_dim=int(cfg.get("attn_head_dim", 32)),
+        base_channels=int(cfg.base_channels),
+        channel_mults=tuple(cfg.channel_mults),
+        num_res_blocks=int(cfg.num_res_blocks),
+        dropout=float(cfg.dropout),
+        attn_resolutions=tuple(cfg.attn_resolutions),
+        attn_heads=int(cfg.attn_heads),
+        attn_head_dim=int(cfg.attn_head_dim),
         vocab_size=len(tokenizer.vocab),
-        text_dim=int(cfg.get("text_dim", 256)),
-        text_layers=int(cfg.get("text_layers", 4)),
-        text_heads=int(cfg.get("text_heads", 4)),
-        text_max_len=int(cfg.get("text_max_len", 64)),
-        use_scale_shift_norm=bool(cfg.get("use_scale_shift_norm", False)),
+        text_dim=int(cfg.text_dim),
+        text_layers=int(cfg.text_layers),
+        text_heads=int(cfg.text_heads),
+        text_max_len=int(cfg.text_max_len),
+        use_scale_shift_norm=bool(cfg.use_scale_shift_norm),
+        grad_checkpointing=bool(cfg.grad_checkpointing),
     )
 
     model = UNet(unet_cfg).to(device)
     model = model.to(memory_format=torch.channels_last)
 
-    if bool(cfg.get("compile", False)) and hasattr(torch, "compile"):
+    if bool(cfg.compile) and hasattr(torch, "compile"):
         model = torch.compile(model)
 
     opt = torch.optim.AdamW(
         model.parameters(),
-        lr=float(cfg.get("lr", 1e-4)),
-        weight_decay=float(cfg.get("weight_decay", 1e-4)),
+        lr=float(cfg.lr),
+        weight_decay=float(cfg.weight_decay),
         fused=(device.type == "cuda"),
     )
 
-    use_amp = bool(cfg.get("amp", True)) and device.type == "cuda"
+    use_amp = bool(cfg.amp) and device.type == "cuda"
+    amp_dtype = torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    ema = EMA(model, decay=float(cfg.get("ema_decay", 0.999)))
+    ema = EMA(model, decay=float(cfg.ema_decay))
 
-    prediction_type = str(cfg.get("prediction_type", "v"))
+    prediction_type = str(cfg.prediction_type)
     diff = Diffusion(
         DiffusionConfig(
-            timesteps=int(cfg.get("timesteps", 1000)),
-            beta_start=float(cfg.get("beta_start", 1e-4)),
-            beta_end=float(cfg.get("beta_end", 2e-2)),
+            timesteps=int(cfg.timesteps),
+            beta_start=float(cfg.beta_start),
+            beta_end=float(cfg.beta_end),
             prediction_type=prediction_type,
         ),
         device=device,
     )
 
     start_step = 0
-    resume = str(cfg.get("resume_ckpt", "")).strip()
+    resume = str(cfg.resume_ckpt).strip()
     if resume:
         ck = load_ckpt(resume, device)
         model.load_state_dict(ck["model"], strict=True)
-        if "optimizer" in ck:
-            opt.load_state_dict(ck["optimizer"])
-        elif "opt" in ck:
+        if "opt" in ck:
             opt.load_state_dict(ck["opt"])
         elif "optimizer" in ck:
             opt.load_state_dict(ck["optimizer"])
@@ -333,26 +330,26 @@ def main() -> None:
     # ----------------------------
     # Train loop
     # ----------------------------
-    max_steps = int(cfg.get("max_steps", 120_000))
-    grad_accum = int(cfg.get("grad_accum_steps", 8))
-    log_every = int(cfg.get("log_every", 50))
-    save_every = int(cfg.get("save_every", 2000))
-    min_snr_gamma = float(cfg.get("min_snr_gamma", 5.0))
-    grad_clip = float(cfg.get("grad_clip_norm", 1.0))
+    max_steps = int(cfg.max_steps)
+    grad_accum = int(cfg.grad_accum_steps)
+    log_every = int(cfg.log_every)
+    save_every = int(cfg.save_every)
+    min_snr_gamma = float(cfg.min_snr_gamma)
+    grad_clip = float(cfg.grad_clip_norm)
 
     webui_mode = _is_webui_mode()
     metrics_path = _webui_metrics_path()
 
     pbar = tqdm(
-        total=int(cfg["max_steps"]),
+        total=int(cfg.max_steps),
         initial=start_step,
         desc="train",
         unit="step",
         disable=webui_mode,  # важное: webui -> без tqdm, иначе мусор в stdout
     )
 
-    log_every = int(cfg["log_every"])
-    log_path = Path(cfg["out_dir"]) / "train_log.jsonl"
+    log_every = int(cfg.log_every)
+    log_path = Path(cfg.out_dir) / "train_log.jsonl"
 
     start_time = time.perf_counter()
     last_log_time = start_time
@@ -375,17 +372,17 @@ def main() -> None:
     start_time = time.perf_counter()
     last_log = start_time
 
-    sanity_steps = int(cfg.get("sanity_overfit_steps", 0))
-    sanity_images = int(cfg.get("sanity_overfit_images", 0))
-    sanity_max_loss = float(cfg.get("sanity_overfit_max_loss", 0.1))
+    sanity_steps = int(cfg.sanity_overfit_steps)
+    sanity_images = int(cfg.sanity_overfit_images)
+    sanity_max_loss = float(cfg.sanity_overfit_max_loss)
     _sanity_overfit(
         model=model,
         tokenizer=tokenizer,
-        text_cfg=text_cfg,
         entries=train_entries,
         diff=diff,
         device=device,
         use_amp=use_amp,
+        amp_dtype=amp_dtype,
         steps=sanity_steps,
         max_images=sanity_images,
         max_loss=sanity_max_loss,
@@ -419,8 +416,9 @@ def main() -> None:
             xt = diff.q_sample(x0, t, noise)
             v_tgt = diff.v_target(x0, t, noise)
 
-            with torch.amp.autocast("cuda", enabled=use_amp):
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 v_pred = model(xt, t, txt_ids, txt_mask)
+                _assert_finite("v_pred", v_pred)
                 if v_pred.shape != v_tgt.shape or v_pred.dtype != v_tgt.dtype:
                     raise RuntimeError("v_pred/v_target shape or dtype mismatch")
                 per = F.mse_loss(v_pred, v_tgt, reduction="none").mean(dim=[1, 2, 3])  # [B]
@@ -435,7 +433,7 @@ def main() -> None:
                     "ema": ema.shadow,
                     "opt": opt.state_dict(),
                     "scaler": scaler.state_dict(),
-                    "cfg": cfg,
+                    "cfg": cfg_dict,
                     "meta": build_run_metadata(),
                     "batch_stats": {
                         "x0_min": float(x0.min().item()),
@@ -462,6 +460,23 @@ def main() -> None:
 
         ema.update(model)
 
+        bad_grads = _find_bad_grads(model)
+        if bad_grads:
+            dump_path = out_dir / f"nan_dump_{step:07d}.pt"
+            save_ckpt(str(dump_path), {
+                "step": step,
+                "model": model.state_dict(),
+                "ema": ema.shadow,
+                "opt": opt.state_dict(),
+                "scaler": scaler.state_dict(),
+                "cfg": cfg_dict,
+                "meta": build_run_metadata(),
+                "batch_stats": {
+                    "bad_grads": bad_grads[:10],
+                },
+            })
+            raise RuntimeError(f"Non-finite grads at step={step}: {bad_grads[:5]}")
+
         if step % log_every == 0:
             if device.type == "cuda":
                 torch.cuda.synchronize()
@@ -471,7 +486,7 @@ def main() -> None:
             steps_done = max(step - last_log_step, 1)
 
             # сколько "картинок" реально прошло за этот лог-интервал
-            images = steps_done * int(cfg["batch_size"]) * int(cfg["grad_accum_steps"])
+            images = steps_done * int(cfg.batch_size) * int(cfg.grad_accum_steps)
             img_per_sec = images / max(elapsed, 1e-9)
 
             peak_mem = (
@@ -481,7 +496,7 @@ def main() -> None:
             )
 
             total_elapsed = now - start_time
-            steps_left = int(cfg["max_steps"]) - step - 1
+            steps_left = int(cfg.max_steps) - step - 1
             sec_per_step = elapsed / steps_done
             eta_h = (steps_left * sec_per_step) / 3600.0
 
@@ -503,7 +518,7 @@ def main() -> None:
                 "elapsed_sec": float(total_elapsed),
                 "eta_h": float(eta_h),
                 "sec_per_step": float(sec_per_step),
-                "max_steps": int(cfg["max_steps"]),
+                "max_steps": int(cfg.max_steps),
             }
             line = json.dumps(payload, ensure_ascii=False)
 
@@ -525,11 +540,10 @@ def main() -> None:
             save_ckpt(str(stop_path), {
                 "step": step,
                 "model": model.state_dict(),
-                "optimizer": opt.state_dict(),
+                "opt": opt.state_dict(),
                 "scaler": scaler.state_dict(),
                 "ema": ema.shadow,
-                "tokenizer_vocab": tokenizer.vocab,
-                "cfg": cfg,
+                "cfg": cfg_dict,
                 "meta": build_run_metadata(),
             })
             print(f"[STOP] saved {stop_path}")
@@ -540,11 +554,10 @@ def main() -> None:
             save_ckpt(str(ckpt_path), {
                 "step": step,
                 "model": model.state_dict(),
-                "optimizer": opt.state_dict(),
+                "opt": opt.state_dict(),
                 "scaler": scaler.state_dict(),
                 "ema": ema.shadow,
-                "tokenizer_vocab": tokenizer.vocab,
-                "cfg": cfg,
+                "cfg": cfg_dict,
                 "meta": build_run_metadata(),
             })
             print(f"[OK] saved {ckpt_path}")
@@ -553,11 +566,10 @@ def main() -> None:
     save_ckpt(str(final_path), {
         "step": max_steps - 1,
         "model": model.state_dict(),
-        "optimizer": opt.state_dict(),
+        "opt": opt.state_dict(),
         "scaler": scaler.state_dict(),
         "ema": ema.shadow,
-        "tokenizer_vocab": tokenizer.vocab,
-        "cfg": cfg,
+        "cfg": cfg_dict,
         "meta": build_run_metadata(),
     })
     print(f"[DONE] saved {final_path}")
