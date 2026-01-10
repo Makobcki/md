@@ -162,7 +162,7 @@ class JobManager:
                     "line": line,
                 }, ensure_ascii=False))
 
-                if stream_name == "stdout" and line.startswith("{"):
+                if stream_name == "stdout":
                     try:
                         obj = json.loads(line)
                     except json.JSONDecodeError:
@@ -201,7 +201,7 @@ class JobManager:
 
         threading.Thread(target=_waiter, daemon=True).start()
 
-    def start_train(self) -> RunRecord:
+    def start_train(self, resume: Optional[str] = None) -> RunRecord:
         with self.lock:
             if self.process is not None:
                 raise RuntimeError("Another job is running.")
@@ -224,6 +224,8 @@ class JobManager:
                 "-u",
                 "train.py",
             ]
+            if resume:
+                cmd.extend(["--resume", str(resume)])
 
             run = RunRecord(
                 run_id=run_id,
@@ -245,7 +247,10 @@ class JobManager:
             )
             self.runs[run_id] = run
             self._save_state()
-            self._write_notes(run_dir, {"type": "train"})
+            notes: Dict[str, Any] = {"type": "train"}
+            if resume:
+                notes["resume"] = str(resume)
+            self._write_notes(run_dir, notes)
 
             env = os.environ.copy()
             env["WEBUI"] = "1"

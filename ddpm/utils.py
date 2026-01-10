@@ -151,7 +151,28 @@ def build_run_metadata() -> Dict[str, Any]:
         ).decode("utf-8").strip()
     except Exception:
         meta["git_commit"] = None
-    return meta
+    return _normalize_metadata(meta)
+
+
+def _normalize_metadata(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.hex()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.device):
+        return str(value)
+    if isinstance(value, torch.dtype):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _normalize_metadata(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_metadata(v) for v in value]
+    return str(value)
 
 def strip_state_dict_prefixes(sd: dict, prefixes=("_orig_mod.", "module.")) -> dict:
     out = {}

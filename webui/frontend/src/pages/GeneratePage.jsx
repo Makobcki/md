@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { api, wsUrl } from "../api.js";
+import { api, wsUrl, API_ORIGIN } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 
 export default function GeneratePage() {
@@ -13,6 +13,7 @@ export default function GeneratePage() {
   const [output, setOutput] = useState(null);
   const [error, setError] = useState("");
   const [gallery, setGallery] = useState([]);
+  const [metrics, setMetrics] = useState([]);
 
   useEffect(() => {
     const load = async () => {
@@ -74,6 +75,22 @@ export default function GeneratePage() {
     return () => ws.close();
   }, [runId]);
 
+  useEffect(() => {
+    if (!runId) return;
+    const ws = new WebSocket(wsUrl(`/ws/metrics/${runId}`));
+    ws.onmessage = (event) => {
+      try {
+        const metric = JSON.parse(event.data);
+        if (metric.type === "metric") {
+          setMetrics((prev) => [...prev.slice(-200), metric]);
+        }
+      } catch (e) {
+        console.warn(e);
+      }
+    };
+    return () => ws.close();
+  }, [runId]);
+
   const handleChange = (name, value) => {
     setArgs((prev) => ({ ...prev, [name]: value }));
   };
@@ -86,6 +103,7 @@ export default function GeneratePage() {
       setCommand(resp.command);
       setOutput(resp.output);
       setLogs([]);
+      setMetrics([]);
     } catch (err) {
       setError(err.message);
     }
@@ -101,13 +119,16 @@ export default function GeneratePage() {
   };
 
   const commandText = useMemo(() => command.join(" "), [command]);
+  const lastMetric = metrics[metrics.length - 1];
+  const progressMax = lastMetric?.max_steps || 0;
+  const progressValue = lastMetric?.step ?? 0;
 
   const toRunsUrl = (path) => {
     if (!path) return null;
     const marker = "webui_runs/";
     const idx = path.indexOf(marker);
     if (idx === -1) return null;
-    return `http://127.0.0.1:8000/runs/${path.slice(idx + marker.length)}`;
+    return `${API_ORIGIN}/runs/${path.slice(idx + marker.length)}`;
   };
 
   return (
@@ -124,7 +145,11 @@ export default function GeneratePage() {
           <span className="status-pill">{status.active ? "running" : "stopped"}</span>
         </div>
         {status.active && status.run.run_type === "sample" && (
-          <progress style={{ width: "100%" }} />
+          <progress
+            style={{ width: "100%" }}
+            value={progressMax ? progressValue : undefined}
+            max={progressMax || undefined}
+          />
         )}
         {commandText && <div className="muted">Command: {commandText}</div>}
       </div>

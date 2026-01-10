@@ -1,4 +1,7 @@
-const API_BASE = "http://127.0.0.1:8000";
+const DEFAULT_API_BASE =
+  window.location.port === "5173" ? "http://127.0.0.1:8000" : window.location.origin;
+const API_BASE = (import.meta?.env?.VITE_API_BASE || DEFAULT_API_BASE).replace(/\/+$/, "");
+export const API_ORIGIN = new URL(API_BASE).origin;
 
 export async function fetchJson(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -28,7 +31,8 @@ export const api = {
   getOutDirSummary: () => fetchJson("/api/out_dir/summary"),
   listSamples: () => fetchJson("/api/samples"),
   getSampleArgs: () => fetchJson("/api/sample/args"),
-  startTrain: () => fetchJson("/api/train/start", { method: "POST" }),
+  startTrain: (payload = {}) =>
+    fetchJson("/api/train/start", { method: "POST", body: JSON.stringify(payload) }),
   stopTrain: () => fetchJson("/api/train/stop", { method: "POST" }),
   startSample: (args) =>
     fetchJson("/api/sample/start", { method: "POST", body: JSON.stringify({ args }) }),
@@ -36,5 +40,7 @@ export const api = {
 };
 
 export function wsUrl(path) {
-  return `ws://127.0.0.1:8000${path}`;
+  const url = new URL(API_BASE);
+  const protocol = url.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${url.host}${path}`;
 }
