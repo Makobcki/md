@@ -121,7 +121,6 @@ def save_ckpt(path: str, obj: dict) -> None:
     os.replace(tmp, p)
 
 
-
 def seed_everything(seed: int, deterministic: bool = False) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -137,9 +136,9 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
 
 def build_run_metadata() -> Dict[str, Any]:
     meta = {
-        "torch_version": torch.__version__,
+        "torch_version": str(torch.__version__),
         "cuda_available": torch.cuda.is_available(),
-        "cuda_version": torch.version.cuda,
+        "cuda_version": (str(torch.version.cuda) if torch.version.cuda is not None else None),
         "cudnn_version": torch.backends.cudnn.version(),
         "device_count": torch.cuda.device_count(),
         "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
