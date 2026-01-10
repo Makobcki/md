@@ -155,9 +155,9 @@ def _sanity_overfit(
 
         with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
             v_pred = model(xt, t, txt_ids, txt_mask)
-            if v_pred.shape != v_tgt.shape or v_pred.dtype != v_tgt.dtype:
-                raise RuntimeError("v_pred/v_target shape or dtype mismatch in sanity overfit")
-            loss = F.mse_loss(v_pred, v_tgt)
+            if v_pred.shape != v_tgt.shape:
+                raise RuntimeError("v_pred/v_target shape mismatch in sanity overfit")
+            loss = F.mse_loss(v_pred, v_tgt.to(dtype=v_pred.dtype))
 
         scaler.scale(loss).backward()
         bad_grads = _find_bad_grads(model)
@@ -447,9 +447,9 @@ def main() -> None:
             with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 v_pred = model(xt, t, txt_ids, txt_mask)
                 _assert_finite("v_pred", v_pred)
-                if v_pred.shape != v_tgt.shape or v_pred.dtype != v_tgt.dtype:
-                    raise RuntimeError("v_pred/v_target shape or dtype mismatch")
-                per = F.mse_loss(v_pred, v_tgt, reduction="none").mean(dim=[1, 2, 3])  # [B]
+                if v_pred.shape != v_tgt.shape:
+                    raise RuntimeError("v_pred/v_target shape mismatch")
+                per = F.mse_loss(v_pred, v_tgt.to(dtype=v_pred.dtype), reduction="none").mean(dim=[1, 2, 3])  # [B]
                 w = get_min_snr_weights(diff.alpha_bar[t], gamma=min_snr_gamma)        # [B]
                 loss = (per * w).mean() / grad_accum
 

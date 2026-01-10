@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { api, wsUrl } from "../api.js";
+import { api, wsUrl, API_ORIGIN } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 
 export default function GeneratePage() {
@@ -128,7 +128,7 @@ export default function GeneratePage() {
     const marker = "webui_runs/";
     const idx = path.indexOf(marker);
     if (idx === -1) return null;
-    return `${window.location.origin}/runs/${path.slice(idx + marker.length)}`;
+    return `${API_ORIGIN}/runs/${path.slice(idx + marker.length)}`;
   };
 
   return (

@@ -1,4 +1,7 @@
-const API_BASE = window.location.origin;
+const DEFAULT_API_BASE =
+  window.location.port === "5173" ? "http://127.0.0.1:8000" : window.location.origin;
+const API_BASE = (import.meta?.env?.VITE_API_BASE || DEFAULT_API_BASE).replace(/\/+$/, "");
+export const API_ORIGIN = new URL(API_BASE).origin;
 
 export async function fetchJson(path, options = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -37,6 +40,7 @@ export const api = {
 };
 
 export function wsUrl(path) {
-  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-  return `${protocol}://${window.location.host}${path}`;
+  const url = new URL(API_BASE);
+  const protocol = url.protocol === "https:" ? "wss" : "ws";
+  return `${protocol}://${url.host}${path}`;
 }
