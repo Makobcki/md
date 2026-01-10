@@ -8,7 +8,7 @@ from PIL import Image
 from ddpm.ddim import DDIM, DDIMConfig
 from ddpm.diffusion import DDPM, DiffusionConfig
 from ddpm.model import UNet
-from ddpm.utils import EMA, load_ckpt, seed_everything
+from ddpm.utils import EMA, load_ckpt, seed_everything, strip_state_dict_prefixes
 
 
 def to_uint8(x: torch.Tensor) -> torch.Tensor:
@@ -67,7 +67,10 @@ def main() -> None:
         attn_head_dim=int(cfg.get("attn_head_dim", 32)),
     ).to(device, memory_format=torch.channels_last)
 
-    model.load_state_dict(ck["model"], strict=True)
+    ck["model"] = strip_state_dict_prefixes(ck["model"])
+    if "ema" in ck and isinstance(ck["ema"], dict):
+        ck["ema"] = strip_state_dict_prefixes(ck["ema"])
+
     model = model.float()
 
     # apply EMA

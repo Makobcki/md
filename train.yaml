@@ -1,60 +1,48 @@
-# =========================
 # data
-# =========================
-data_root: ./data/raw
+dataset: danbooru2017_kaggle
+data_root: ./data/raw/Danbooru
+image_size: 512
 split: train
-image_size: 384
 num_workers: 8
 prefetch_factor: 2
 
-# =========================
-# training===
-# ======================
+# caption
+caption_key: caption_llava_34b_no_tags_short
+min_tag_count: 8
+text_drop_prob: 0.10
+text_max_len: 64
+vocab_size: 50000
+vocab_path: ./runs/danbooru_512/vocab.json
+
+# training
 seed: 42
-deterministic: false
-batch_size: 4
-grad_accum_steps: 2
-
-lr: 5.0e-5
+batch_size: 1
+grad_accum_steps: 8
+amp: true
+grad_checkpoint: true
+lr: 1.0e-4
 weight_decay: 1.0e-4
-
-max_steps: 120000
-log_every: 50
+max_steps: 200000  # под 60 часов обычно 200k–300k, зависит от sec/step
 save_every: 2000
+log_every: 50
 
+# diffusion
+timesteps: 1000
 min_snr_gamma: 5.0
 
-# =========================
-# diffusion
-# =========================
-timesteps: 1000
-
-# =========================
-# model (U-Net)
-# =========================
-base_channels: 64
+# model
+base_channels: 64            # если не влезет → 48
 channel_mults: [1, 2, 3, 4]
 num_res_blocks: 2
 dropout: 0.1
 
-# =========================
-# performance / memory
-# =========================
-amp: true
-compile: true
-grad_checkpoint: false
-grad_clip_norm: 1.0
-
-# =========================
-# self-attention
-# =========================
-attn_resolutions: [48]
-attn_heads: 2
+# attention
+attn_resolutions: [64]       # self-attn
+xattn_resolutions: [64, 32]  # cross-attn
+attn_heads: 4
 attn_head_dim: 32
 
-# =========================
-# outputs
-# =========================
-out_dir: ./runs/ddpm_people_384
-resume_ckpt: "./runs/ddpm_people_384/ckpt_stop_0070391.pt"
-
+# text encoder
+text_dim: 256
+text_layers: 4
+text_heads: 4

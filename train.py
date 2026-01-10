@@ -319,8 +319,8 @@ def main() -> None:
 
                 loss = (loss_mse * weights).mean()
 
-                if not torch.isfinite(loss):
-                    raise RuntimeError(f"NaN/Inf loss at step {step}: {loss.item()}")
+                if not torch.isfinite(loss).item():
+                    raise RuntimeError(f"NaN/Inf loss at step {step}")
 
                 loss = loss / grad_accum
 
