@@ -13,20 +13,20 @@
 
 ## Возможности
 
-- 🧠 **U-Net** с residual blocks и spatial self-attention  
-- 🔁 **v-prediction** (как в современных diffusion-моделях)  
-- ⚖️ **Min-SNR loss weighting** — стабильное обучение  
-- 🌊 **DDIM sampling** (быстро и детерминированно)  
-- 🧮 **EMA** для качественного инференса  
-- 🚀 Оптимизирован под **8 GB VRAM** (AMP, SDPA, grad-checkpoint)  
-- 📦 Полностью **оффлайн**, без внешних зависимостей и API  
+- **U-Net** с residual blocks и spatial self-attention  
+- **v-prediction** (как в современных diffusion-моделях)  
+- **Min-SNR loss weighting** — стабильное обучение  
+- **DDIM sampling** (быстро и детерминированно)  
+- **EMA** для качественного инференса  
+- Оптимизирован под **8 GB VRAM** (AMP, SDPA, grad-checkpoint)  
+- Полностью **оффлайн**, без внешних зависимостей и API  
 
 ---
 
 ## Структура проекта
-
-md/
-├─ train.py            # обучение
+```
+md
+├─ train.py # обучение
 ├─ sample.py           # инференс (DDIM)
 ├─ sanity_check.py     # быстрый тест пайплайна
 ├─ train.yaml          # конфигурация обучения
@@ -40,7 +40,7 @@ md/
 │  └─ utils.py         # EMA, ckpt, seed, metadata
 └─ runs/
 └─ ...              # чекпоинты и логи
-
+```
 
 ---
 
@@ -54,8 +54,8 @@ pip install torch torchvision pyyaml pillow numpy tqdm
 
 Рекомендуется:
 
-* Python **3.10–3.13**
-* PyTorch **≥ 2.1**
+* Python **3.13+**
+* PyTorch **2.1+**
 * CUDA **12+**
 
 ---
@@ -64,7 +64,7 @@ pip install torch torchvision pyyaml pillow numpy tqdm
 
 Ожидаемая структура:
 
-
+```
 data/raw/
 └─ people/
    ├─ train/
@@ -73,7 +73,7 @@ data/raw/
    │  └─ ...
    ├─ val/
    └─ test/
-
+```
 
 * изображения RGB,
 * произвольные разрешения (будут приведены к `image_size`),
@@ -172,26 +172,6 @@ attn_resolutions: [48]
 
 ---
 
-## Частые проблемы
-
-### Генерируется только шум
-
-Проверь:
-
-* что используется **EMA** при сэмплинге,
-* корректную формулу Min-SNR для v-pred,
-* что датасет не содержит паддинговых рамок,
-* что loss действительно уменьшается.
-
-### CUDA out of memory
-
-* закрой все процессы на GPU (`nvidia-smi`),
-* уменьши `num_workers`,
-* снизь `batch_size`,
-* включи `grad_checkpoint`.
-
----
-
 ## Web UI (опционально)
 
 Backend:
@@ -206,13 +186,4 @@ Frontend:
 cd webui/frontend
 npm install
 npm run dev
-```
-
----
-
-## Лицензия
-
-Проект предоставляется **как есть**, для исследований и обучения.
-
-```
 ```
