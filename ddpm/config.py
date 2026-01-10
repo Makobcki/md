@@ -16,6 +16,7 @@ class TrainConfig:
     data_root: str = "./data/raw/Danbooru"
     image_dir: str = "image_512"
     meta_dir: str = "meta"
+    tags_dir: str = "tags"
     caption_field: str = "caption_llava_34b_no_tags_short"
     min_tag_count: int = 8
     require_512: bool = True

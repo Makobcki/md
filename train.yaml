@@ -1,6 +1,7 @@
 data_root: ./data/raw/Danbooru
 image_dir: image_512
 meta_dir: meta
+tags_dir: tags
 caption_field: caption_llava_34b_no_tags_short
 min_tag_count: 8
 require_512: true
