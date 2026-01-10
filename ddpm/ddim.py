@@ -10,8 +10,8 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from data import SimpleTokenizer, TextConfig
-from model import UNet, UNetConfig
+from ddpm.data import SimpleTokenizer, TextConfig
+from ddpm.model import UNet, UNetConfig
 
 
 @dataclass(frozen=True)

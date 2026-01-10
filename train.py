@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Dict
 
-import tqdm
+from tqdm import tqdm
 
 import torch
 import torch.nn.functional as F
