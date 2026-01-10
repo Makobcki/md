@@ -128,12 +128,13 @@ class CrossAttention2d(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, time_dim: int, dropout: float):
+    def __init__(self, in_ch: int, out_ch: int, time_dim: int, dropout: float, use_scale_shift: bool):
         super().__init__()
         self.norm1 = nn.GroupNorm(_gn_groups(in_ch), in_ch, eps=1e-6)
         self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
 
-        self.tproj = nn.Linear(time_dim, out_ch)
+        self.use_scale_shift = use_scale_shift
+        self.tproj = nn.Linear(time_dim, out_ch * 2 if use_scale_shift else out_ch)
         self.norm2 = nn.GroupNorm(_gn_groups(out_ch), out_ch, eps=1e-6)
         self.drop = nn.Dropout(dropout)
         self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
@@ -143,8 +144,16 @@ class ResBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
         h = self.conv1(self.act(self.norm1(x)))
-        h = h + self.tproj(self.act(t_emb)).unsqueeze(-1).unsqueeze(-1)
-        h = self.conv2(self.drop(self.act(self.norm2(h))))
+        t = self.tproj(self.act(t_emb)).unsqueeze(-1).unsqueeze(-1)
+        if self.use_scale_shift:
+            scale, shift = t.chunk(2, dim=1)
+            h = self.norm2(h)
+            h = h * (1.0 + scale) + shift
+            h = self.act(h)
+            h = self.conv2(self.drop(h))
+        else:
+            h = h + t
+            h = self.conv2(self.drop(self.act(self.norm2(h))))
         return self.skip(x) + h
 
 
@@ -182,6 +191,7 @@ class UNetConfig:
     text_layers: int = 4
     text_heads: int = 4
     text_max_len: int = 64
+    use_scale_shift_norm: bool = False
 
 
 class UNet(nn.Module):
@@ -219,7 +229,9 @@ class UNet(nn.Module):
         cur = chs[0]
         for level, ch in enumerate(chs):
             for _ in range(cfg.num_res_blocks):
-                self.down_blocks.append(ResBlock(cur, ch, time_dim=time_dim, dropout=cfg.dropout))
+                self.down_blocks.append(
+                    ResBlock(cur, ch, time_dim=time_dim, dropout=cfg.dropout, use_scale_shift=cfg.use_scale_shift_norm)
+                )
                 cur = ch
                 self.down_sa.append(SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim))
                 self.down_ca.append(CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim))
@@ -227,10 +239,10 @@ class UNet(nn.Module):
                 self.downsamples.append(Downsample(cur))
 
         # Mid
-        self.mid1 = ResBlock(cur, cur, time_dim=time_dim, dropout=cfg.dropout)
+        self.mid1 = ResBlock(cur, cur, time_dim=time_dim, dropout=cfg.dropout, use_scale_shift=cfg.use_scale_shift_norm)
         self.mid_sa = SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim)
         self.mid_ca = CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim)
-        self.mid2 = ResBlock(cur, cur, time_dim=time_dim, dropout=cfg.dropout)
+        self.mid2 = ResBlock(cur, cur, time_dim=time_dim, dropout=cfg.dropout, use_scale_shift=cfg.use_scale_shift_norm)
 
         # Up
         self.up_blocks = nn.ModuleList()
@@ -241,7 +253,9 @@ class UNet(nn.Module):
         for level in reversed(range(len(chs))):
             ch = chs[level]
             for _ in range(cfg.num_res_blocks):
-                self.up_blocks.append(ResBlock(cur + ch, ch, time_dim=time_dim, dropout=cfg.dropout))
+                self.up_blocks.append(
+                    ResBlock(cur + ch, ch, time_dim=time_dim, dropout=cfg.dropout, use_scale_shift=cfg.use_scale_shift_norm)
+                )
                 cur = ch
                 self.up_sa.append(SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim))
                 self.up_ca.append(CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim))
