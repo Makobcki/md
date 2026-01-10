@@ -2,52 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 from PIL import Image
 
 from ddpm.data import SimpleTokenizer, TextConfig
+from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
 from ddpm.utils import EMA, load_ckpt
-
-
-@dataclass(frozen=True)
-class DiffusionConfig:
-    timesteps: int = 1000
-    beta_start: float = 1e-4
-    beta_end: float = 2e-2
-
-
-class Diffusion:
-    def __init__(self, cfg: DiffusionConfig, device: torch.device):
-        self.cfg = cfg
-        self.device = device
-
-        betas = torch.linspace(cfg.beta_start, cfg.beta_end, cfg.timesteps, device=device, dtype=torch.float32)
-        alphas = 1.0 - betas
-        alpha_bar = torch.cumprod(alphas, dim=0)
-
-        self.betas = betas
-        self.alphas = alphas
-        self.alpha_bar = alpha_bar
-
-    def q_sample(self, x0: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
-        a = self.alpha_bar[t].view(-1, 1, 1, 1)
-        return torch.sqrt(a) * x0 + torch.sqrt(1.0 - a) * noise
-
-    def v_target(self, x0: torch.Tensor, t: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
-        a = self.alpha_bar[t].view(-1, 1, 1, 1)
-        return torch.sqrt(a) * noise - torch.sqrt(1.0 - a) * x0
-
-    def v_to_x0_eps(self, xt: torch.Tensor, t: torch.Tensor, v: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        a = self.alpha_bar[t].view(-1, 1, 1, 1)
-        x0 = torch.sqrt(a) * xt - torch.sqrt(1.0 - a) * v
-        eps = torch.sqrt(1.0 - a) * xt + torch.sqrt(a) * v
-        return x0, eps
 
 
 @torch.no_grad()
@@ -81,7 +45,8 @@ def ddim_sample(
         else:
             v = v_cond
 
-        x0, eps = diffusion.v_to_x0_eps(x, t, v)
+        x0 = diffusion.v_to_x0(x, t, v)
+        eps = diffusion.v_to_eps(x, t, v)
         if clamp_x0:
             x0 = x0.clamp(-1.0, 1.0)
 
@@ -100,6 +65,61 @@ def ddim_sample(
         x = torch.sqrt(a_prev) * x0 + dir_xt + sigma * noise
 
     return x
+
+
+@torch.no_grad()
+def heun_sample(
+    model: UNet,
+    diffusion: Diffusion,
+    shape: Tuple[int, int, int, int],
+    txt_ids: torch.Tensor,
+    txt_mask: torch.Tensor,
+    steps: int = 30,
+    cfg_scale: float = 5.0,
+    uncond_ids: Optional[torch.Tensor] = None,
+    uncond_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    device = diffusion.device
+    b, _, _, _ = shape
+    x = torch.randn(shape, device=device)
+
+    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps, device=device).long()
+
+    for i in range(len(t_schedule) - 1):
+        t = t_schedule[i].repeat(b)
+        t_next = t_schedule[i + 1].repeat(b)
+        sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1)
+        sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1)
+
+        v_cond = model(x, t, txt_ids, txt_mask)
+        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
+            v_un = model(x, t, uncond_ids, uncond_mask)
+            v = v_un + cfg_scale * (v_cond - v_un)
+        else:
+            v = v_cond
+
+        x0 = diffusion.v_to_x0(x, t, v)
+        d = (x - x0) / sigma
+        x_euler = x + d * (sigma_next - sigma)
+
+        v_cond_next = model(x_euler, t_next, txt_ids, txt_mask)
+        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
+            v_un_next = model(x_euler, t_next, uncond_ids, uncond_mask)
+            v_next = v_un_next + cfg_scale * (v_cond_next - v_un_next)
+        else:
+            v_next = v_cond_next
+
+        x0_next = diffusion.v_to_x0(x_euler, t_next, v_next)
+        d_next = (x_euler - x0_next) / sigma_next
+        x = x + 0.5 * (d + d_next) * (sigma_next - sigma)
+
+    t_final = t_schedule[-1].repeat(b)
+    v_final = model(x, t_final, txt_ids, txt_mask)
+    if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
+        v_un_final = model(x, t_final, uncond_ids, uncond_mask)
+        v_final = v_un_final + cfg_scale * (v_final - v_un_final)
+    x0_final = diffusion.v_to_x0(x, t_final, v_final)
+    return x0_final
 
 
 def _to_pil(x: torch.Tensor) -> Image.Image:
@@ -175,7 +195,12 @@ def main():
     model.eval()
 
     diff = Diffusion(
-        DiffusionConfig(timesteps=int(cfg.get("timesteps", 1000))),
+        DiffusionConfig(
+            timesteps=int(cfg.get("timesteps", 1000)),
+            beta_start=float(cfg.get("beta_start", 1e-4)),
+            beta_end=float(cfg.get("beta_end", 2e-2)),
+            prediction_type=str(cfg.get("prediction_type", "v")),
+        ),
         device=device,
     )
 

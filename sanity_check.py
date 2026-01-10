@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from ddpm.data import SimpleTokenizer, TextConfig
-from ddpm.ddim import Diffusion, DiffusionConfig
+from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
 from ddpm.utils import EMA, load_ckpt, save_ckpt, seed_everything
 
@@ -55,7 +55,7 @@ def main() -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     ema = EMA(model, decay=0.9)
 
-    diffusion = Diffusion(DiffusionConfig(timesteps=100), device=device)
+    diffusion = Diffusion(DiffusionConfig(timesteps=100, prediction_type="v"), device=device)
     ids, mask = tokenizer.encode("test")
     ids = ids.unsqueeze(0).repeat(args.batch_size, 1).to(device)
     mask = mask.unsqueeze(0).repeat(args.batch_size, 1).to(device)
@@ -97,6 +97,7 @@ def main() -> None:
             "image_size": args.image_size,
             "timesteps": diffusion.cfg.timesteps,
             "text_max_len": text_cfg.max_len,
+            "prediction_type": "v",
         },
     })
 

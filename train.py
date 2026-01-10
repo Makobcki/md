@@ -17,8 +17,8 @@ import yaml
 from ddpm.data import DanbooruConfig, TextConfig, SimpleTokenizer, DanbooruDataset, build_or_load_index, collate_with_tokenizer
 
 from ddpm.model import UNet, UNetConfig
-from ddpm.ddim import Diffusion, DiffusionConfig
-from ddpm.utils import EMA, load_ckpt, save_ckpt
+from ddpm.diffusion import Diffusion, DiffusionConfig
+from ddpm.utils import EMA, load_ckpt, save_ckpt, build_run_metadata
 
 def _is_webui_mode() -> bool:
     return os.environ.get("WEBUI") == "1"
@@ -302,11 +302,13 @@ def main() -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     ema = EMA(model, decay=float(cfg.get("ema_decay", 0.999)))
 
+    prediction_type = str(cfg.get("prediction_type", "v"))
     diff = Diffusion(
         DiffusionConfig(
             timesteps=int(cfg.get("timesteps", 1000)),
             beta_start=float(cfg.get("beta_start", 1e-4)),
             beta_end=float(cfg.get("beta_end", 2e-2)),
+            prediction_type=prediction_type,
         ),
         device=device,
     )
@@ -320,6 +322,8 @@ def main() -> None:
             opt.load_state_dict(ck["optimizer"])
         elif "opt" in ck:
             opt.load_state_dict(ck["opt"])
+        elif "optimizer" in ck:
+            opt.load_state_dict(ck["optimizer"])
         if "scaler" in ck:
             scaler.load_state_dict(ck["scaler"])
         if "ema" in ck:
@@ -424,6 +428,22 @@ def main() -> None:
                 loss = (per * w).mean() / grad_accum
 
             if not torch.isfinite(loss):
+                dump_path = out_dir / f"nan_dump_{step:07d}.pt"
+                save_ckpt(str(dump_path), {
+                    "step": step,
+                    "model": model.state_dict(),
+                    "ema": ema.shadow,
+                    "opt": opt.state_dict(),
+                    "scaler": scaler.state_dict(),
+                    "cfg": cfg,
+                    "meta": build_run_metadata(),
+                    "batch_stats": {
+                        "x0_min": float(x0.min().item()),
+                        "x0_max": float(x0.max().item()),
+                        "alpha_bar_min": float(alpha_bar_t.min().item()),
+                        "alpha_bar_max": float(alpha_bar_t.max().item()),
+                    },
+                })
                 raise RuntimeError(f"Non-finite loss at step={step}: {loss.item()}")
 
             total_loss += float(loss.detach().cpu())
@@ -510,6 +530,7 @@ def main() -> None:
                 "ema": ema.shadow,
                 "tokenizer_vocab": tokenizer.vocab,
                 "cfg": cfg,
+                "meta": build_run_metadata(),
             })
             print(f"[STOP] saved {stop_path}")
             return
@@ -524,6 +545,7 @@ def main() -> None:
                 "ema": ema.shadow,
                 "tokenizer_vocab": tokenizer.vocab,
                 "cfg": cfg,
+                "meta": build_run_metadata(),
             })
             print(f"[OK] saved {ckpt_path}")
 
@@ -536,6 +558,7 @@ def main() -> None:
         "ema": ema.shadow,
         "tokenizer_vocab": tokenizer.vocab,
         "cfg": cfg,
+        "meta": build_run_metadata(),
     })
     print(f"[DONE] saved {final_path}")
 
