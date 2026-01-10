@@ -126,8 +126,6 @@ def _read_json(path: Path) -> Optional[dict]:
 
 
 def _extract_caption(meta: dict, field: str) -> str:
-    if field in meta and isinstance(meta[field], str):
-        return meta[field]
     hf = meta.get("hf_row")
     if isinstance(hf, dict) and field in hf and isinstance(hf[field], str):
         return hf[field]
@@ -258,7 +256,7 @@ class DanbooruDataset(Dataset):
         with Image.open(path) as im:
             im = im.convert("RGB")
             if im.size != (512, 512):
-                im = im.resize((512, 512), resample=Image.BICUBIC)
+                raise RuntimeError(f"Unexpected image size: {im.size}")
             # PIL -> torch float32 in [0,1], CHW
             import numpy as np
             arr = np.asarray(im, dtype=np.float32) / 255.0  # HWC

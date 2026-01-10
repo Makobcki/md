@@ -6,7 +6,6 @@ import os
 import signal
 import time
 from pathlib import Path
-from typing import Dict
 
 from tqdm import tqdm
 
@@ -18,8 +17,8 @@ import yaml
 from ddpm.data import DanbooruConfig, TextConfig, SimpleTokenizer, DanbooruDataset, build_or_load_index, collate_with_tokenizer
 
 from ddpm.model import UNet, UNetConfig
-from ddpm.ddim import Diffusion, DiffusionConfig
-
+from ddpm.diffusion import Diffusion, DiffusionConfig
+from ddpm.utils import EMA, load_ckpt, save_ckpt, build_run_metadata
 
 def _is_webui_mode() -> bool:
     return os.environ.get("WEBUI") == "1"
@@ -54,31 +53,9 @@ def _emit_metric_line(
 
 
 
-class EMA:
-    def __init__(self, model: torch.nn.Module, decay: float = 0.999):
-        self.decay = float(decay)
-        self.shadow: Dict[str, torch.Tensor] = {}
-        for k, v in model.state_dict().items():
-            if v.dtype.is_floating_point:
-                self.shadow[k] = v.detach().clone()
-
-    @torch.no_grad()
-    def update(self, model: torch.nn.Module) -> None:
-        d = self.decay
-        msd = model.state_dict()
-        for k, v in msd.items():
-            if k in self.shadow and v.dtype.is_floating_point:
-                self.shadow[k].mul_(d).add_(v.detach(), alpha=1.0 - d)
-
-
 def load_yaml(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
-
-
-def save_ckpt(path: str, obj: dict) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    torch.save(obj, path)
 
 
 def seed_everything(seed: int, deterministic: bool = False) -> None:
@@ -97,6 +74,103 @@ def get_min_snr_weights(alpha_bar_t: torch.Tensor, gamma: float = 5.0) -> torch.
     snr = a / (1.0 - a + eps)
     g = torch.full_like(snr, float(gamma))
     return torch.minimum(snr, g) / (snr + 1.0)
+
+
+def _assert_finite(name: str, x: torch.Tensor) -> None:
+    if not torch.isfinite(x).all():
+        raise RuntimeError(f"{name} has NaN/Inf values")
+
+
+def _assert_in_range(name: str, x: torch.Tensor, lo: float, hi: float, eps: float = 1e-3) -> None:
+    if x.min().item() < lo - eps or x.max().item() > hi + eps:
+        raise RuntimeError(f"{name} is out of range [{lo}, {hi}]")
+
+
+def _sanity_overfit(
+    *,
+    model: UNet,
+    tokenizer: SimpleTokenizer,
+    text_cfg: TextConfig,
+    entries: list[dict],
+    diff: Diffusion,
+    device: torch.device,
+    use_amp: bool,
+    steps: int,
+    max_images: int,
+    max_loss: float,
+    opt: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    ema: EMA,
+) -> None:
+    if steps <= 0 or max_images <= 0:
+        return
+
+    if not entries:
+        print("[SANITY] skip overfit: no training entries found")
+        return
+
+    max_images = min(max_images, len(entries))
+    sanity_entries = entries[:max_images]
+    sanity_ds = DanbooruDataset(
+        entries=sanity_entries,
+        text_cfg=text_cfg,
+        tokenizer=tokenizer,
+        cond_drop_prob=0.0,
+        seed=0,
+    )
+    batch = [sanity_ds[i] for i in range(max_images)]
+    x0, txt_ids, txt_mask = collate_with_tokenizer(batch)
+    x0 = x0.to(device).to(memory_format=torch.channels_last)
+    txt_ids = txt_ids.to(device)
+    txt_mask = txt_mask.to(device)
+
+    _assert_in_range("sanity x0", x0, -1.0, 1.0)
+
+    backup = {
+        "model": {k: v.detach().clone() for k, v in model.state_dict().items()},
+        "opt": opt.state_dict(),
+        "scaler": scaler.state_dict(),
+        "ema": {k: v.detach().clone() for k, v in ema.shadow.items()},
+    }
+
+    model.train()
+    last_loss = None
+    for step in range(steps):
+        opt.zero_grad(set_to_none=True)
+        t = torch.randint(0, diff.cfg.timesteps, (x0.shape[0],), device=device, dtype=torch.long)
+        noise = torch.randn_like(x0)
+
+        alpha_bar_t = diff.alpha_bar[t]
+        _assert_finite("alpha_bar[t]", alpha_bar_t)
+
+        xt = diff.q_sample(x0, t, noise)
+        v_tgt = diff.v_target(x0, t, noise)
+
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            v_pred = model(xt, t, txt_ids, txt_mask)
+            if v_pred.shape != v_tgt.shape or v_pred.dtype != v_tgt.dtype:
+                raise RuntimeError("v_pred/v_target shape or dtype mismatch in sanity overfit")
+            loss = F.mse_loss(v_pred, v_tgt)
+
+        scaler.scale(loss).backward()
+        scaler.step(opt)
+        scaler.update()
+        ema.update(model)
+        last_loss = float(loss.detach().cpu())
+
+        if step % max(steps // 5, 1) == 0:
+            print(f"[SANITY] overfit step {step}/{steps} loss={last_loss:.6f}")
+        if last_loss <= max_loss:
+            break
+
+    if last_loss is None or last_loss > max_loss:
+        raise RuntimeError(f"Sanity overfit loss did not reach target: {last_loss} > {max_loss}")
+
+    model.load_state_dict(backup["model"], strict=True)
+    opt.load_state_dict(backup["opt"])
+    scaler.load_state_dict(backup["scaler"])
+    ema.shadow = backup["ema"]
+    print(f"[SANITY] overfit OK (loss={last_loss:.6f})")
 
 
 def main() -> None:
@@ -208,6 +282,7 @@ def main() -> None:
         text_layers=int(cfg.get("text_layers", 4)),
         text_heads=int(cfg.get("text_heads", 4)),
         text_max_len=int(cfg.get("text_max_len", 64)),
+        use_scale_shift_norm=bool(cfg.get("use_scale_shift_norm", False)),
     )
 
     model = UNet(unet_cfg).to(device)
@@ -227,11 +302,13 @@ def main() -> None:
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     ema = EMA(model, decay=float(cfg.get("ema_decay", 0.999)))
 
+    prediction_type = str(cfg.get("prediction_type", "v"))
     diff = Diffusion(
         DiffusionConfig(
             timesteps=int(cfg.get("timesteps", 1000)),
             beta_start=float(cfg.get("beta_start", 1e-4)),
             beta_end=float(cfg.get("beta_end", 2e-2)),
+            prediction_type=prediction_type,
         ),
         device=device,
     )
@@ -239,10 +316,12 @@ def main() -> None:
     start_step = 0
     resume = str(cfg.get("resume_ckpt", "")).strip()
     if resume:
-        ck = torch.load(resume, map_location=device)
+        ck = load_ckpt(resume, device)
         model.load_state_dict(ck["model"], strict=True)
         if "opt" in ck:
             opt.load_state_dict(ck["opt"])
+        elif "optimizer" in ck:
+            opt.load_state_dict(ck["optimizer"])
         if "scaler" in ck:
             scaler.load_state_dict(ck["scaler"])
         if "ema" in ck:
@@ -294,6 +373,25 @@ def main() -> None:
     start_time = time.perf_counter()
     last_log = start_time
 
+    sanity_steps = int(cfg.get("sanity_overfit_steps", 0))
+    sanity_images = int(cfg.get("sanity_overfit_images", 0))
+    sanity_max_loss = float(cfg.get("sanity_overfit_max_loss", 0.1))
+    _sanity_overfit(
+        model=model,
+        tokenizer=tokenizer,
+        text_cfg=text_cfg,
+        entries=train_entries,
+        diff=diff,
+        device=device,
+        use_amp=use_amp,
+        steps=sanity_steps,
+        max_images=sanity_images,
+        max_loss=sanity_max_loss,
+        opt=opt,
+        scaler=scaler,
+        ema=ema,
+    )
+
     for step in range(start_step, max_steps):
         opt.zero_grad(set_to_none=True)
         total_loss = 0.0
@@ -309,19 +407,41 @@ def main() -> None:
             txt_ids = txt_ids.to(device, non_blocking=True)
             txt_mask = txt_mask.to(device, non_blocking=True)
 
+            _assert_in_range("x0", x0, -1.0, 1.0)
+
             b = x0.shape[0]
             t = torch.randint(0, diff.cfg.timesteps, (b,), device=device, dtype=torch.long)
             noise = torch.randn_like(x0)
+            alpha_bar_t = diff.alpha_bar[t]
+            _assert_finite("alpha_bar[t]", alpha_bar_t)
             xt = diff.q_sample(x0, t, noise)
             v_tgt = diff.v_target(x0, t, noise)
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 v_pred = model(xt, t, txt_ids, txt_mask)
+                if v_pred.shape != v_tgt.shape or v_pred.dtype != v_tgt.dtype:
+                    raise RuntimeError("v_pred/v_target shape or dtype mismatch")
                 per = F.mse_loss(v_pred, v_tgt, reduction="none").mean(dim=[1, 2, 3])  # [B]
                 w = get_min_snr_weights(diff.alpha_bar[t], gamma=min_snr_gamma)        # [B]
                 loss = (per * w).mean() / grad_accum
 
             if not torch.isfinite(loss):
+                dump_path = out_dir / f"nan_dump_{step:07d}.pt"
+                save_ckpt(str(dump_path), {
+                    "step": step,
+                    "model": model.state_dict(),
+                    "ema": ema.shadow,
+                    "opt": opt.state_dict(),
+                    "scaler": scaler.state_dict(),
+                    "cfg": cfg,
+                    "meta": build_run_metadata(),
+                    "batch_stats": {
+                        "x0_min": float(x0.min().item()),
+                        "x0_max": float(x0.max().item()),
+                        "alpha_bar_min": float(alpha_bar_t.min().item()),
+                        "alpha_bar_max": float(alpha_bar_t.max().item()),
+                    },
+                })
                 raise RuntimeError(f"Non-finite loss at step={step}: {loss.item()}")
 
             total_loss += float(loss.detach().cpu())
@@ -406,7 +526,9 @@ def main() -> None:
                 "opt": opt.state_dict(),
                 "scaler": scaler.state_dict(),
                 "ema": ema.shadow,
+                "tokenizer_vocab": tokenizer.vocab,
                 "cfg": cfg,
+                "meta": build_run_metadata(),
             })
             print(f"[STOP] saved {stop_path}")
             return
@@ -419,7 +541,9 @@ def main() -> None:
                 "opt": opt.state_dict(),
                 "scaler": scaler.state_dict(),
                 "ema": ema.shadow,
+                "tokenizer_vocab": tokenizer.vocab,
                 "cfg": cfg,
+                "meta": build_run_metadata(),
             })
             print(f"[OK] saved {ckpt_path}")
 
@@ -430,7 +554,9 @@ def main() -> None:
         "opt": opt.state_dict(),
         "scaler": scaler.state_dict(),
         "ema": ema.shadow,
+        "tokenizer_vocab": tokenizer.vocab,
         "cfg": cfg,
+        "meta": build_run_metadata(),
     })
     print(f"[DONE] saved {final_path}")
 
