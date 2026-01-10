@@ -162,8 +162,13 @@ class JobManager:
                     "line": line,
                 }, ensure_ascii=False))
 
-                if stream_name == "stdout" and line.startswith("{") and "\"type\":\"metric\"" in line:
-                    self.ws_manager.send_from_thread(run.run_id, "metrics", line)
+                if stream_name == "stdout" and line.startswith("{"):
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        obj = None
+                    if isinstance(obj, dict) and obj.get("type") == "metric":
+                        self.ws_manager.send_from_thread(run.run_id, "metrics", line)
 
         stdout_thread = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
         stderr_thread = threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True)
@@ -369,6 +374,7 @@ class JobManager:
             run = self.runs[self.current_run_id]
             run.status = "stopping"
             self._save_state()
+
 
             proc = self.process
             try:
