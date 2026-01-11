@@ -15,7 +15,9 @@ out_dir: ./runs/danbooru_512
 batch_size: 1
 grad_accum_steps: 8
 num_workers: 8
-prefetch_factor: 2
+prefetch_factor: 4
+pin_memory: true
+persistent_workers: true
 
 lr: 1.0e-4
 weight_decay: 1.0e-4
@@ -53,10 +55,24 @@ cond_drop_prob: 0.10
 amp: true
 amp_dtype: fp16
 compile: false
+compile_warmup_steps: 2
+compile_cudagraphs: true
 grad_clip_norm: 1.0
 ema_decay: 0.999
 resume_ckpt: ""
 deterministic: false
+tf32: true
+cudnn_benchmark: true
+channels_last: true
+enable_flash_sdp: true
+enable_mem_efficient_sdp: true
+enable_math_sdp: false
+mode: pixel
+latent_channels: 4
+latent_downsample_factor: 8
+vae_pretrained: ""
+vae_freeze: true
+vae_scaling_factor: 0.18215
 sanity_overfit_steps: 100
 sanity_overfit_images: 2
 sanity_overfit_max_loss: 0.1

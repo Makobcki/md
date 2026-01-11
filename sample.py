@@ -21,6 +21,7 @@ from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
 from ddpm.text import BPETokenizer, TextConfig
 from ddpm.utils import EMA, load_ckpt
+from ddpm.vae import VAEWrapper
 
 
 @torch.no_grad()
@@ -82,8 +83,10 @@ def main() -> None:
     )
     tokenizer = BPETokenizer.from_files(vocab_path, merges_path, text_cfg)
 
+    mode = str(cfg.get("mode", "pixel"))
+    image_channels = 3 if mode == "pixel" else int(cfg.get("latent_channels", 4))
     unet_cfg = UNetConfig(
-        image_channels=3,
+        image_channels=image_channels,
         base_channels=int(cfg.get("base_channels", 64)),
         channel_mults=tuple(cfg.get("channel_mults", [1, 2, 3, 4])),
         num_res_blocks=int(cfg.get("num_res_blocks", 2)),
@@ -99,7 +102,11 @@ def main() -> None:
         use_scale_shift_norm=bool(cfg.get("use_scale_shift_norm", False)),
     )
 
-    model = UNet(unet_cfg).to(device, memory_format=torch.channels_last)
+    channels_last = bool(cfg.get("channels_last", True))
+    if channels_last:
+        model = UNet(unet_cfg).to(device, memory_format=torch.channels_last)
+    else:
+        model = UNet(unet_cfg).to(device)
     model.load_state_dict(ck["model"], strict=True)
 
     # EMA for UNet only
@@ -132,6 +139,22 @@ def main() -> None:
     sampler = getattr(args, "sampler", "heun")
     h = int(cfg.get("image_size", 512))
     w = int(cfg.get("image_size", 512))
+    if mode == "latent":
+        downsample = int(cfg.get("latent_downsample_factor", 8))
+        if h % downsample != 0 or w % downsample != 0:
+            raise RuntimeError("image_size must be divisible by latent_downsample_factor.")
+        latent_h = h // downsample
+        latent_w = w // downsample
+        vae_pretrained = str(cfg.get("vae_pretrained", ""))
+        if not vae_pretrained:
+            raise RuntimeError("latent mode requires vae_pretrained in checkpoint config.")
+        vae = VAEWrapper(
+            pretrained=vae_pretrained,
+            freeze=True,
+            scaling_factor=float(cfg.get("vae_scaling_factor", 0.18215)),
+            device=device,
+            dtype=torch.bfloat16 if cfg.get("amp_dtype") == "bf16" else torch.float16,
+        )
     per_image_steps = max(int(args.steps), 0)
     total_steps = per_image_steps * max(args.n, 1)
 
@@ -139,7 +162,10 @@ def main() -> None:
     for i, seed in enumerate(seeds):
         gen = torch.Generator(device=device)
         gen.manual_seed(seed)
-        noise = torch.randn((1, 3, h, w), device=device, generator=gen)
+        if mode == "latent":
+            noise = torch.randn((1, image_channels, latent_h, latent_w), device=device, generator=gen)
+        else:
+            noise = torch.randn((1, 3, h, w), device=device, generator=gen)
         def _progress_cb(step: int, _total: int, image_index: int = i) -> None:
             _emit_event({
                 "type": "metric",
@@ -148,10 +174,11 @@ def main() -> None:
                 "sampler": sampler,
             })
 
+        shape = (1, image_channels, latent_h, latent_w) if mode == "latent" else (1, 3, h, w)
         sample_kwargs = dict(
             model=model,
             diffusion=diffusion,
-            shape=(1, 3, h, w),
+            shape=shape,
             txt_ids=cond_ids,
             txt_mask=cond_mask,
             steps=args.steps,
@@ -174,11 +201,14 @@ def main() -> None:
             x = heun_sample(**sample_kwargs)
         else:
             raise ValueError(f"Unknown sampler: {sampler}")
+        if mode == "latent":
+            x = vae.decode(x)
         samples.append(x)
 
     x = torch.cat(samples, dim=0)
 
-    x = (x.clamp(-1, 1) + 1) / 2
+    if mode == "pixel":
+        x = (x.clamp(-1, 1) + 1) / 2
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     save_image(x, out, nrow=int((args.n) ** 0.5))

@@ -16,10 +16,17 @@ from torch.utils.data import DataLoader
 import yaml
 
 from ddpm.config import TrainConfig
-from ddpm.data import DanbooruConfig, DanbooruDataset, build_or_load_index, collate_with_tokenizer
+from ddpm.data import (
+    DanbooruConfig,
+    DanbooruDataset,
+    build_or_load_index,
+    build_token_cache_key,
+    collate_with_tokenizer,
+)
 from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
 from ddpm.text import BPETokenizer, TextConfig
+from ddpm.vae import VAEWrapper
 from ddpm.utils import (
     EMA,
     build_run_metadata,
@@ -49,6 +56,24 @@ def _dist_all_reduce_sum(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def _configure_cudagraphs(enabled: bool) -> None:
+    if not hasattr(torch, "_inductor"):
+        return
+    cfg = getattr(torch._inductor, "config", None)
+    if cfg is None:
+        return
+    triton_cfg = getattr(cfg, "triton", None)
+    if triton_cfg is not None and hasattr(triton_cfg, "cudagraphs"):
+        triton_cfg.cudagraphs = bool(enabled)
+    if hasattr(cfg, "cudagraphs"):
+        cfg.cudagraphs = bool(enabled)
+
+
+def _cudagraph_step_begin() -> None:
+    if hasattr(torch, "compiler") and hasattr(torch.compiler, "cudagraph_mark_step_begin"):
+        torch.compiler.cudagraph_mark_step_begin()
+
+
 def _webui_metrics_path() -> Path | None:
     run_dir = os.environ.get("WEBUI_RUN_DIR")
     if not run_dir:
@@ -76,6 +101,63 @@ def _emit_event_line(
             metrics_path.parent.mkdir(parents=True, exist_ok=True)
             with open(metrics_path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+
+
+def _resolve_num_workers(requested: int) -> int:
+    if requested == 0:
+        return 0
+    cpu_count = os.cpu_count() or 0
+    max_workers = max(cpu_count - 1, 1) if cpu_count else 0
+    if requested < 0:
+        return max_workers
+    if max_workers:
+        return min(requested, max_workers)
+    return requested
+
+
+def _assert_divisible(value: int, divisor: int, name: str) -> None:
+    if value % divisor != 0:
+        raise RuntimeError(f"{name} must be divisible by {divisor}, got {value}.")
+
+
+def _sanity_vae_recon(x0: torch.Tensor, vae: VAEWrapper) -> None:
+    """
+    Sanity check: encode -> decode once and report MSE/PSNR.
+    Expects x0 in [-1, 1].
+    """
+    x_01 = (x0.clamp(-1, 1) + 1.0) / 2.0
+    x_vae = x_01 * 2.0 - 1.0
+    with torch.no_grad():
+        z = vae.encode(x_vae)
+        x_hat = vae.decode(z)
+    mse = torch.mean((x_hat - x_01) ** 2).item()
+    psnr = 10.0 * torch.log10(1.0 / max(mse, 1e-12))
+    print(f"[SANITY] VAE recon mse={mse:.6e} psnr={psnr:.2f}dB")
+
+
+def _sanity_train_step_latent(
+    *,
+    z0: torch.Tensor,
+    txt_ids: torch.Tensor,
+    txt_mask: torch.Tensor,
+    model: UNet,
+    diff: Diffusion,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+    scaler: torch.amp.GradScaler,
+) -> None:
+    model.train()
+    b = z0.shape[0]
+    t = torch.randint(0, diff.cfg.timesteps, (b,), device=z0.device, dtype=torch.long)
+    noise = torch.randn_like(z0)
+    zt = diff.q_sample(z0, t, noise)
+    v_tgt = diff.v_target(z0, t, noise)
+    with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
+        v_pred = model(zt, t, txt_ids, txt_mask)
+        loss = F.mse_loss(v_pred, v_tgt.to(dtype=v_pred.dtype))
+    scaler.scale(loss).backward()
+    model.zero_grad(set_to_none=True)
+    print(f"[SANITY] latent train step ok (loss={loss.item():.6f})")
 
 
 
@@ -126,6 +208,7 @@ def _sanity_overfit(
     device: torch.device,
     use_amp: bool,
     amp_dtype: torch.dtype,
+    channels_last: bool,
     steps: int,
     max_images: int,
     max_loss: float,
@@ -150,7 +233,10 @@ def _sanity_overfit(
     )
     batch = [sanity_ds[i] for i in range(max_images)]
     x0, txt_ids, txt_mask = collate_with_tokenizer(batch)
-    x0 = x0.to(device).to(memory_format=torch.channels_last)
+    if channels_last:
+        x0 = x0.to(device, memory_format=torch.channels_last)
+    else:
+        x0 = x0.to(device)
     txt_ids = txt_ids.to(device)
     txt_mask = txt_mask.to(device)
 
@@ -220,7 +306,10 @@ def main() -> None:
         cfg = replace(cfg, resume_ckpt=str(args.resume))
     run_cfg = cfg
 
-    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault(
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "expandable_segments:True,max_split_size_mb:128",
+    )
 
     out_dir = Path(run_cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -228,13 +317,16 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     torch.set_float32_matmul_precision("high")
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = bool(run_cfg.tf32)
+    torch.backends.cudnn.allow_tf32 = bool(run_cfg.tf32)
+    torch.backends.cudnn.benchmark = bool(run_cfg.cudnn_benchmark)
     if device.type == "cuda":
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_mem_efficient_sdp(True)
-        torch.backends.cuda.enable_math_sdp(False)
+        enable_flash = bool(run_cfg.enable_flash_sdp)
+        enable_mem_efficient = bool(run_cfg.enable_mem_efficient_sdp)
+        enable_math = bool(run_cfg.enable_math_sdp) or not (enable_flash or enable_mem_efficient)
+        torch.backends.cuda.enable_flash_sdp(enable_flash)
+        torch.backends.cuda.enable_mem_efficient_sdp(enable_mem_efficient)
+        torch.backends.cuda.enable_math_sdp(enable_math)
 
     seed_everything(int(run_cfg.seed), deterministic=bool(run_cfg.deterministic))
 
@@ -264,6 +356,8 @@ def main() -> None:
         "grad_accum_steps": run_cfg.grad_accum_steps,
         "num_workers": run_cfg.num_workers,
         "prefetch_factor": run_cfg.prefetch_factor,
+        "pin_memory": run_cfg.pin_memory,
+        "persistent_workers": run_cfg.persistent_workers,
         "lr": run_cfg.lr,
         "weight_decay": run_cfg.weight_decay,
         "max_steps": run_cfg.max_steps,
@@ -273,6 +367,8 @@ def main() -> None:
         "amp": run_cfg.amp,
         "amp_dtype": run_cfg.amp_dtype,
         "compile": run_cfg.compile,
+        "compile_warmup_steps": run_cfg.compile_warmup_steps,
+        "compile_cudagraphs": run_cfg.compile_cudagraphs,
         "grad_clip_norm": run_cfg.grad_clip_norm,
         "ema_decay": run_cfg.ema_decay,
         "resume_ckpt": run_cfg.resume_ckpt,
@@ -280,6 +376,18 @@ def main() -> None:
         "sanity_overfit_steps": run_cfg.sanity_overfit_steps,
         "sanity_overfit_images": run_cfg.sanity_overfit_images,
         "sanity_overfit_max_loss": run_cfg.sanity_overfit_max_loss,
+        "tf32": run_cfg.tf32,
+        "cudnn_benchmark": run_cfg.cudnn_benchmark,
+        "channels_last": run_cfg.channels_last,
+        "enable_flash_sdp": run_cfg.enable_flash_sdp,
+        "enable_mem_efficient_sdp": run_cfg.enable_mem_efficient_sdp,
+        "enable_math_sdp": run_cfg.enable_math_sdp,
+        "mode": run_cfg.mode,
+        "latent_channels": run_cfg.latent_channels,
+        "latent_downsample_factor": run_cfg.latent_downsample_factor,
+        "vae_pretrained": run_cfg.vae_pretrained,
+        "vae_freeze": run_cfg.vae_freeze,
+        "vae_scaling_factor": run_cfg.vae_scaling_factor,
     })
 
     # ----------------------------
@@ -326,17 +434,26 @@ def main() -> None:
         tokenizer=tokenizer,
         cond_drop_prob=float(run_cfg.cond_drop_prob),
         seed=int(run_cfg.seed),
+        cache_dir=str(Path(run_cfg.data_root) / run_cfg.cache_dir),
+        token_cache_key=build_token_cache_key(
+            vocab_path=model_cfg.text_vocab_path,
+            merges_path=model_cfg.text_merges_path,
+            caption_field=run_cfg.caption_field,
+            max_len=int(text_cfg.max_len),
+            lowercase=bool(text_cfg.lowercase),
+            strip_punct=bool(text_cfg.strip_punct),
+        ),
     )
 
-    nw = int(run_cfg.num_workers)
+    nw = _resolve_num_workers(int(run_cfg.num_workers))
     dl = DataLoader(
         ds,
         batch_size=int(run_cfg.batch_size),
         shuffle=True,
         num_workers=nw,
-        pin_memory=True,
+        pin_memory=bool(run_cfg.pin_memory),
         drop_last=True,
-        persistent_workers=nw > 0,
+        persistent_workers=bool(run_cfg.persistent_workers) and nw > 0,
         prefetch_factor=int(run_cfg.prefetch_factor) if nw > 0 else None,
         collate_fn=collate_with_tokenizer,
     )
@@ -344,8 +461,13 @@ def main() -> None:
     # ----------------------------
     # Model
     # ----------------------------
+    mode = str(run_cfg.mode)
+    if mode == "latent" and not str(run_cfg.vae_pretrained).strip():
+        raise RuntimeError("mode=latent requires vae_pretrained to be set.")
+
+    image_channels = 3 if mode == "pixel" else int(run_cfg.latent_channels)
     unet_cfg = UNetConfig(
-        image_channels=3,
+        image_channels=image_channels,
         base_channels=int(model_cfg.base_channels),
         channel_mults=tuple(model_cfg.channel_mults),
         num_res_blocks=int(model_cfg.num_res_blocks),
@@ -359,12 +481,15 @@ def main() -> None:
         text_heads=int(model_cfg.text_heads),
         text_max_len=int(model_cfg.text_max_len),
         use_scale_shift_norm=bool(model_cfg.use_scale_shift_norm),
-        grad_checkpointing=bool(model_cfg.grad_checkpointing),
+        grad_checkpointing=bool(run_cfg.grad_checkpointing),
     )
 
     model = UNet(unet_cfg).to(device)
-    model = model.to(memory_format=torch.channels_last)
+    if bool(run_cfg.channels_last):
+        model = model.to(memory_format=torch.channels_last)
 
+    # NOTE: torch.compile can increase startup time and VRAM usage.
+    # Compare throughput with compile=False if performance regresses.
     if bool(run_cfg.compile) and hasattr(torch, "compile"):
         model = torch.compile(model)
 
@@ -390,6 +515,16 @@ def main() -> None:
         ),
         device=device,
     )
+
+    vae = None
+    if mode == "latent":
+        vae = VAEWrapper(
+            pretrained=str(run_cfg.vae_pretrained),
+            freeze=bool(run_cfg.vae_freeze),
+            scaling_factor=float(run_cfg.vae_scaling_factor),
+            device=device,
+            dtype=amp_dtype if use_amp else torch.float32,
+        )
 
     start_step = 0
     if resume:
@@ -419,6 +554,12 @@ def main() -> None:
     save_every = int(run_cfg.save_every)
     min_snr_gamma = float(run_cfg.min_snr_gamma)
     grad_clip = float(run_cfg.grad_clip_norm)
+    compile_warmup_steps = int(run_cfg.compile_warmup_steps) if bool(run_cfg.compile) else 0
+    warmup_end_step = start_step + max(compile_warmup_steps, 0)
+    compile_cudagraphs = bool(run_cfg.compile_cudagraphs)
+    if grad_accum > 1:
+        compile_cudagraphs = False
+    _configure_cudagraphs(compile_cudagraphs)
 
     webui_mode = _is_webui_mode()
     metrics_path = _webui_metrics_path()
@@ -460,6 +601,28 @@ def main() -> None:
     sanity_steps = int(run_cfg.sanity_overfit_steps)
     sanity_images = int(run_cfg.sanity_overfit_images)
     sanity_max_loss = float(run_cfg.sanity_overfit_max_loss)
+    if mode == "latent":
+        _assert_divisible(int(run_cfg.image_size), int(run_cfg.latent_downsample_factor), "image_size")
+        sample_batch = next(iter(dl))
+        x0_s, txt_ids_s, txt_mask_s = sample_batch
+        x0_s = x0_s.to(device)
+        _sanity_vae_recon(x0_s, vae)
+        if bool(run_cfg.channels_last):
+            x0_s = x0_s.to(memory_format=torch.channels_last)
+        x_01 = (x0_s.clamp(-1, 1) + 1.0) / 2.0
+        x_vae = x_01 * 2.0 - 1.0
+        with torch.no_grad():
+            z0_s = vae.encode(x_vae)
+        _sanity_train_step_latent(
+            z0=z0_s,
+            txt_ids=txt_ids_s.to(device),
+            txt_mask=txt_mask_s.to(device),
+            model=model,
+            diff=diff,
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
+            scaler=scaler,
+        )
     _sanity_overfit(
         model=model,
         tokenizer=tokenizer,
@@ -468,6 +631,7 @@ def main() -> None:
         device=device,
         use_amp=use_amp,
         amp_dtype=amp_dtype,
+        channels_last=bool(run_cfg.channels_last),
         steps=sanity_steps,
         max_images=sanity_images,
         max_loss=sanity_max_loss,
@@ -477,6 +641,25 @@ def main() -> None:
     )
 
     if is_main:
+        _emit_event_line(
+            payload={
+                "type": "log",
+                "message": (
+                    "runtime flags: "
+                    f"compile={bool(run_cfg.compile)}, "
+                    f"compile_cudagraphs={compile_cudagraphs}, "
+                    f"tf32={bool(run_cfg.tf32)}, "
+                    f"channels_last={bool(run_cfg.channels_last)}, "
+                    f"sdp_flash={bool(run_cfg.enable_flash_sdp)}, "
+                    f"sdp_mem_efficient={bool(run_cfg.enable_mem_efficient_sdp)}, "
+                    f"sdp_math={bool(run_cfg.enable_math_sdp) or not (bool(run_cfg.enable_flash_sdp) or bool(run_cfg.enable_mem_efficient_sdp))}"
+                ),
+                "step": start_step,
+            },
+            log_path=log_path,
+            metrics_path=metrics_path,
+            webui_mode=webui_mode,
+        )
         _emit_event_line(
             payload={
                 "type": "status",
@@ -494,33 +677,58 @@ def main() -> None:
     log_loss_count = 0
 
     for step in range(start_step, max_steps):
+        if bool(run_cfg.compile) and compile_cudagraphs:
+            _cudagraph_step_begin()
+        step_start = time.perf_counter()
         opt.zero_grad(set_to_none=True)
         total_loss = 0.0
+        data_time = 0.0
+        fwd_bwd_time = 0.0
         last_batch_stats = {"x_std": None, "v_std": None}
 
         for _ in range(grad_accum):
+            fetch_start = time.perf_counter()
             try:
                 x0, txt_ids, txt_mask = next(it)
             except StopIteration:
                 it = iter(dl)
                 x0, txt_ids, txt_mask = next(it)
+            data_time += time.perf_counter() - fetch_start
 
-            x0 = x0.to(device, non_blocking=True).to(memory_format=torch.channels_last)
+            if bool(run_cfg.channels_last):
+                x0 = x0.to(device, non_blocking=True, memory_format=torch.channels_last)
+            else:
+                x0 = x0.to(device, non_blocking=True)
             txt_ids = txt_ids.to(device, non_blocking=True)
             txt_mask = txt_mask.to(device, non_blocking=True)
 
             _assert_in_range("x0", x0, -1.0, 1.0)
 
-            b = x0.shape[0]
-            t = torch.randint(0, diff.cfg.timesteps, (b,), device=device, dtype=torch.long)
-            noise = torch.randn_like(x0)
-            alpha_bar_t = diff.alpha_bar[t]
-            _assert_finite("alpha_bar[t]", alpha_bar_t)
-            xt = diff.q_sample(x0, t, noise)
-            v_tgt = diff.v_target(x0, t, noise)
-            last_batch_stats["x_std"] = float(x0.detach().std().cpu().item())
-            last_batch_stats["v_std"] = float(v_tgt.detach().std().cpu().item())
+            if mode == "latent":
+                x_01 = (x0.clamp(-1, 1) + 1.0) / 2.0
+                x_vae = x_01 * 2.0 - 1.0
+                z0 = vae.encode(x_vae)
+                b = z0.shape[0]
+                t = torch.randint(0, diff.cfg.timesteps, (b,), device=device, dtype=torch.long)
+                noise = torch.randn_like(z0)
+                alpha_bar_t = diff.alpha_bar[t]
+                _assert_finite("alpha_bar[t]", alpha_bar_t)
+                xt = diff.q_sample(z0, t, noise)
+                v_tgt = diff.v_target(z0, t, noise)
+                last_batch_stats["x_std"] = float(z0.detach().std().cpu().item())
+                last_batch_stats["v_std"] = float(v_tgt.detach().std().cpu().item())
+            else:
+                b = x0.shape[0]
+                t = torch.randint(0, diff.cfg.timesteps, (b,), device=device, dtype=torch.long)
+                noise = torch.randn_like(x0)
+                alpha_bar_t = diff.alpha_bar[t]
+                _assert_finite("alpha_bar[t]", alpha_bar_t)
+                xt = diff.q_sample(x0, t, noise)
+                v_tgt = diff.v_target(x0, t, noise)
+                last_batch_stats["x_std"] = float(x0.detach().std().cpu().item())
+                last_batch_stats["v_std"] = float(v_tgt.detach().std().cpu().item())
 
+            fwd_start = time.perf_counter()
             with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 v_pred = model(xt, t, txt_ids, txt_mask)
                 _assert_finite("v_pred", v_pred)
@@ -551,7 +759,9 @@ def main() -> None:
 
             total_loss += float(loss.detach().cpu())
             scaler.scale(loss).backward()
+            fwd_bwd_time += time.perf_counter() - fwd_start
 
+        opt_step_start = time.perf_counter()
         if scaler.is_enabled():
             scaler.unscale_(opt)
         if grad_clip > 0:
@@ -584,10 +794,13 @@ def main() -> None:
             })
             raise RuntimeError(f"Non-finite grads at step={step}: {bad_grads[:5]}")
 
+        opt_time = time.perf_counter() - opt_step_start
+        step_time = time.perf_counter() - step_start
+
         log_loss_sum += float(total_loss)
         log_loss_count += 1
 
-        if step % log_every == 0:
+        if step % log_every == 0 and step >= warmup_end_step:
             if device.type == "cuda":
                 torch.cuda.synchronize()
 
@@ -644,6 +857,10 @@ def main() -> None:
                     "elapsed_sec": float(total_elapsed),
                     "eta_h": float(eta_h),
                     "sec_per_step": float(sec_per_step),
+                    "data_time_sec": float(data_time),
+                    "forward_backward_time_sec": float(fwd_bwd_time),
+                    "optimizer_step_time_sec": float(opt_time),
+                    "total_step_time_sec": float(step_time),
                     "max_steps": int(run_cfg.max_steps),
                 }
                 _emit_event_line(
@@ -658,6 +875,15 @@ def main() -> None:
             log_loss_sum = 0.0
             log_loss_count = 0
 
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+        elif step + 1 == warmup_end_step:
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            last_log_time = time.perf_counter()
+            last_log_step = step
+            log_loss_sum = 0.0
+            log_loss_count = 0
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
 
