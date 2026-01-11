@@ -16,7 +16,13 @@ from torch.utils.data import DataLoader
 import yaml
 
 from ddpm.config import TrainConfig
-from ddpm.data import DanbooruConfig, DanbooruDataset, build_or_load_index, collate_with_tokenizer
+from ddpm.data import (
+    DanbooruConfig,
+    DanbooruDataset,
+    build_or_load_index,
+    build_token_cache_key,
+    collate_with_tokenizer,
+)
 from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
 from ddpm.text import BPETokenizer, TextConfig
@@ -76,6 +82,18 @@ def _emit_event_line(
             metrics_path.parent.mkdir(parents=True, exist_ok=True)
             with open(metrics_path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+
+
+def _resolve_num_workers(requested: int) -> int:
+    if requested == 0:
+        return 0
+    cpu_count = os.cpu_count() or 0
+    max_workers = max(cpu_count - 1, 1) if cpu_count else 0
+    if requested < 0:
+        return max_workers
+    if max_workers:
+        return min(requested, max_workers)
+    return requested
 
 
 
@@ -150,7 +168,7 @@ def _sanity_overfit(
     )
     batch = [sanity_ds[i] for i in range(max_images)]
     x0, txt_ids, txt_mask = collate_with_tokenizer(batch)
-    x0 = x0.to(device).to(memory_format=torch.channels_last)
+    x0 = x0.to(device, memory_format=torch.channels_last)
     txt_ids = txt_ids.to(device)
     txt_mask = txt_mask.to(device)
 
@@ -220,7 +238,10 @@ def main() -> None:
         cfg = replace(cfg, resume_ckpt=str(args.resume))
     run_cfg = cfg
 
-    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault(
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "expandable_segments:True,max_split_size_mb:128",
+    )
 
     out_dir = Path(run_cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -264,6 +285,8 @@ def main() -> None:
         "grad_accum_steps": run_cfg.grad_accum_steps,
         "num_workers": run_cfg.num_workers,
         "prefetch_factor": run_cfg.prefetch_factor,
+        "pin_memory": run_cfg.pin_memory,
+        "persistent_workers": run_cfg.persistent_workers,
         "lr": run_cfg.lr,
         "weight_decay": run_cfg.weight_decay,
         "max_steps": run_cfg.max_steps,
@@ -273,6 +296,7 @@ def main() -> None:
         "amp": run_cfg.amp,
         "amp_dtype": run_cfg.amp_dtype,
         "compile": run_cfg.compile,
+        "compile_warmup_steps": run_cfg.compile_warmup_steps,
         "grad_clip_norm": run_cfg.grad_clip_norm,
         "ema_decay": run_cfg.ema_decay,
         "resume_ckpt": run_cfg.resume_ckpt,
@@ -326,17 +350,26 @@ def main() -> None:
         tokenizer=tokenizer,
         cond_drop_prob=float(run_cfg.cond_drop_prob),
         seed=int(run_cfg.seed),
+        cache_dir=str(Path(run_cfg.data_root) / run_cfg.cache_dir),
+        token_cache_key=build_token_cache_key(
+            vocab_path=model_cfg.text_vocab_path,
+            merges_path=model_cfg.text_merges_path,
+            caption_field=run_cfg.caption_field,
+            max_len=int(text_cfg.max_len),
+            lowercase=bool(text_cfg.lowercase),
+            strip_punct=bool(text_cfg.strip_punct),
+        ),
     )
 
-    nw = int(run_cfg.num_workers)
+    nw = _resolve_num_workers(int(run_cfg.num_workers))
     dl = DataLoader(
         ds,
         batch_size=int(run_cfg.batch_size),
         shuffle=True,
         num_workers=nw,
-        pin_memory=True,
+        pin_memory=bool(run_cfg.pin_memory),
         drop_last=True,
-        persistent_workers=nw > 0,
+        persistent_workers=bool(run_cfg.persistent_workers) and nw > 0,
         prefetch_factor=int(run_cfg.prefetch_factor) if nw > 0 else None,
         collate_fn=collate_with_tokenizer,
     )
@@ -359,12 +392,14 @@ def main() -> None:
         text_heads=int(model_cfg.text_heads),
         text_max_len=int(model_cfg.text_max_len),
         use_scale_shift_norm=bool(model_cfg.use_scale_shift_norm),
-        grad_checkpointing=bool(model_cfg.grad_checkpointing),
+        grad_checkpointing=bool(run_cfg.grad_checkpointing),
     )
 
     model = UNet(unet_cfg).to(device)
     model = model.to(memory_format=torch.channels_last)
 
+    # NOTE: torch.compile can increase startup time and VRAM usage.
+    # Compare throughput with compile=False if performance regresses.
     if bool(run_cfg.compile) and hasattr(torch, "compile"):
         model = torch.compile(model)
 
@@ -419,6 +454,8 @@ def main() -> None:
     save_every = int(run_cfg.save_every)
     min_snr_gamma = float(run_cfg.min_snr_gamma)
     grad_clip = float(run_cfg.grad_clip_norm)
+    compile_warmup_steps = int(run_cfg.compile_warmup_steps) if bool(run_cfg.compile) else 0
+    warmup_end_step = start_step + max(compile_warmup_steps, 0)
 
     webui_mode = _is_webui_mode()
     metrics_path = _webui_metrics_path()
@@ -494,18 +531,23 @@ def main() -> None:
     log_loss_count = 0
 
     for step in range(start_step, max_steps):
+        step_start = time.perf_counter()
         opt.zero_grad(set_to_none=True)
         total_loss = 0.0
+        data_time = 0.0
+        fwd_bwd_time = 0.0
         last_batch_stats = {"x_std": None, "v_std": None}
 
         for _ in range(grad_accum):
+            fetch_start = time.perf_counter()
             try:
                 x0, txt_ids, txt_mask = next(it)
             except StopIteration:
                 it = iter(dl)
                 x0, txt_ids, txt_mask = next(it)
+            data_time += time.perf_counter() - fetch_start
 
-            x0 = x0.to(device, non_blocking=True).to(memory_format=torch.channels_last)
+            x0 = x0.to(device, non_blocking=True, memory_format=torch.channels_last)
             txt_ids = txt_ids.to(device, non_blocking=True)
             txt_mask = txt_mask.to(device, non_blocking=True)
 
@@ -521,6 +563,7 @@ def main() -> None:
             last_batch_stats["x_std"] = float(x0.detach().std().cpu().item())
             last_batch_stats["v_std"] = float(v_tgt.detach().std().cpu().item())
 
+            fwd_start = time.perf_counter()
             with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 v_pred = model(xt, t, txt_ids, txt_mask)
                 _assert_finite("v_pred", v_pred)
@@ -551,7 +594,9 @@ def main() -> None:
 
             total_loss += float(loss.detach().cpu())
             scaler.scale(loss).backward()
+            fwd_bwd_time += time.perf_counter() - fwd_start
 
+        opt_step_start = time.perf_counter()
         if scaler.is_enabled():
             scaler.unscale_(opt)
         if grad_clip > 0:
@@ -584,10 +629,13 @@ def main() -> None:
             })
             raise RuntimeError(f"Non-finite grads at step={step}: {bad_grads[:5]}")
 
+        opt_time = time.perf_counter() - opt_step_start
+        step_time = time.perf_counter() - step_start
+
         log_loss_sum += float(total_loss)
         log_loss_count += 1
 
-        if step % log_every == 0:
+        if step % log_every == 0 and step >= warmup_end_step:
             if device.type == "cuda":
                 torch.cuda.synchronize()
 
@@ -644,6 +692,10 @@ def main() -> None:
                     "elapsed_sec": float(total_elapsed),
                     "eta_h": float(eta_h),
                     "sec_per_step": float(sec_per_step),
+                    "data_time_sec": float(data_time),
+                    "forward_backward_time_sec": float(fwd_bwd_time),
+                    "optimizer_step_time_sec": float(opt_time),
+                    "total_step_time_sec": float(step_time),
                     "max_steps": int(run_cfg.max_steps),
                 }
                 _emit_event_line(
@@ -658,6 +710,15 @@ def main() -> None:
             log_loss_sum = 0.0
             log_loss_count = 0
 
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+        elif step + 1 == warmup_end_step:
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            last_log_time = time.perf_counter()
+            last_log_step = step
+            log_loss_sum = 0.0
+            log_loss_count = 0
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
 

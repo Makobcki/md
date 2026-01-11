@@ -15,7 +15,9 @@ out_dir: ./runs/danbooru_512
 batch_size: 1
 grad_accum_steps: 8
 num_workers: 8
-prefetch_factor: 2
+prefetch_factor: 4
+pin_memory: true
+persistent_workers: true
 
 lr: 1.0e-4
 weight_decay: 1.0e-4
@@ -53,6 +55,7 @@ cond_drop_prob: 0.10
 amp: true
 amp_dtype: fp16
 compile: false
+compile_warmup_steps: 2
 grad_clip_norm: 1.0
 ema_decay: 0.999
 resume_ckpt: ""

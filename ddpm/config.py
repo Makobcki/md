@@ -30,7 +30,9 @@ class TrainConfig:
     batch_size: int = 1
     grad_accum_steps: int = 8
     num_workers: int = 8
-    prefetch_factor: int = 2
+    prefetch_factor: int = 4
+    pin_memory: bool = True
+    persistent_workers: bool = True
 
     lr: float = 1.0e-4
     weight_decay: float = 1.0e-4
@@ -67,6 +69,7 @@ class TrainConfig:
     amp: bool = True
     amp_dtype: str = "fp16"
     compile: bool = False
+    compile_warmup_steps: int = 2
     grad_clip_norm: float = 1.0
     ema_decay: float = 0.999
     resume_ckpt: str = ""
