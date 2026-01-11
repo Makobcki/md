@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 import os
 import random
@@ -68,6 +68,42 @@ def sanitize_ckpt(ck: Any) -> Any:
     if "ema" in ck and isinstance(ck["ema"], dict):
         ck["ema"] = sanitize_state_dict(ck["ema"])
     return ck
+
+
+def _build_state_dict_mapping(sd: dict) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k, v in sd.items():
+        nk = _strip_prefixes(str(k))
+        if nk not in out or str(k) == nk:
+            out[nk] = v
+    return out
+
+
+def normalize_state_dict_for_keys(state_dict: dict, target_keys: Iterable[str], name: str) -> dict:
+    if not isinstance(state_dict, dict):
+        return state_dict
+    target_keys_list = [str(k) for k in target_keys]
+    target_stripped = {_strip_prefixes(k) for k in target_keys_list}
+    source_map = _build_state_dict_mapping(state_dict)
+
+    missing = [k for k in target_keys_list if _strip_prefixes(k) not in source_map]
+    unexpected = [k for k in source_map if k not in target_stripped]
+
+    if missing or unexpected:
+        missing_examples = ", ".join(sorted({_strip_prefixes(k) for k in missing})[:10])
+        unexpected_examples = ", ".join(sorted(unexpected)[:10])
+        raise RuntimeError(
+            f"{name} state_dict mismatch after prefix normalization: "
+            f"missing={len(missing)}, unexpected={len(unexpected)}. "
+            f"Missing examples: {missing_examples or 'none'}. "
+            f"Unexpected examples: {unexpected_examples or 'none'}."
+        )
+
+    return {k: source_map[_strip_prefixes(k)] for k in target_keys_list}
+
+
+def normalize_state_dict_for_model(state_dict: dict, model: nn.Module, name: str = "model") -> dict:
+    return normalize_state_dict_for_keys(state_dict, model.state_dict().keys(), name)
 
 
 class EMA:

@@ -13,6 +13,23 @@ from ddpm.model import UNet, UNetConfig
 from ddpm.utils import EMA, load_ckpt
 
 
+def _guided_v(
+    model: UNet,
+    x: torch.Tensor,
+    t: torch.Tensor,
+    txt_ids: torch.Tensor,
+    txt_mask: torch.Tensor,
+    cfg_scale: float,
+    uncond_ids: Optional[torch.Tensor],
+    uncond_mask: Optional[torch.Tensor],
+) -> torch.Tensor:
+    v_cond = model(x, t, txt_ids, txt_mask)
+    if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
+        v_un = model(x, t, uncond_ids, uncond_mask)
+        return v_un + cfg_scale * (v_cond - v_un)
+    return v_cond
+
+
 @torch.no_grad()
 def ddim_sample(
     model: UNet,
@@ -38,27 +55,22 @@ def ddim_sample(
         x = noise.to(device)
 
     T = diffusion.cfg.timesteps
-    ts = torch.linspace(T - 1, 0, steps, device=device).long()
+    ts = torch.linspace(T - 1, 0, steps + 1, device=device).long()
+    total_steps = max(len(ts) - 1, 0)
 
-    for i in range(len(ts)):
+    for i in range(total_steps):
         t = ts[i].repeat(b)
 
-        v_cond = model(x, t, txt_ids, txt_mask)
-        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
-            v_un = model(x, t, uncond_ids, uncond_mask)
-            v = v_un + cfg_scale * (v_cond - v_un)
-        else:
-            v = v_cond
-
+        v = _guided_v(model, x, t, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
         x0 = diffusion.v_to_x0(x, t, v)
         eps = diffusion.v_to_eps(x, t, v)
         if clamp_x0:
             x0 = x0.clamp(-1.0, 1.0)
 
-        if i == len(ts) - 1:
+        if i == total_steps - 1:
             x = x0
             if progress_cb:
-                progress_cb(i + 1, len(ts))
+                progress_cb(i + 1, total_steps)
             break
 
         t_prev = ts[i + 1].repeat(b)
@@ -72,10 +84,7 @@ def ddim_sample(
         x = torch.sqrt(a_prev) * x0 + dir_xt + sigma * noise
 
         if progress_cb:
-            progress_cb(i + 1, len(ts))
-
-    if progress_cb and len(ts) == 0:
-        progress_cb(0, 0)
+            progress_cb(i + 1, total_steps)
     return x
 
 
@@ -101,7 +110,7 @@ def heun_sample(
     else:
         x = noise.to(device)
 
-    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps, device=device).long()
+    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps + 1, device=device).long()
 
     total_steps = max(len(t_schedule) - 1, 0)
     for i in range(total_steps):
@@ -110,38 +119,28 @@ def heun_sample(
         sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1)
         sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1)
 
-        v_cond = model(x, t, txt_ids, txt_mask)
-        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
-            v_un = model(x, t, uncond_ids, uncond_mask)
-            v = v_un + cfg_scale * (v_cond - v_un)
-        else:
-            v = v_cond
+        sqrt_a_t = diffusion.sqrt_alpha_bar[t].view(-1, 1, 1, 1).to(x.dtype)
+        sqrt_a_next = diffusion.sqrt_alpha_bar[t_next].view(-1, 1, 1, 1).to(x.dtype)
+        sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1).to(x.dtype)
+        sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1).to(x.dtype)
 
-        x0 = diffusion.v_to_x0(x, t, v)
-        d = (x - x0) / sigma
-        x_euler = x + d * (sigma_next - sigma)
+        v = _guided_v(model, x, t, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        eps = diffusion.v_to_eps(x, t, v)
+        x_hat = x / sqrt_a_t
+        x_hat_euler = x_hat + (sigma_next - sigma) * eps
+        x_euler = x_hat_euler * sqrt_a_next
 
-        v_cond_next = model(x_euler, t_next, txt_ids, txt_mask)
-        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
-            v_un_next = model(x_euler, t_next, uncond_ids, uncond_mask)
-            v_next = v_un_next + cfg_scale * (v_cond_next - v_un_next)
-        else:
-            v_next = v_cond_next
-
-        x0_next = diffusion.v_to_x0(x_euler, t_next, v_next)
-        d_next = (x_euler - x0_next) / sigma_next
-        x = x + 0.5 * (d + d_next) * (sigma_next - sigma)
+        v_next = _guided_v(model, x_euler, t_next, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        eps_next = diffusion.v_to_eps(x_euler, t_next, v_next)
+        x_hat_next = x_hat + 0.5 * (eps + eps_next) * (sigma_next - sigma)
+        x = x_hat_next * sqrt_a_next
 
         if progress_cb:
             progress_cb(i + 1, total_steps)
 
     t_final = t_schedule[-1].repeat(b)
-    v_final = model(x, t_final, txt_ids, txt_mask)
-    if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
-        v_un_final = model(x, t_final, uncond_ids, uncond_mask)
-        v_final = v_un_final + cfg_scale * (v_final - v_un_final)
-    x0_final = diffusion.v_to_x0(x, t_final, v_final)
-    return x0_final
+    v_final = _guided_v(model, x, t_final, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+    return diffusion.v_to_x0(x, t_final, v_final)
 
 
 @torch.no_grad()
@@ -166,43 +165,39 @@ def dpm_solver_sample(
     else:
         x = noise.to(device)
 
-    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps, device=device).long()
-
-    def model_v(x_in: torch.Tensor, t_in: torch.Tensor) -> torch.Tensor:
-        v_cond = model(x_in, t_in, txt_ids, txt_mask)
-        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
-            v_un = model(x_in, t_in, uncond_ids, uncond_mask)
-            return v_un + cfg_scale * (v_cond - v_un)
-        return v_cond
+    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps + 1, device=device).long()
 
     total_steps = max(len(t_schedule) - 1, 0)
     for i in range(total_steps):
         t = t_schedule[i].repeat(b)
         t_next = t_schedule[i + 1].repeat(b)
-
-        sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1)
-        sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1)
-
-        v = model_v(x, t)
-        x0 = diffusion.v_to_x0(x, t, v)
-        d = (x - x0) / sigma
-
-        # DPM-Solver++ (2nd order midpoint) style update in sigma space
-        sigma_mid = torch.sqrt(sigma * sigma_next)
         t_mid = ((t + t_next) // 2).clamp(min=0)
-        x_mid = x + d * (sigma_mid - sigma)
-        v_mid = model_v(x_mid, t_mid)
-        x0_mid = diffusion.v_to_x0(x_mid, t_next, v_mid)
-        d_mid = (x_mid - x0_mid) / sigma_mid
-        x = x + d_mid * (sigma_next - sigma)
+
+        sqrt_a_t = diffusion.sqrt_alpha_bar[t].view(-1, 1, 1, 1).to(x.dtype)
+        sqrt_a_next = diffusion.sqrt_alpha_bar[t_next].view(-1, 1, 1, 1).to(x.dtype)
+        sqrt_a_mid = diffusion.sqrt_alpha_bar[t_mid].view(-1, 1, 1, 1).to(x.dtype)
+
+        sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1).to(x.dtype)
+        sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1).to(x.dtype)
+        sigma_mid = diffusion.sigma_from_t(t_mid).view(-1, 1, 1, 1).to(x.dtype)
+
+        v = _guided_v(model, x, t, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        eps = diffusion.v_to_eps(x, t, v)
+        x_hat = x / sqrt_a_t
+        x_hat_mid = x_hat + (sigma_mid - sigma) * eps
+        x_mid = x_hat_mid * sqrt_a_mid
+
+        v_mid = _guided_v(model, x_mid, t_mid, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        eps_mid = diffusion.v_to_eps(x_mid, t_mid, v_mid)
+        x_hat_next = x_hat + (sigma_next - sigma) * eps_mid
+        x = x_hat_next * sqrt_a_next
 
         if progress_cb:
             progress_cb(i + 1, total_steps)
 
     t_final = t_schedule[-1].repeat(b)
-    v_final = model_v(x, t_final)
-    x0_final = diffusion.v_to_x0(x, t_final, v_final)
-    return x0_final
+    v_final = _guided_v(model, x, t_final, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+    return diffusion.v_to_x0(x, t_final, v_final)
 
 
 @torch.no_grad()
@@ -227,36 +222,29 @@ def euler_sample(
     else:
         x = noise.to(device)
 
-    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps, device=device).long()
+    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps + 1, device=device).long()
     total_steps = max(len(t_schedule) - 1, 0)
 
     for i in range(total_steps):
         t = t_schedule[i].repeat(b)
         t_next = t_schedule[i + 1].repeat(b)
-        sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1)
-        sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1)
+        sqrt_a_t = diffusion.sqrt_alpha_bar[t].view(-1, 1, 1, 1).to(x.dtype)
+        sqrt_a_next = diffusion.sqrt_alpha_bar[t_next].view(-1, 1, 1, 1).to(x.dtype)
+        sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1).to(x.dtype)
+        sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1).to(x.dtype)
 
-        v_cond = model(x, t, txt_ids, txt_mask)
-        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
-            v_un = model(x, t, uncond_ids, uncond_mask)
-            v = v_un + cfg_scale * (v_cond - v_un)
-        else:
-            v = v_cond
-
-        x0 = diffusion.v_to_x0(x, t, v)
-        d = (x - x0) / sigma
-        x = x + d * (sigma_next - sigma)
+        v = _guided_v(model, x, t, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        eps = diffusion.v_to_eps(x, t, v)
+        x_hat = x / sqrt_a_t
+        x_hat_next = x_hat + (sigma_next - sigma) * eps
+        x = x_hat_next * sqrt_a_next
 
         if progress_cb:
             progress_cb(i + 1, total_steps)
 
     t_final = t_schedule[-1].repeat(b)
-    v_final = model(x, t_final, txt_ids, txt_mask)
-    if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
-        v_un_final = model(x, t_final, uncond_ids, uncond_mask)
-        v_final = v_un_final + cfg_scale * (v_final - v_un_final)
-    x0_final = diffusion.v_to_x0(x, t_final, v_final)
-    return x0_final
+    v_final = _guided_v(model, x, t_final, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+    return diffusion.v_to_x0(x, t_final, v_final)
 
 
 @torch.no_grad()
@@ -281,25 +269,20 @@ def ddpm_ancestral_sample(
         x = noise.to(device)
     b = x.shape[0]
 
-    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps, device=device).long()
+    t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps + 1, device=device).long()
 
-    for i in range(len(t_schedule)):
+    total_steps = max(len(t_schedule) - 1, 0)
+    for i in range(total_steps):
         t = t_schedule[i].repeat(b)
 
-        v_cond = model(x, t, txt_ids, txt_mask)
-        if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
-            v_un = model(x, t, uncond_ids, uncond_mask)
-            v = v_un + cfg_scale * (v_cond - v_un)
-        else:
-            v = v_cond
-
+        v = _guided_v(model, x, t, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
         x0 = diffusion.v_to_x0(x, t, v)
         eps = diffusion.v_to_eps(x, t, v)
 
-        if i == len(t_schedule) - 1:
+        if i == total_steps - 1:
             x = x0
             if progress_cb:
-                progress_cb(i + 1, len(t_schedule))
+                progress_cb(i + 1, total_steps)
             break
 
         t_prev = t_schedule[i + 1].repeat(b)
@@ -312,7 +295,7 @@ def ddpm_ancestral_sample(
         x = torch.sqrt(a_prev) * x0 + dir_xt + sigma * noise
 
         if progress_cb:
-            progress_cb(i + 1, len(t_schedule))
+            progress_cb(i + 1, total_steps)
 
 
 def _to_pil(x: torch.Tensor) -> Image.Image:

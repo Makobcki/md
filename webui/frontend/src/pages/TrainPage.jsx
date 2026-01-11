@@ -160,7 +160,8 @@ export default function TrainPage() {
       </div>
 
       <div className="card">
-        <h3>Loss vs Step</h3>
+        <h3>Loss vs Step (avg log_every)</h3>
+        <div className="muted">Среднее значение loss за последний интервал логирования.</div>
         <LineChart data={metrics.map((m) => ({ step: m.step, loss: m.loss }))} />
       </div>
 

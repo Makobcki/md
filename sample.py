@@ -132,7 +132,7 @@ def main() -> None:
     sampler = getattr(args, "sampler", "heun")
     h = int(cfg.get("image_size", 512))
     w = int(cfg.get("image_size", 512))
-    per_image_steps = args.steps if sampler in {"ddim", "ddpm"} else max(args.steps - 1, 1)
+    per_image_steps = max(int(args.steps), 0)
     total_steps = per_image_steps * max(args.n, 1)
 
     samples = []

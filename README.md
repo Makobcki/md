@@ -1,103 +1,32 @@
+# md — минимальный diffusion-проект (DDPM/DDIM, v-pred)
 
-# md — Minimal Diffusion (DDPM / DDIM)
-
-Минимальный, **чистый и полностью оффлайн** проект для обучения и сэмплинга изображений
-на основе **DDPM (v-prediction) + DDIM**, оптимизированный под **8 GB VRAM**.
-
-Проект предназначен для:
-- обучения **с нуля** (без pretrained весов),
-- исследования архитектуры и диффузии,
-- дальнейшего расширения (LoRA, text-cond, ControlNet и т.д.).
-
----
-
-## Возможности
-
-- **U-Net** с residual blocks и spatial self-attention  
-- **v-prediction** (как в современных diffusion-моделях)  
-- **Min-SNR loss weighting** — стабильное обучение  
-- **DDIM sampling** (быстро и детерминированно)  
-- **EMA** для качественного инференса  
-- Оптимизирован под **8 GB VRAM** (AMP, SDPA, grad-checkpoint)  
-- Полностью **оффлайн**, без внешних зависимостей и API  
-
----
-
-## Структура проекта
-```
-md
-├─ train.py # обучение
-├─ sample.py           # инференс (DDIM)
-├─ sanity_check.py     # быстрый тест пайплайна
-├─ train.yaml          # конфигурация обучения
-├─ data/
-│  └─ raw/             # датасет
-├─ ddpm/
-│  ├─ model.py         # U-Net + attention
-│  ├─ diffusion.py     # DDPM (v-pred)
-│  ├─ ddim.py          # DDIM sampler
-│  ├─ data.py          # загрузка и препроцессинг
-│  └─ utils.py         # EMA, ckpt, seed, metadata
-└─ runs/
-└─ ...              # чекпоинты и логи
-```
-
----
+Проект для обучения и сэмплинга изображений с условием по тексту (BPE-токенайзер),
+ориентирован на понятный код и локальный запуск. Включает CLI и WebUI.
 
 ## Установка
 
-Минимальные зависимости:
+### Python окружение
 
 ```bash
-pip install torch torchvision pyyaml pillow numpy tqdm
-````
-
-Рекомендуется:
-
-* Python **3.13+**
-* PyTorch **2.1+**
-* CUDA **12+**
-
----
-
-## Подготовка датасета
-
-Ожидаемая структура:
-
-```
-data/raw/
-└─ people/
-   ├─ train/
-   │  ├─ 0001.jpg
-   │  ├─ 0002.png
-   │  └─ ...
-   ├─ val/
-   └─ test/
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-* изображения RGB,
-* произвольные разрешения (будут приведены к `image_size`),
-* значения нормализуются в `[-1, 1]`.
+### WebUI (backend + frontend)
 
----
-
-## Быстрая проверка (обязательно)
-
-Перед полноценным обучением:
+Backend зависимости:
 
 ```bash
-python sanity_check.py --image_size 64 --steps 2
+pip install -r requirements-web.txt
 ```
 
-Это проверит:
+Frontend зависимости:
 
-* датасет,
-* модель,
-* diffusion,
-* backward,
-* сохранение чекпоинта.
-
----
+```bash
+cd webui/frontend
+npm install
+```
 
 ## Обучение
 
@@ -107,83 +36,93 @@ python sanity_check.py --image_size 64 --steps 2
 python train.py --config train.yaml
 ```
 
-### Что происходит
+### Возобновление
 
-* используется **v-prediction**
-* loss = MSE(v̂, v) с **Min-SNR weighting**
-* применяется **EMA**
-* чекпоинты сохраняются в `runs/.../`
+```bash
+python train.py --config train.yaml --resume ./runs/.../ckpt_stop_0000500.pt
+```
 
-### Логи
+### Важные параметры
 
-В процессе обучения создаются:
+- `train.yaml` — основной конфиг.
+- `log_every` — период логирования. **Loss в логах и WebUI — среднее за последние `log_every` шагов.**
+- `compile` — включает `torch.compile` (если доступен).
+- `resume_ckpt` — путь к чекпоинту для резюма (CLI-флаг `--resume` переопределяет).
 
-* `runs/.../config.yaml` — snapshot конфига
-* `runs/.../run_meta.yaml` — информация об окружении
-* `runs/.../train_log.jsonl` — loss, скорость, VRAM, ETA
+### Выходные файлы
 
----
+В `out_dir` (из `train.yaml`) создаются:
 
-## Инференс (DDIM)
+- `config_snapshot.yaml` — снимок конфига запуска.
+- `run_meta.yaml` — информация об окружении.
+- `train_log.jsonl` — события и метрики.
+- `ckpt_*.pt`, `ckpt_stop_*.pt`, `ckpt_final.pt` — чекпоинты.
 
-Пример:
+### Совместимость чекпоинтов и `torch.compile`
+
+Чекпоинты, сохранённые в режиме `torch.compile`, совместимы с запуском без компиляции и наоборот.
+Если структура модели не совпадает, загрузка завершится с понятной ошибкой о несоответствии ключей.
+
+## Сэмплинг
+
+### Запуск
 
 ```bash
 python sample.py \
-  --ckpt ./runs/ddpm_people_384/ckpt_final.pt \
+  --ckpt ./runs/.../ckpt_final.pt \
   --out ./samples/grid.png \
-  --n 8 \
-  --steps 200
+  --n 4 \
+  --steps 50 \
+  --prompt "1girl" \
+  --cfg 5 \
+  --sampler heun \
+  --seed 42
 ```
 
-Рекомендации:
+### Важные параметры
 
-* `steps=50–200` — оптимально для проверки качества
-* всегда используйте **EMA-веса** (по умолчанию включено)
+- `--steps N` означает **ровно N итераций** внешнего цикла для всех самплеров.
+- `--sampler`: `ddim`, `ddpm`, `euler`, `heun`, `dpm_solver`.
+- `--cfg` — classifier-free guidance (1.0 = без усиления).
+- `--seed` — фиксирует детерминированность.
+- `--out` — путь к выходному изображению; директория создаётся автоматически.
 
----
+## WebUI
 
-## Конфигурация (`train.yaml`)
-
-Ключевые параметры:
-
-```yaml
-image_size: 384
-batch_size: 2
-grad_accum_steps: 4     # эффективный batch = 8
-amp: true
-grad_checkpoint: true
-
-timesteps: 1000
-min_snr_gamma: 5.0
-
-attn_resolutions: [48]
-```
-
----
-
-## Рекомендации под 8 GB VRAM
-
-* запуск из **TTY** (без графической сессии),
-* `batch_size ↓`, `grad_accum_steps ↑`,
-* `amp: true`,
-* `attn_resolutions: [48]` (не ниже),
-* `PYTORCH_ALLOC_CONF=expandable_segments:True`.
-
----
-
-## Web UI (опционально)
-
-Backend:
+### Запуск backend
 
 ```bash
 uvicorn webui.backend.app:app --host 127.0.0.1 --port 8000
 ```
 
-Frontend:
+### Запуск frontend
 
 ```bash
 cd webui/frontend
-npm install
 npm run dev
 ```
+
+### Логи и метрики WebUI
+
+Для каждого запуска создаётся директория:
+
+```
+webui_runs/<run_id>/
+  logs/
+    train.log
+    train.err.log
+    sample.log
+    sample.err.log
+  metrics/
+    train_metrics.jsonl
+  samples/
+```
+
+Метрика `loss` в UI отображается как среднее значение за последний интервал `log_every`.
+
+## Примечания и troubleshooting
+
+- **torch.compile**: при первом запуске возможна длительная компиляция и больший расход памяти.
+- **Недостаток VRAM**: уменьшите `batch_size`, увеличьте `grad_accum_steps`, включите `amp`.
+- **Сэмплинг в 0 шагов**: CLI ожидает `--steps >= 1`, иначе шаги не выполняются.
+- **Чекпоинт не грузится**: проверьте, что архитектура (из `config_snapshot.yaml`) соответствует текущему конфигу.
