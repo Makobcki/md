@@ -168,7 +168,7 @@ def _sanity_overfit(
     )
     batch = [sanity_ds[i] for i in range(max_images)]
     x0, txt_ids, txt_mask = collate_with_tokenizer(batch)
-    x0 = x0.to(device).to(memory_format=torch.channels_last)
+    x0 = x0.to(device, memory_format=torch.channels_last)
     txt_ids = txt_ids.to(device)
     txt_mask = txt_mask.to(device)
 
@@ -238,7 +238,10 @@ def main() -> None:
         cfg = replace(cfg, resume_ckpt=str(args.resume))
     run_cfg = cfg
 
-    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    os.environ.setdefault(
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "expandable_segments:True,max_split_size_mb:128",
+    )
 
     out_dir = Path(run_cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -395,6 +398,8 @@ def main() -> None:
     model = UNet(unet_cfg).to(device)
     model = model.to(memory_format=torch.channels_last)
 
+    # NOTE: torch.compile can increase startup time and VRAM usage.
+    # Compare throughput with compile=False if performance regresses.
     if bool(run_cfg.compile) and hasattr(torch, "compile"):
         model = torch.compile(model)
 
@@ -526,18 +531,23 @@ def main() -> None:
     log_loss_count = 0
 
     for step in range(start_step, max_steps):
+        step_start = time.perf_counter()
         opt.zero_grad(set_to_none=True)
         total_loss = 0.0
+        data_time = 0.0
+        fwd_bwd_time = 0.0
         last_batch_stats = {"x_std": None, "v_std": None}
 
         for _ in range(grad_accum):
+            fetch_start = time.perf_counter()
             try:
                 x0, txt_ids, txt_mask = next(it)
             except StopIteration:
                 it = iter(dl)
                 x0, txt_ids, txt_mask = next(it)
+            data_time += time.perf_counter() - fetch_start
 
-            x0 = x0.to(device, non_blocking=True).to(memory_format=torch.channels_last)
+            x0 = x0.to(device, non_blocking=True, memory_format=torch.channels_last)
             txt_ids = txt_ids.to(device, non_blocking=True)
             txt_mask = txt_mask.to(device, non_blocking=True)
 
@@ -553,6 +563,7 @@ def main() -> None:
             last_batch_stats["x_std"] = float(x0.detach().std().cpu().item())
             last_batch_stats["v_std"] = float(v_tgt.detach().std().cpu().item())
 
+            fwd_start = time.perf_counter()
             with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 v_pred = model(xt, t, txt_ids, txt_mask)
                 _assert_finite("v_pred", v_pred)
@@ -583,7 +594,9 @@ def main() -> None:
 
             total_loss += float(loss.detach().cpu())
             scaler.scale(loss).backward()
+            fwd_bwd_time += time.perf_counter() - fwd_start
 
+        opt_step_start = time.perf_counter()
         if scaler.is_enabled():
             scaler.unscale_(opt)
         if grad_clip > 0:
@@ -615,6 +628,9 @@ def main() -> None:
                 },
             })
             raise RuntimeError(f"Non-finite grads at step={step}: {bad_grads[:5]}")
+
+        opt_time = time.perf_counter() - opt_step_start
+        step_time = time.perf_counter() - step_start
 
         log_loss_sum += float(total_loss)
         log_loss_count += 1
@@ -676,6 +692,10 @@ def main() -> None:
                     "elapsed_sec": float(total_elapsed),
                     "eta_h": float(eta_h),
                     "sec_per_step": float(sec_per_step),
+                    "data_time_sec": float(data_time),
+                    "forward_backward_time_sec": float(fwd_bwd_time),
+                    "optimizer_step_time_sec": float(opt_time),
+                    "total_step_time_sec": float(step_time),
                     "max_steps": int(run_cfg.max_steps),
                 }
                 _emit_event_line(
