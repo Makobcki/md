@@ -16,7 +16,13 @@ from torch.utils.data import DataLoader
 import yaml
 
 from ddpm.config import TrainConfig
-from ddpm.data import DanbooruConfig, DanbooruDataset, build_or_load_index, collate_with_tokenizer
+from ddpm.data import (
+    DanbooruConfig,
+    DanbooruDataset,
+    build_or_load_index,
+    build_token_cache_key,
+    collate_with_tokenizer,
+)
 from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
 from ddpm.text import BPETokenizer, TextConfig
@@ -76,6 +82,18 @@ def _emit_event_line(
             metrics_path.parent.mkdir(parents=True, exist_ok=True)
             with open(metrics_path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+
+
+def _resolve_num_workers(requested: int) -> int:
+    if requested == 0:
+        return 0
+    cpu_count = os.cpu_count() or 0
+    max_workers = max(cpu_count - 1, 1) if cpu_count else 0
+    if requested < 0:
+        return max_workers
+    if max_workers:
+        return min(requested, max_workers)
+    return requested
 
 
 
@@ -264,6 +282,8 @@ def main() -> None:
         "grad_accum_steps": run_cfg.grad_accum_steps,
         "num_workers": run_cfg.num_workers,
         "prefetch_factor": run_cfg.prefetch_factor,
+        "pin_memory": run_cfg.pin_memory,
+        "persistent_workers": run_cfg.persistent_workers,
         "lr": run_cfg.lr,
         "weight_decay": run_cfg.weight_decay,
         "max_steps": run_cfg.max_steps,
@@ -273,6 +293,7 @@ def main() -> None:
         "amp": run_cfg.amp,
         "amp_dtype": run_cfg.amp_dtype,
         "compile": run_cfg.compile,
+        "compile_warmup_steps": run_cfg.compile_warmup_steps,
         "grad_clip_norm": run_cfg.grad_clip_norm,
         "ema_decay": run_cfg.ema_decay,
         "resume_ckpt": run_cfg.resume_ckpt,
@@ -326,17 +347,26 @@ def main() -> None:
         tokenizer=tokenizer,
         cond_drop_prob=float(run_cfg.cond_drop_prob),
         seed=int(run_cfg.seed),
+        cache_dir=str(Path(run_cfg.data_root) / run_cfg.cache_dir),
+        token_cache_key=build_token_cache_key(
+            vocab_path=model_cfg.text_vocab_path,
+            merges_path=model_cfg.text_merges_path,
+            caption_field=run_cfg.caption_field,
+            max_len=int(text_cfg.max_len),
+            lowercase=bool(text_cfg.lowercase),
+            strip_punct=bool(text_cfg.strip_punct),
+        ),
     )
 
-    nw = int(run_cfg.num_workers)
+    nw = _resolve_num_workers(int(run_cfg.num_workers))
     dl = DataLoader(
         ds,
         batch_size=int(run_cfg.batch_size),
         shuffle=True,
         num_workers=nw,
-        pin_memory=True,
+        pin_memory=bool(run_cfg.pin_memory),
         drop_last=True,
-        persistent_workers=nw > 0,
+        persistent_workers=bool(run_cfg.persistent_workers) and nw > 0,
         prefetch_factor=int(run_cfg.prefetch_factor) if nw > 0 else None,
         collate_fn=collate_with_tokenizer,
     )
@@ -359,7 +389,7 @@ def main() -> None:
         text_heads=int(model_cfg.text_heads),
         text_max_len=int(model_cfg.text_max_len),
         use_scale_shift_norm=bool(model_cfg.use_scale_shift_norm),
-        grad_checkpointing=bool(model_cfg.grad_checkpointing),
+        grad_checkpointing=bool(run_cfg.grad_checkpointing),
     )
 
     model = UNet(unet_cfg).to(device)
@@ -419,6 +449,8 @@ def main() -> None:
     save_every = int(run_cfg.save_every)
     min_snr_gamma = float(run_cfg.min_snr_gamma)
     grad_clip = float(run_cfg.grad_clip_norm)
+    compile_warmup_steps = int(run_cfg.compile_warmup_steps) if bool(run_cfg.compile) else 0
+    warmup_end_step = start_step + max(compile_warmup_steps, 0)
 
     webui_mode = _is_webui_mode()
     metrics_path = _webui_metrics_path()
@@ -587,7 +619,7 @@ def main() -> None:
         log_loss_sum += float(total_loss)
         log_loss_count += 1
 
-        if step % log_every == 0:
+        if step % log_every == 0 and step >= warmup_end_step:
             if device.type == "cuda":
                 torch.cuda.synchronize()
 
@@ -658,6 +690,15 @@ def main() -> None:
             log_loss_sum = 0.0
             log_loss_count = 0
 
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+        elif step + 1 == warmup_end_step:
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            last_log_time = time.perf_counter()
+            last_log_step = step
+            log_loss_sum = 0.0
+            log_loss_count = 0
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
 

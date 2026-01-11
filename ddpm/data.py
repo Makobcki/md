@@ -96,6 +96,34 @@ def _read_tags_file(path: Path) -> Optional[tuple[list[str], list[str]]]:
     return primary, gender
 
 
+def _hash_file(path: Path) -> str:
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def build_token_cache_key(
+    *,
+    vocab_path: str | Path,
+    merges_path: str | Path,
+    caption_field: str,
+    max_len: int,
+    lowercase: bool,
+    strip_punct: bool,
+) -> str:
+    h = hashlib.sha1()
+    h.update(b"token_cache_v1")
+    h.update(str(caption_field).encode("utf-8"))
+    h.update(str(max_len).encode("utf-8"))
+    h.update(str(int(lowercase)).encode("utf-8"))
+    h.update(str(int(strip_punct)).encode("utf-8"))
+    h.update(_hash_file(Path(vocab_path)).encode("utf-8"))
+    h.update(_hash_file(Path(merges_path)).encode("utf-8"))
+    return h.hexdigest()[:16]
+
+
 def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
     """
     Возвращает (train_entries, val_entries).
@@ -204,11 +232,29 @@ class DanbooruDataset(Dataset):
         tokenizer: Optional[BPETokenizer],
         cond_drop_prob: float,
         seed: int,
+        cache_dir: Optional[str] = None,
+        token_cache_key: Optional[str] = None,
     ):
         self.entries = entries
         self.tokenizer = tokenizer
         self.cond_drop_prob = float(cond_drop_prob)
         self.rng = random.Random(int(seed))
+        self._token_cache_path: Optional[Path] = None
+        self._token_cache_ids: Optional[torch.LongTensor] = None
+        self._token_cache_mask: Optional[torch.BoolTensor] = None
+        self._token_cache_md5: Optional[list[str]] = None
+        self._empty_ids: Optional[torch.LongTensor] = None
+        self._empty_mask: Optional[torch.BoolTensor] = None
+
+        if self.tokenizer is not None:
+            empty_ids, empty_mask = self.tokenizer.encode("")
+            self._empty_ids = empty_ids
+            self._empty_mask = empty_mask
+
+        if self.tokenizer is not None and cache_dir and token_cache_key:
+            cache_path = Path(cache_dir) / f"token_cache_{token_cache_key}.pt"
+            self._token_cache_path = cache_path
+            self._load_or_build_token_cache()
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -225,12 +271,74 @@ class DanbooruDataset(Dataset):
             # [0,1] -> [-1,1]
             return x * 2.0 - 1.0
 
+    def _build_text(self, entry: dict) -> str:
+        cap = entry.get("caption", "") or ""
+        tags_primary = list(entry.get("tags_primary", []))
+        tags_gender = list(entry.get("tags_gender", []))
+
+        if cap:
+            ids_cap, mask_cap = self.tokenizer.encode(cap)
+            cap_len = int(mask_cap.sum().item()) - 2  # exclude BOS/EOS
+            extra_tags = tags_primary[:5] if cap_len < 40 else []
+            all_tags = extra_tags + tags_gender
+            if all_tags:
+                tag_text = " ".join(all_tags).strip()
+                return f"{tag_text} {cap}".strip()
+            return cap
+        if tags_gender:
+            return " ".join(tags_gender).strip()
+        return ""
+
+    def _load_or_build_token_cache(self) -> None:
+        if self._token_cache_path is None or self.tokenizer is None:
+            return
+        cache_path = self._token_cache_path
+        if cache_path.exists():
+            try:
+                payload = torch.load(cache_path, map_location="cpu")
+                md5_list = payload.get("md5", [])
+                ids = payload.get("ids")
+                mask = payload.get("mask")
+                if (
+                    isinstance(md5_list, list)
+                    and ids is not None
+                    and mask is not None
+                    and len(md5_list) == len(self.entries)
+                    and all(md5 == e.get("md5") for md5, e in zip(md5_list, self.entries))
+                ):
+                    self._token_cache_md5 = md5_list
+                    self._token_cache_ids = ids
+                    self._token_cache_mask = mask
+                    return
+            except Exception:
+                pass
+
+        ids_list: list[torch.LongTensor] = []
+        mask_list: list[torch.BoolTensor] = []
+        md5_list = []
+        for entry in self.entries:
+            text = self._build_text(entry)
+            ids, mask = self.tokenizer.encode(text)
+            ids_list.append(ids)
+            mask_list.append(mask)
+            md5_list.append(entry.get("md5", ""))
+        ids_tensor = torch.stack(ids_list, dim=0)
+        mask_tensor = torch.stack(mask_list, dim=0)
+        payload = {
+            "md5": md5_list,
+            "ids": ids_tensor,
+            "mask": mask_tensor,
+        }
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(payload, cache_path)
+        self._token_cache_md5 = md5_list
+        self._token_cache_ids = ids_tensor
+        self._token_cache_mask = mask_tensor
+
     def __getitem__(self, idx: int):
         e = self.entries[idx]
         img = self._load_image(e["img"])
         cap = e["caption"]
-        tags_primary = list(e.get("tags_primary", []))
-        tags_gender = list(e.get("tags_gender", []))
 
         # classifier-free guidance training: drop text sometimes
         drop_cond = self.cond_drop_prob > 0 and self.rng.random() < self.cond_drop_prob
@@ -240,23 +348,17 @@ class DanbooruDataset(Dataset):
         if self.tokenizer is None:
             return img, cap
 
-        text = cap
         if drop_cond:
-            text = ""
-        elif cap:
-            ids_cap, mask_cap = self.tokenizer.encode(cap)
-            cap_len = int(mask_cap.sum().item()) - 2  # exclude BOS/EOS
-            if cap_len < 40:
-                extra_tags = tags_primary[:5]
-            else:
-                extra_tags = []
-            all_tags = extra_tags + tags_gender
-            if all_tags:
-                tag_text = " ".join(all_tags).strip()
-                text = f"{tag_text} {cap}".strip()
-        elif tags_gender:
-            text = " ".join(tags_gender).strip()
+            if self._empty_ids is None or self._empty_mask is None:
+                empty_ids, empty_mask = self.tokenizer.encode("")
+                self._empty_ids = empty_ids
+                self._empty_mask = empty_mask
+            return img, self._empty_ids, self._empty_mask
 
+        if self._token_cache_ids is not None and self._token_cache_mask is not None:
+            return img, self._token_cache_ids[idx], self._token_cache_mask[idx]
+
+        text = self._build_text(e)
         ids, mask = self.tokenizer.encode(text)
         return img, ids, mask
 
