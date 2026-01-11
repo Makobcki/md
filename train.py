@@ -20,10 +20,33 @@ from ddpm.data import DanbooruConfig, DanbooruDataset, build_or_load_index, coll
 from ddpm.diffusion import Diffusion, DiffusionConfig
 from ddpm.model import UNet, UNetConfig
 from ddpm.text import BPETokenizer, TextConfig
-from ddpm.utils import EMA, build_run_metadata, load_ckpt, save_ckpt, seed_everything
+from ddpm.utils import (
+    EMA,
+    build_run_metadata,
+    load_ckpt,
+    normalize_state_dict_for_keys,
+    normalize_state_dict_for_model,
+    save_ckpt,
+    seed_everything,
+)
 
 def _is_webui_mode() -> bool:
     return os.environ.get("WEBUI") == "1"
+
+def _dist_is_initialized() -> bool:
+    return torch.distributed.is_available() and torch.distributed.is_initialized()
+
+
+def _dist_rank() -> int:
+    if _dist_is_initialized():
+        return torch.distributed.get_rank()
+    return 0
+
+
+def _dist_all_reduce_sum(tensor: torch.Tensor) -> torch.Tensor:
+    if _dist_is_initialized():
+        torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
+    return tensor
 
 
 def _webui_metrics_path() -> Path | None:
@@ -372,7 +395,8 @@ def main() -> None:
     if resume:
         if ck is None:
             ck = load_ckpt(resume, device)
-        model.load_state_dict(ck["model"], strict=True)
+        model_state = normalize_state_dict_for_model(ck["model"], model, name="model")
+        model.load_state_dict(model_state, strict=True)
         if "opt" in ck:
             opt.load_state_dict(ck["opt"])
         elif "optimizer" in ck:
@@ -380,7 +404,8 @@ def main() -> None:
         if "scaler" in ck:
             scaler.load_state_dict(ck["scaler"])
         if "ema" in ck:
-            ema.shadow = {k: v.to(device) for k, v in ck["ema"].items()}
+            ema_state = normalize_state_dict_for_keys(ck["ema"], ema.shadow.keys(), name="ema")
+            ema.shadow = {k: v.to(device) for k, v in ema_state.items()}
         for group in opt.param_groups:
             group["lr"] = float(run_cfg.lr)
         start_step = int(ck.get("step", 0)) + 1
@@ -398,12 +423,14 @@ def main() -> None:
     webui_mode = _is_webui_mode()
     metrics_path = _webui_metrics_path()
 
+    is_main = _dist_rank() == 0
+
     pbar = tqdm(
         total=int(run_cfg.max_steps),
         initial=start_step,
         desc="train",
         unit="step",
-        disable=webui_mode,  # важное: webui -> без tqdm, иначе мусор в stdout
+        disable=webui_mode or not is_main,  # важное: webui -> без tqdm, иначе мусор в stdout
     )
 
     log_every = int(run_cfg.log_every)
@@ -449,18 +476,22 @@ def main() -> None:
         ema=ema,
     )
 
-    _emit_event_line(
-        payload={
-            "type": "status",
-            "status": "start",
-            "step": start_step,
-            "resume": bool(resume),
-            "out_dir": str(out_dir),
-        },
-        log_path=log_path,
-        metrics_path=metrics_path,
-        webui_mode=webui_mode,
-    )
+    if is_main:
+        _emit_event_line(
+            payload={
+                "type": "status",
+                "status": "start",
+                "step": start_step,
+                "resume": bool(resume),
+                "out_dir": str(out_dir),
+            },
+            log_path=log_path,
+            metrics_path=metrics_path,
+            webui_mode=webui_mode,
+        )
+
+    log_loss_sum = 0.0
+    log_loss_count = 0
 
     for step in range(start_step, max_steps):
         opt.zero_grad(set_to_none=True)
@@ -553,6 +584,9 @@ def main() -> None:
             })
             raise RuntimeError(f"Non-finite grads at step={step}: {bad_grads[:5]}")
 
+        log_loss_sum += float(total_loss)
+        log_loss_count += 1
+
         if step % log_every == 0:
             if device.type == "cuda":
                 torch.cuda.synchronize()
@@ -576,41 +610,53 @@ def main() -> None:
             sec_per_step = elapsed / steps_done
             eta_h = (steps_left * sec_per_step) / 3600.0
 
+            loss_sum = log_loss_sum
+            loss_count = log_loss_count
+            if _dist_is_initialized():
+                stats = torch.tensor([loss_sum, loss_count], device=device, dtype=torch.float64)
+                stats = _dist_all_reduce_sum(stats)
+                loss_sum = float(stats[0].item())
+                loss_count = int(stats[1].item())
+            loss_mean = loss_sum / max(loss_count, 1)
+
             # CLI-UI (только если НЕ webui)
-            if not webui_mode:
+            if not webui_mode and is_main:
                 pbar.set_postfix({
-                    "loss": f"{total_loss:.6f}",
+                    "loss": f"{loss_mean:.6f}",
                     "img/s": f"{img_per_sec:.2f}",
                     "mem(MB)": f"{peak_mem:.0f}",
                     "eta(h)": f"{eta_h:.2f}",
                 })
 
-            payload = {
-                "type": "metric",
-                "step": step,
-                "loss": float(total_loss),
-                "lr": float(opt.param_groups[0]["lr"]),
-                "grad_norm": float(grad_norm),
-                "x_std": last_batch_stats["x_std"],
-                "v_std": last_batch_stats["v_std"],
-                "ema_decay": float(run_cfg.ema_decay),
-                "cfg_drop_prob": float(run_cfg.cond_drop_prob),
-                "img_per_sec": float(img_per_sec),
-                "peak_mem_mb": float(peak_mem),
-                "elapsed_sec": float(total_elapsed),
-                "eta_h": float(eta_h),
-                "sec_per_step": float(sec_per_step),
-                "max_steps": int(run_cfg.max_steps),
-            }
-            _emit_event_line(
-                payload=payload,
-                log_path=log_path,
-                metrics_path=metrics_path,
-                webui_mode=webui_mode,
-            )
+            if is_main:
+                payload = {
+                    "type": "metric",
+                    "step": step,
+                    "loss": float(loss_mean),
+                    "lr": float(opt.param_groups[0]["lr"]),
+                    "grad_norm": float(grad_norm),
+                    "x_std": last_batch_stats["x_std"],
+                    "v_std": last_batch_stats["v_std"],
+                    "ema_decay": float(run_cfg.ema_decay),
+                    "cfg_drop_prob": float(run_cfg.cond_drop_prob),
+                    "img_per_sec": float(img_per_sec),
+                    "peak_mem_mb": float(peak_mem),
+                    "elapsed_sec": float(total_elapsed),
+                    "eta_h": float(eta_h),
+                    "sec_per_step": float(sec_per_step),
+                    "max_steps": int(run_cfg.max_steps),
+                }
+                _emit_event_line(
+                    payload=payload,
+                    log_path=log_path,
+                    metrics_path=metrics_path,
+                    webui_mode=webui_mode,
+                )
 
             last_log_time = now
             last_log_step = step
+            log_loss_sum = 0.0
+            log_loss_count = 0
 
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
@@ -626,17 +672,18 @@ def main() -> None:
                 "cfg": cfg_dict,
                 "meta": build_run_metadata(),
             })
-            _emit_event_line(
-                payload={
-                    "type": "status",
-                    "status": "stopped",
-                    "step": step,
-                    "ckpt": str(stop_path),
-                },
-                log_path=log_path,
-                metrics_path=metrics_path,
-                webui_mode=webui_mode,
-            )
+            if is_main:
+                _emit_event_line(
+                    payload={
+                        "type": "status",
+                        "status": "stopped",
+                        "step": step,
+                        "ckpt": str(stop_path),
+                    },
+                    log_path=log_path,
+                    metrics_path=metrics_path,
+                    webui_mode=webui_mode,
+                )
             print(f"[STOP] saved {stop_path}")
             return
 
@@ -651,16 +698,17 @@ def main() -> None:
                 "cfg": cfg_dict,
                 "meta": build_run_metadata(),
             })
-            _emit_event_line(
-                payload={
-                    "type": "log",
-                    "message": f"saved {ckpt_path}",
-                    "step": step,
-                },
-                log_path=log_path,
-                metrics_path=metrics_path,
-                webui_mode=webui_mode,
-            )
+            if is_main:
+                _emit_event_line(
+                    payload={
+                        "type": "log",
+                        "message": f"saved {ckpt_path}",
+                        "step": step,
+                    },
+                    log_path=log_path,
+                    metrics_path=metrics_path,
+                    webui_mode=webui_mode,
+                )
             print(f"[OK] saved {ckpt_path}")
 
     final_path = out_dir / "ckpt_final.pt"
@@ -673,17 +721,18 @@ def main() -> None:
         "cfg": cfg_dict,
         "meta": build_run_metadata(),
     })
-    _emit_event_line(
-        payload={
-            "type": "status",
-            "status": "done",
-            "step": max_steps - 1,
-            "ckpt": str(final_path),
-        },
-        log_path=log_path,
-        metrics_path=metrics_path,
-        webui_mode=webui_mode,
-    )
+    if is_main:
+        _emit_event_line(
+            payload={
+                "type": "status",
+                "status": "done",
+                "step": max_steps - 1,
+                "ckpt": str(final_path),
+            },
+            log_path=log_path,
+            metrics_path=metrics_path,
+            webui_mode=webui_mode,
+        )
     print(f"[DONE] saved {final_path}")
 
 
