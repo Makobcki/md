@@ -70,10 +70,25 @@ class TrainConfig:
     amp_dtype: str = "fp16"
     compile: bool = False
     compile_warmup_steps: int = 2
+    compile_cudagraphs: bool = True
     grad_clip_norm: float = 1.0
     ema_decay: float = 0.999
     resume_ckpt: str = ""
     deterministic: bool = False
+
+    tf32: bool = True
+    cudnn_benchmark: bool = True
+    channels_last: bool = True
+    enable_flash_sdp: bool = True
+    enable_mem_efficient_sdp: bool = True
+    enable_math_sdp: bool = False
+
+    mode: str = "pixel"
+    latent_channels: int = 4
+    latent_downsample_factor: int = 8
+    vae_pretrained: str = ""
+    vae_freeze: bool = True
+    vae_scaling_factor: float = 0.18215
 
     sanity_overfit_steps: int = 0
     sanity_overfit_images: int = 0
@@ -96,6 +111,12 @@ class TrainConfig:
             raise ValueError("amp_dtype must be 'fp16' or 'bf16'.")
         if self.tokenizer_type != "bpe":
             raise ValueError("tokenizer_type must be 'bpe'.")
+        if self.mode not in {"pixel", "latent"}:
+            raise ValueError("mode must be 'pixel' or 'latent'.")
+        if self.latent_channels <= 0:
+            raise ValueError("latent_channels must be positive.")
+        if self.latent_downsample_factor <= 0:
+            raise ValueError("latent_downsample_factor must be positive.")
 
     @classmethod
     def from_yaml(cls, path: str) -> "TrainConfig":
