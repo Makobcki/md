@@ -315,6 +315,26 @@ def latent_cache_path(cache_dir: str | Path, md5: str) -> Path:
     return Path(cache_dir) / sub_a / sub_b / f"{md5}.pt"
 
 
+def latent_shard_index_path(cache_dir: str | Path, index_name: str) -> Path:
+    return Path(cache_dir) / index_name
+
+
+def load_latent_shard_index(path: Path) -> dict[str, Path]:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing shard index: {path}")
+    index: dict[str, Path] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        obj = json.loads(line)
+        md5 = obj.get("md5")
+        shard = obj.get("shard")
+        if not isinstance(md5, str) or not isinstance(shard, str):
+            continue
+        index[md5] = path.parent / "shards" / shard
+    return index
+
+
 @dataclass(frozen=True)
 class LatentCacheMetadata:
     # Метаданные кеша латентов для проверки совместимости.
@@ -400,6 +420,8 @@ class DanbooruDataset(Dataset):
         cache_dir: Optional[str] = None,
         token_cache_key: Optional[str] = None,
         latent_cache_dir: Optional[str] = None,
+        latent_cache_sharded: bool = False,
+        latent_cache_index_path: Optional[str] = None,
         latent_dtype: Optional[torch.dtype] = None,
         return_latents: bool = False,
         latent_cache_strict: bool = True,
@@ -416,6 +438,8 @@ class DanbooruDataset(Dataset):
         self.caption_drop_prob = float(caption_drop_prob)
         self.rng = random.Random(int(seed))
         self.latent_cache_dir = str(latent_cache_dir) if latent_cache_dir else None
+        self.latent_cache_sharded = bool(latent_cache_sharded)
+        self.latent_cache_index_path = str(latent_cache_index_path) if latent_cache_index_path else None
         self.latent_dtype = latent_dtype
         self.return_latents = bool(return_latents)
         self.latent_cache_strict = bool(latent_cache_strict)
@@ -432,6 +456,10 @@ class DanbooruDataset(Dataset):
         self._token_cache_md5: Optional[list[str]] = None
         self._empty_ids: Optional[torch.LongTensor] = None
         self._empty_mask: Optional[torch.BoolTensor] = None
+        self._shard_index: dict[str, Path] | None = None
+        self._shard_cache_path: Optional[Path] = None
+        self._shard_cache_items: dict[str, torch.Tensor] | None = None
+        self._shard_cache_meta: Optional[LatentCacheMetadata] = None
 
         if self.tokenizer is not None:
             empty_ids, empty_mask = self.tokenizer.encode("")
@@ -453,12 +481,29 @@ class DanbooruDataset(Dataset):
         if self.return_latents:
             if not self.latent_cache_dir:
                 raise RuntimeError("latent_cache_dir is required for latent mode.")
+            if self.latent_cache_sharded:
+                if self.latent_cache_index_path:
+                    index_path = Path(self.latent_cache_index_path)
+                    if not index_path.is_absolute():
+                        index_path = Path(self.latent_cache_dir) / index_path
+                else:
+                    index_path = latent_shard_index_path(self.latent_cache_dir, "index.jsonl")
+                self._shard_index = load_latent_shard_index(index_path)
             filtered = []
             for entry in self.entries:
                 md5 = entry.get("md5", "")
                 if not md5:
                     self._log_missing_latent(md5, "missing_md5")
                     self.latent_cache_missing += 1
+                    continue
+                if self.latent_cache_sharded:
+                    shard_path = self._shard_index.get(md5) if self._shard_index else None
+                    if shard_path is not None and shard_path.exists():
+                        filtered.append(entry)
+                        self.latent_cache_hits += 1
+                    else:
+                        self._log_missing_latent(md5, "missing_shard_index")
+                        self.latent_cache_missing += 1
                     continue
                 cache_path = latent_cache_path(self.latent_cache_dir, md5)
                 if cache_path.exists():
@@ -479,6 +524,8 @@ class DanbooruDataset(Dataset):
     def _load_latent(self, md5: str) -> torch.Tensor:
         if not self.latent_cache_dir:
             raise RuntimeError("latent_cache_dir is required for latent mode.")
+        if self.latent_cache_sharded:
+            return self._load_latent_sharded(md5)
         cache_path = latent_cache_path(self.latent_cache_dir, md5)
         if not cache_path.exists():
             raise FileNotFoundError(f"Missing latent cache: {cache_path}")
@@ -490,6 +537,47 @@ class DanbooruDataset(Dataset):
             strict=self.latent_cache_strict,
             cache_path=cache_path,
         )
+        if self.latent_dtype is not None:
+            latent = latent.to(dtype=self.latent_dtype)
+        return latent
+
+    def _load_latent_sharded(self, md5: str) -> torch.Tensor:
+        if not self.latent_cache_dir:
+            raise RuntimeError("latent_cache_dir is required for latent mode.")
+        if self._shard_index is None:
+            raise RuntimeError("Shard index is not loaded.")
+        shard_path = self._shard_index.get(md5)
+        if shard_path is None or not shard_path.exists():
+            raise FileNotFoundError(f"Missing shard entry for md5={md5}")
+        if self._shard_cache_path != shard_path:
+            payload = torch.load(shard_path, map_location="cpu")
+            if not isinstance(payload, dict) or int(payload.get("format_version", 0)) != 2:
+                raise RuntimeError(f"Invalid shard payload format: {shard_path}")
+            meta_common = payload.get("meta_common")
+            items = payload.get("items")
+            if not isinstance(meta_common, dict) or not isinstance(items, dict):
+                raise RuntimeError(f"Invalid shard payload contents: {shard_path}")
+            meta_obj = LatentCacheMetadata(
+                vae_pretrained=str(meta_common.get("vae_pretrained", "")),
+                scaling_factor=float(meta_common.get("scaling_factor", 0.0)),
+                latent_shape=tuple(meta_common.get("latent_shape", ())),
+                dtype=str(meta_common.get("dtype", "")),
+                format_version=int(meta_common.get("format_version", 2)),
+            )
+            _validate_latent_meta(
+                expected=self.latent_expected_meta,
+                actual=meta_obj,
+                strict=self.latent_cache_strict,
+                cache_path=shard_path,
+            )
+            self._shard_cache_path = shard_path
+            self._shard_cache_items = items
+            self._shard_cache_meta = meta_obj
+        if self._shard_cache_items is None:
+            raise RuntimeError("Shard cache is empty.")
+        latent = self._shard_cache_items.get(md5)
+        if not isinstance(latent, torch.Tensor):
+            raise RuntimeError(f"Missing latent in shard: {md5}")
         if self.latent_dtype is not None:
             latent = latent.to(dtype=self.latent_dtype)
         return latent
@@ -576,16 +664,28 @@ class DanbooruDataset(Dataset):
         md5 = e.get("md5", "")
         is_latent = False
         if self.return_latents:
-            cache_path = latent_cache_path(self.latent_cache_dir or "", md5)
-            if cache_path.exists():
-                img = self._load_latent(md5)
-                is_latent = True
-            elif self.latent_cache_fallback:
-                self._log_missing_latent(md5, "fallback_encode")
-                img = self._load_image(e["img"])
-                is_latent = False
+            if self.latent_cache_sharded:
+                try:
+                    img = self._load_latent(md5)
+                    is_latent = True
+                except FileNotFoundError:
+                    if self.latent_cache_fallback:
+                        self._log_missing_latent(md5, "fallback_encode")
+                        img = self._load_image(e["img"])
+                        is_latent = False
+                    else:
+                        raise
             else:
-                raise FileNotFoundError(f"Missing latent cache: {cache_path}")
+                cache_path = latent_cache_path(self.latent_cache_dir or "", md5)
+                if cache_path.exists():
+                    img = self._load_latent(md5)
+                    is_latent = True
+                elif self.latent_cache_fallback:
+                    self._log_missing_latent(md5, "fallback_encode")
+                    img = self._load_image(e["img"])
+                    is_latent = False
+                else:
+                    raise FileNotFoundError(f"Missing latent cache: {cache_path}")
         else:
             img = self._load_image(e["img"])
 
