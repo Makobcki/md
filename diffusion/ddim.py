@@ -17,15 +17,18 @@ def _guided_v(
     model: UNet,
     x: torch.Tensor,
     t: torch.Tensor,
-    txt_ids: torch.Tensor,
-    txt_mask: torch.Tensor,
+    txt_ids: Optional[torch.Tensor],
+    txt_mask: Optional[torch.Tensor],
+    self_cond: Optional[torch.Tensor],
     cfg_scale: float,
     uncond_ids: Optional[torch.Tensor],
     uncond_mask: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    v_cond = model(x, t, txt_ids, txt_mask)
+    if txt_ids is None or txt_mask is None:
+        return model(x, t, None, None, self_cond)
+    v_cond = model(x, t, txt_ids, txt_mask, self_cond)
     if uncond_ids is not None and uncond_mask is not None and cfg_scale != 1.0:
-        v_un = model(x, t, uncond_ids, uncond_mask)
+        v_un = model(x, t, uncond_ids, uncond_mask, self_cond)
         return v_un + cfg_scale * (v_cond - v_un)
     return v_cond
 
@@ -35,13 +38,14 @@ def ddim_sample(
     model: UNet,
     diffusion: Diffusion,
     shape: Tuple[int, int, int, int],
-    txt_ids: torch.Tensor,
-    txt_mask: torch.Tensor,
+    txt_ids: Optional[torch.Tensor],
+    txt_mask: Optional[torch.Tensor],
     steps: int = 50,
     eta: float = 0.0,
     cfg_scale: float = 5.0,
     uncond_ids: Optional[torch.Tensor] = None,
     uncond_mask: Optional[torch.Tensor] = None,
+    self_conditioning: bool = False,
     clamp_x0: bool = True,
     noise: Optional[torch.Tensor] = None,
     generator: Optional[torch.Generator] = None,
@@ -58,14 +62,17 @@ def ddim_sample(
     ts = torch.linspace(T - 1, 0, steps + 1, device=device).long()
     total_steps = max(len(ts) - 1, 0)
 
+    self_cond: Optional[torch.Tensor] = None
     for i in range(total_steps):
         t = ts[i].repeat(b)
 
-        v = _guided_v(model, x, t, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        v = _guided_v(model, x, t, txt_ids, txt_mask, self_cond, cfg_scale, uncond_ids, uncond_mask)
         x0 = diffusion.v_to_x0(x, t, v)
         eps = diffusion.v_to_eps(x, t, v)
         if clamp_x0:
             x0 = x0.clamp(-1.0, 1.0)
+        if self_conditioning:
+            self_cond = x0.detach()
 
         if i == total_steps - 1:
             x = x0
@@ -93,12 +100,13 @@ def heun_sample(
     model: UNet,
     diffusion: Diffusion,
     shape: Tuple[int, int, int, int],
-    txt_ids: torch.Tensor,
-    txt_mask: torch.Tensor,
+    txt_ids: Optional[torch.Tensor],
+    txt_mask: Optional[torch.Tensor],
     steps: int = 30,
     cfg_scale: float = 5.0,
     uncond_ids: Optional[torch.Tensor] = None,
     uncond_mask: Optional[torch.Tensor] = None,
+    self_conditioning: bool = False,
     noise: Optional[torch.Tensor] = None,
     generator: Optional[torch.Generator] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
@@ -113,6 +121,7 @@ def heun_sample(
     t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps + 1, device=device).long()
 
     total_steps = max(len(t_schedule) - 1, 0)
+    self_cond: Optional[torch.Tensor] = None
     for i in range(total_steps):
         t = t_schedule[i].repeat(b)
         t_next = t_schedule[i + 1].repeat(b)
@@ -124,13 +133,25 @@ def heun_sample(
         sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1).to(x.dtype)
         sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1).to(x.dtype)
 
-        v = _guided_v(model, x, t, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        v = _guided_v(model, x, t, txt_ids, txt_mask, self_cond, cfg_scale, uncond_ids, uncond_mask)
         eps = diffusion.v_to_eps(x, t, v)
         x_hat = x / sqrt_a_t
         x_hat_euler = x_hat + (sigma_next - sigma) * eps
         x_euler = x_hat_euler * sqrt_a_next
+        if self_conditioning:
+            self_cond = diffusion.v_to_x0(x, t, v).detach()
 
-        v_next = _guided_v(model, x_euler, t_next, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        v_next = _guided_v(
+            model,
+            x_euler,
+            t_next,
+            txt_ids,
+            txt_mask,
+            self_cond,
+            cfg_scale,
+            uncond_ids,
+            uncond_mask,
+        )
         eps_next = diffusion.v_to_eps(x_euler, t_next, v_next)
         x_hat_next = x_hat + 0.5 * (eps + eps_next) * (sigma_next - sigma)
         x = x_hat_next * sqrt_a_next
@@ -139,7 +160,7 @@ def heun_sample(
             progress_cb(i + 1, total_steps)
 
     t_final = t_schedule[-1].repeat(b)
-    v_final = _guided_v(model, x, t_final, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+    v_final = _guided_v(model, x, t_final, txt_ids, txt_mask, self_cond, cfg_scale, uncond_ids, uncond_mask)
     return diffusion.v_to_x0(x, t_final, v_final)
 
 
@@ -148,12 +169,13 @@ def dpm_solver_sample(
     model: UNet,
     diffusion: Diffusion,
     shape: Tuple[int, int, int, int],
-    txt_ids: torch.Tensor,
-    txt_mask: torch.Tensor,
+    txt_ids: Optional[torch.Tensor],
+    txt_mask: Optional[torch.Tensor],
     steps: int = 30,
     cfg_scale: float = 5.0,
     uncond_ids: Optional[torch.Tensor] = None,
     uncond_mask: Optional[torch.Tensor] = None,
+    self_conditioning: bool = False,
     noise: Optional[torch.Tensor] = None,
     generator: Optional[torch.Generator] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
@@ -168,6 +190,7 @@ def dpm_solver_sample(
     t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps + 1, device=device).long()
 
     total_steps = max(len(t_schedule) - 1, 0)
+    self_cond: Optional[torch.Tensor] = None
     for i in range(total_steps):
         t = t_schedule[i].repeat(b)
         t_next = t_schedule[i + 1].repeat(b)
@@ -181,13 +204,15 @@ def dpm_solver_sample(
         sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1).to(x.dtype)
         sigma_mid = diffusion.sigma_from_t(t_mid).view(-1, 1, 1, 1).to(x.dtype)
 
-        v = _guided_v(model, x, t, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        v = _guided_v(model, x, t, txt_ids, txt_mask, self_cond, cfg_scale, uncond_ids, uncond_mask)
         eps = diffusion.v_to_eps(x, t, v)
         x_hat = x / sqrt_a_t
         x_hat_mid = x_hat + (sigma_mid - sigma) * eps
         x_mid = x_hat_mid * sqrt_a_mid
+        if self_conditioning:
+            self_cond = diffusion.v_to_x0(x, t, v).detach()
 
-        v_mid = _guided_v(model, x_mid, t_mid, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        v_mid = _guided_v(model, x_mid, t_mid, txt_ids, txt_mask, self_cond, cfg_scale, uncond_ids, uncond_mask)
         eps_mid = diffusion.v_to_eps(x_mid, t_mid, v_mid)
         x_hat_next = x_hat + (sigma_next - sigma) * eps_mid
         x = x_hat_next * sqrt_a_next
@@ -196,7 +221,7 @@ def dpm_solver_sample(
             progress_cb(i + 1, total_steps)
 
     t_final = t_schedule[-1].repeat(b)
-    v_final = _guided_v(model, x, t_final, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+    v_final = _guided_v(model, x, t_final, txt_ids, txt_mask, self_cond, cfg_scale, uncond_ids, uncond_mask)
     return diffusion.v_to_x0(x, t_final, v_final)
 
 
@@ -205,12 +230,13 @@ def euler_sample(
     model: UNet,
     diffusion: Diffusion,
     shape: Tuple[int, int, int, int],
-    txt_ids: torch.Tensor,
-    txt_mask: torch.Tensor,
+    txt_ids: Optional[torch.Tensor],
+    txt_mask: Optional[torch.Tensor],
     steps: int = 30,
     cfg_scale: float = 5.0,
     uncond_ids: Optional[torch.Tensor] = None,
     uncond_mask: Optional[torch.Tensor] = None,
+    self_conditioning: bool = False,
     noise: Optional[torch.Tensor] = None,
     generator: Optional[torch.Generator] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
@@ -225,6 +251,7 @@ def euler_sample(
     t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps + 1, device=device).long()
     total_steps = max(len(t_schedule) - 1, 0)
 
+    self_cond: Optional[torch.Tensor] = None
     for i in range(total_steps):
         t = t_schedule[i].repeat(b)
         t_next = t_schedule[i + 1].repeat(b)
@@ -233,8 +260,10 @@ def euler_sample(
         sigma = diffusion.sigma_from_t(t).view(-1, 1, 1, 1).to(x.dtype)
         sigma_next = diffusion.sigma_from_t(t_next).view(-1, 1, 1, 1).to(x.dtype)
 
-        v = _guided_v(model, x, t, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        v = _guided_v(model, x, t, txt_ids, txt_mask, self_cond, cfg_scale, uncond_ids, uncond_mask)
         eps = diffusion.v_to_eps(x, t, v)
+        if self_conditioning:
+            self_cond = diffusion.v_to_x0(x, t, v).detach()
         x_hat = x / sqrt_a_t
         x_hat_next = x_hat + (sigma_next - sigma) * eps
         x = x_hat_next * sqrt_a_next
@@ -243,7 +272,7 @@ def euler_sample(
             progress_cb(i + 1, total_steps)
 
     t_final = t_schedule[-1].repeat(b)
-    v_final = _guided_v(model, x, t_final, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+    v_final = _guided_v(model, x, t_final, txt_ids, txt_mask, self_cond, cfg_scale, uncond_ids, uncond_mask)
     return diffusion.v_to_x0(x, t_final, v_final)
 
 
@@ -252,12 +281,13 @@ def ddpm_ancestral_sample(
     model: UNet,
     diffusion: Diffusion,
     shape: Tuple[int, int, int, int],
-    txt_ids: torch.Tensor,
-    txt_mask: torch.Tensor,
+    txt_ids: Optional[torch.Tensor],
+    txt_mask: Optional[torch.Tensor],
     steps: int = 50,
     cfg_scale: float = 5.0,
     uncond_ids: Optional[torch.Tensor] = None,
     uncond_mask: Optional[torch.Tensor] = None,
+    self_conditioning: bool = False,
     noise: Optional[torch.Tensor] = None,
     generator: Optional[torch.Generator] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
@@ -272,12 +302,15 @@ def ddpm_ancestral_sample(
     t_schedule = torch.linspace(diffusion.cfg.timesteps - 1, 0, steps + 1, device=device).long()
 
     total_steps = max(len(t_schedule) - 1, 0)
+    self_cond: Optional[torch.Tensor] = None
     for i in range(total_steps):
         t = t_schedule[i].repeat(b)
 
-        v = _guided_v(model, x, t, txt_ids, txt_mask, cfg_scale, uncond_ids, uncond_mask)
+        v = _guided_v(model, x, t, txt_ids, txt_mask, self_cond, cfg_scale, uncond_ids, uncond_mask)
         x0 = diffusion.v_to_x0(x, t, v)
         eps = diffusion.v_to_eps(x, t, v)
+        if self_conditioning:
+            self_cond = x0.detach()
 
         if i == total_steps - 1:
             x = x0
@@ -326,20 +359,33 @@ def main():
 
     ck = load_ckpt(args.ckpt, device)
     cfg = ck.get("cfg", {})
+    use_text_conditioning = bool(cfg.get("use_text_conditioning", True))
+    meta_flag = ck.get("meta", {}).get("use_text_conditioning")
+    if isinstance(meta_flag, bool):
+        use_text_conditioning = meta_flag
+    mode_label = "ENABLED" if use_text_conditioning else "DISABLED (unconditional diffusion)"
+    print(f"[INFO] Text conditioning: {mode_label}")
 
-    vocab_path = cfg.get("text_vocab_path")
-    merges_path = cfg.get("text_merges_path")
-    if not vocab_path or not merges_path:
-        raise RuntimeError("Checkpoint missing text_vocab_path/text_merges_path.")
+    tok = None
+    if use_text_conditioning:
+        vocab_path = cfg.get("text_vocab_path")
+        merges_path = cfg.get("text_merges_path")
+        if not vocab_path or not merges_path:
+            raise RuntimeError("Checkpoint missing text_vocab_path/text_merges_path.")
 
-    text_cfg = TextConfig(
-        vocab_path=str(vocab_path),
-        merges_path=str(merges_path),
-        max_len=int(cfg.get("text_max_len", 64)),
-        lowercase=True,
-        strip_punct=True,
-    )
-    tok = BPETokenizer.from_files(vocab_path, merges_path, text_cfg)
+        text_cfg = TextConfig(
+            vocab_path=str(vocab_path),
+            merges_path=str(merges_path),
+            max_len=int(cfg.get("text_max_len", 64)),
+            lowercase=True,
+            strip_punct=True,
+        )
+        tok = BPETokenizer.from_files(vocab_path, merges_path, text_cfg)
+
+    self_conditioning = bool(cfg.get("self_conditioning", False))
+    meta_self = ck.get("meta", {}).get("self_conditioning")
+    if isinstance(meta_self, bool):
+        self_conditioning = meta_self
 
     unet_cfg = UNetConfig(
         image_channels=3,
@@ -350,12 +396,14 @@ def main():
         attn_resolutions=tuple(cfg.get("attn_resolutions", [32, 16])),
         attn_heads=int(cfg.get("attn_heads", 4)),
         attn_head_dim=int(cfg.get("attn_head_dim", 32)),
-        vocab_size=len(tok.vocab),
+        vocab_size=len(tok.vocab) if tok is not None else 0,
         text_dim=int(cfg.get("text_dim", 256)),
         text_layers=int(cfg.get("text_layers", 4)),
         text_heads=int(cfg.get("text_heads", 4)),
         text_max_len=int(cfg.get("text_max_len", 64)),
+        use_text_conditioning=use_text_conditioning,
         use_scale_shift_norm=bool(cfg.get("use_scale_shift_norm", False)),
+        self_conditioning=self_conditioning,
     )
 
     model = UNet(unet_cfg).to(device)
@@ -374,17 +422,29 @@ def main():
             beta_start=float(cfg.get("beta_start", 1e-4)),
             beta_end=float(cfg.get("beta_end", 2e-2)),
             prediction_type=str(cfg.get("prediction_type", "v")),
+            noise_schedule=str(cfg.get("noise_schedule", "linear")),
+            cosine_s=float(cfg.get("cosine_s", 0.008)),
         ),
         device=device,
     )
 
-    ids, mask = tok.encode(args.prompt)
-    ids = ids.unsqueeze(0).repeat(args.n, 1).to(device)
-    mask = mask.unsqueeze(0).repeat(args.n, 1).to(device)
+    if use_text_conditioning:
+        if tok is None:
+            raise RuntimeError("Tokenizer is not initialized.")
+        ids, mask = tok.encode(args.prompt)
+        ids = ids.unsqueeze(0).repeat(args.n, 1).to(device)
+        mask = mask.unsqueeze(0).repeat(args.n, 1).to(device)
 
-    un_ids, un_mask = tok.encode("")
-    un_ids = un_ids.unsqueeze(0).repeat(args.n, 1).to(device)
-    un_mask = un_mask.unsqueeze(0).repeat(args.n, 1).to(device)
+        un_ids, un_mask = tok.encode("")
+        un_ids = un_ids.unsqueeze(0).repeat(args.n, 1).to(device)
+        un_mask = un_mask.unsqueeze(0).repeat(args.n, 1).to(device)
+    else:
+        ids = None
+        mask = None
+        un_ids = None
+        un_mask = None
+        if args.prompt.strip():
+            print("[WARN] use_text_conditioning=false, prompt ignored")
 
     x = ddim_sample(
         model=model,
@@ -394,9 +454,10 @@ def main():
         txt_mask=mask,
         steps=args.steps,
         eta=args.eta,
-        cfg_scale=args.cfg,
+        cfg_scale=float(args.cfg),
         uncond_ids=un_ids,
         uncond_mask=un_mask,
+        self_conditioning=self_conditioning,
     )
 
     out_path = Path(args.out)

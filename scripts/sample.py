@@ -59,12 +59,25 @@ def main() -> None:
     ck = load_ckpt(args.ckpt, device)
 
     cfg = TrainConfig.from_dict(ck["cfg"]).to_dict()
+    use_text_conditioning = bool(cfg.get("use_text_conditioning", True))
+    meta_flag = ck.get("meta", {}).get("use_text_conditioning")
+    if isinstance(meta_flag, bool):
+        use_text_conditioning = meta_flag
+    mode_label = "ENABLED" if use_text_conditioning else "DISABLED (unconditional diffusion)"
+    print(f"[INFO] Text conditioning: {mode_label}")
+    self_conditioning = bool(cfg.get("self_conditioning", False))
+    meta_self = ck.get("meta", {}).get("self_conditioning")
+    if isinstance(meta_self, bool):
+        self_conditioning = meta_self
+
     diffusion = Diffusion(
         DiffusionConfig(
             timesteps=int(cfg.get("timesteps", 1000)),
             beta_start=float(cfg.get("beta_start", 1e-4)),
             beta_end=float(cfg.get("beta_end", 2e-2)),
             prediction_type=str(cfg.get("prediction_type", "v")),
+            noise_schedule=str(cfg.get("noise_schedule", "linear")),
+            cosine_s=float(cfg.get("cosine_s", 0.008)),
         ),
         device=device,
     )
@@ -81,19 +94,21 @@ def main() -> None:
         device,
     )
 
-    vocab_path = cfg.get("text_vocab_path")
-    merges_path = cfg.get("text_merges_path")
-    if not vocab_path or not merges_path:
-        raise RuntimeError("Checkpoint missing text_vocab_path/text_merges_path.")
+    tokenizer = None
+    if use_text_conditioning:
+        vocab_path = cfg.get("text_vocab_path")
+        merges_path = cfg.get("text_merges_path")
+        if not vocab_path or not merges_path:
+            raise RuntimeError("Checkpoint missing text_vocab_path/text_merges_path.")
 
-    text_cfg = TextConfig(
-        vocab_path=str(vocab_path),
-        merges_path=str(merges_path),
-        max_len=int(cfg.get("text_max_len", 64)),
-        lowercase=True,
-        strip_punct=True,
-    )
-    tokenizer = BPETokenizer.from_files(vocab_path, merges_path, text_cfg)
+        text_cfg = TextConfig(
+            vocab_path=str(vocab_path),
+            merges_path=str(merges_path),
+            max_len=int(cfg.get("text_max_len", 64)),
+            lowercase=True,
+            strip_punct=True,
+        )
+        tokenizer = BPETokenizer.from_files(vocab_path, merges_path, text_cfg)
 
     mode = str(cfg.get("mode", "pixel"))
     image_channels = 3 if mode == "pixel" else int(cfg.get("latent_channels", 4))
@@ -106,12 +121,14 @@ def main() -> None:
         attn_resolutions=tuple(cfg.get("attn_resolutions", [32, 16])),
         attn_heads=int(cfg.get("attn_heads", 4)),
         attn_head_dim=int(cfg.get("attn_head_dim", 32)),
-        vocab_size=len(tokenizer.vocab),
+        vocab_size=len(tokenizer.vocab) if tokenizer is not None else 0,
         text_dim=int(cfg.get("text_dim", 256)),
         text_layers=int(cfg.get("text_layers", 4)),
         text_heads=int(cfg.get("text_heads", 4)),
         text_max_len=int(cfg.get("text_max_len", 64)),
+        use_text_conditioning=use_text_conditioning,
         use_scale_shift_norm=bool(cfg.get("use_scale_shift_norm", False)),
+        self_conditioning=self_conditioning,
     )
 
     channels_last = bool(cfg.get("channels_last", True))
@@ -129,24 +146,35 @@ def main() -> None:
 
     model.eval()
 
-    prompt = args.prompt.strip()
-    neg_prompt = args.neg_prompt if args.neg_prompt else args.neg
-    if prompt:
-        cond_ids, cond_mask = tokenizer.encode(prompt)
-        cond_ids = cond_ids.unsqueeze(0).to(device)
-        cond_mask = cond_mask.unsqueeze(0).to(device)
-        uncond_text = neg_prompt.strip() if neg_prompt.strip() else ""
-        uncond_ids, uncond_mask = tokenizer.encode(uncond_text)
-        uncond_ids = uncond_ids.unsqueeze(0).to(device)
-        uncond_mask = uncond_mask.unsqueeze(0).to(device)
-        cfg_scale = float(args.cfg)
+    if use_text_conditioning:
+        if tokenizer is None:
+            raise RuntimeError("Tokenizer is not initialized.")
+        prompt = args.prompt.strip()
+        neg_prompt = args.neg_prompt if args.neg_prompt else args.neg
+        if prompt:
+            cond_ids, cond_mask = tokenizer.encode(prompt)
+            cond_ids = cond_ids.unsqueeze(0).to(device)
+            cond_mask = cond_mask.unsqueeze(0).to(device)
+            uncond_text = neg_prompt.strip() if neg_prompt.strip() else ""
+            uncond_ids, uncond_mask = tokenizer.encode(uncond_text)
+            uncond_ids = uncond_ids.unsqueeze(0).to(device)
+            uncond_mask = uncond_mask.unsqueeze(0).to(device)
+            cfg_scale = float(args.cfg)
+        else:
+            cond_ids, cond_mask = tokenizer.encode("")
+            cond_ids = cond_ids.unsqueeze(0).to(device)
+            cond_mask = cond_mask.unsqueeze(0).to(device)
+            uncond_ids = None
+            uncond_mask = None
+            cfg_scale = 0.0
     else:
-        cond_ids, cond_mask = tokenizer.encode("")
-        cond_ids = cond_ids.unsqueeze(0).to(device)
-        cond_mask = cond_mask.unsqueeze(0).to(device)
+        cond_ids = None
+        cond_mask = None
         uncond_ids = None
         uncond_mask = None
-        cfg_scale = 0.0
+        cfg_scale = 1.0
+        if args.prompt.strip() or args.neg_prompt.strip() or args.neg.strip():
+            print("[WARN] use_text_conditioning=false, prompt ignored")
 
     sampler = getattr(args, "sampler", "heun")
     h = int(cfg.get("image_size", 512))
@@ -197,6 +225,7 @@ def main() -> None:
             cfg_scale=cfg_scale,
             uncond_ids=uncond_ids,
             uncond_mask=uncond_mask,
+            self_conditioning=self_conditioning,
             noise=noise,
             generator=gen,
             progress_cb=_progress_cb,

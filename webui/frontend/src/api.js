@@ -28,6 +28,8 @@ export const api = {
   updateConfig: (content) =>
     fetchJson("/api/config", { method: "PUT", body: JSON.stringify({ content }) }),
   listCheckpoints: () => fetchJson("/api/checkpoints"),
+  getCheckpointInfo: (path) =>
+    fetchJson(`/api/checkpoints/info?path=${encodeURIComponent(path)}`),
   getOutDirSummary: () => fetchJson("/api/out_dir/summary"),
   listSamples: () => fetchJson("/api/samples"),
   getSampleArgs: () => fetchJson("/api/sample/args"),
