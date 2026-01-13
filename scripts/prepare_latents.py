@@ -252,9 +252,9 @@ def main() -> None:
     ap.add_argument("--device", default=None)
     ap.add_argument("--latent-dtype", default=None, choices=("fp16", "bf16"))
     ap.add_argument("--autocast-dtype", default=None, choices=("fp16", "bf16"))
-    ap.add_argument("--queue-size", type=int, default=8)
+    ap.add_argument("--queue-size", type=int, default=64)
     ap.add_argument("--writer-threads", type=int, default=1)
-    ap.add_argument("--shard-size", type=int, default=0)
+    ap.add_argument("--shard-size", type=int, default=4096)
     ap.add_argument("--stats-every-sec", type=float, default=5.0)
     ap.add_argument("--decode-backend", default="auto", choices=("auto", "pil", "torchvision"))
     args = ap.parse_args()
@@ -344,6 +344,7 @@ def main() -> None:
         "h2d_ms": 0.0,
         "encode_ms": 0.0,
         "cpu_copy_ms": 0.0,
+        "queue_wait_ms": 0.0,
         "total_ms": 0.0,
         "items": 0,
     }
@@ -396,6 +397,12 @@ def main() -> None:
         )
 
     task_queue: queue.Queue[Optional[_SaveTask]] = queue.Queue(maxsize=int(args.queue_size))
+    queue_wait_ms = {"value": 0.0}
+
+    def _enqueue_task(task: _SaveTask) -> None:
+        start_wait = time.perf_counter()
+        task_queue.put(task)
+        queue_wait_ms["value"] += (time.perf_counter() - start_wait) * 1000.0
 
     def _writer_loop() -> None:
         while True:
@@ -508,7 +515,7 @@ def main() -> None:
                             z_single = vae.encode(x_single.unsqueeze(0).to(device=device, dtype=dtype)).squeeze(0)
                     _update_latent_stats(stats, z_single.unsqueeze(0))
                     z_cpu = z_single.to(dtype=dtype, device="cpu")
-                    task_queue.put(_SaveTask(md5=md5, out_path=Path(path), latent=z_cpu))
+                    _enqueue_task(_SaveTask(md5=md5, out_path=Path(path), latent=z_cpu))
                 except Exception as inner:
                     errors += 1
                     with open(failed_path, "a", encoding="utf-8") as f:
@@ -520,7 +527,7 @@ def main() -> None:
         cpu_copy_ms = (time.perf_counter() - cpu_copy_start) * 1000.0
 
         for md5, out_path, z in zip(md5s, paths, z_cpu):
-            task_queue.put(_SaveTask(md5=md5, out_path=Path(out_path), latent=z))
+            _enqueue_task(_SaveTask(md5=md5, out_path=Path(out_path), latent=z))
 
         batch_total_ms = (time.perf_counter() - batch_start) * 1000.0
         timing["decode_ms"] += decode_ms
@@ -528,6 +535,8 @@ def main() -> None:
         timing["encode_ms"] += encode_ms
         timing["cpu_copy_ms"] += cpu_copy_ms
         timing["total_ms"] += batch_total_ms
+        timing["queue_wait_ms"] += queue_wait_ms["value"]
+        queue_wait_ms["value"] = 0.0
         timing["items"] += len(batch_items)
 
         now = time.perf_counter()
@@ -543,6 +552,7 @@ def main() -> None:
             avg_encode = timing["encode_ms"] / max(timing["items"], 1)
             avg_cpu = timing["cpu_copy_ms"] / max(timing["items"], 1)
             avg_total = timing["total_ms"] / max(timing["items"], 1)
+            avg_queue_wait = timing["queue_wait_ms"] / max(timing["items"], 1)
             avg_save = save_delta_ms / max(save_delta_items, 1)
             event_bus.emit({
                 "type": "metric",
@@ -557,6 +567,7 @@ def main() -> None:
                 "encode_ms": avg_encode,
                 "cpu_copy_ms": avg_cpu,
                 "save_ms": avg_save,
+                "queue_wait_ms": avg_queue_wait,
                 "total_ms": avg_total,
                 "disk_write_queue_len": task_queue.qsize(),
                 "max_steps": total,
@@ -566,6 +577,7 @@ def main() -> None:
                 "h2d_ms": 0.0,
                 "encode_ms": 0.0,
                 "cpu_copy_ms": 0.0,
+                "queue_wait_ms": 0.0,
                 "total_ms": 0.0,
                 "items": 0,
             }
