@@ -1,8 +1,16 @@
 import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api } from "../api.js";
+import { api, API_ORIGIN } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 import LineChart from "../components/LineChart.jsx";
+
+const toRunsUrl = (path) => {
+  if (!path) return null;
+  const marker = "webui_runs/";
+  const idx = path.indexOf(marker);
+  if (idx === -1) return null;
+  return `${API_ORIGIN}/runs/${path.slice(idx + marker.length)}`;
+};
 
 export default function RunDetails() {
   const { runId } = useParams();
@@ -24,17 +32,15 @@ export default function RunDetails() {
       }
       const outLog = await api.getRunLog(runId, "stdout");
       const errLog = await api.getRunLog(runId, "stderr");
-      setStdout(outLog.content.split("\n"));
-      setStderr(errLog.content.split("\n"));
+      setStdout(outLog.content.split("\n").filter(Boolean));
+      setStderr(errLog.content.split("\n").filter(Boolean));
       const metricsData = await api.getRunMetrics(runId);
       setMetrics(metricsData.items || []);
       const ckptData = await api.listCheckpoints();
       setCheckpoints(ckptData.items || []);
       const sampleData = await api.listSamples();
       setSamples(
-        (sampleData.items || []).filter((path) =>
-          path.includes(`/webui_runs/${runId}/samples/`)
-        )
+        (sampleData.items || []).filter((path) => path.includes(`/webui_runs/${runId}/samples/`))
       );
     };
     load();
@@ -45,11 +51,13 @@ export default function RunDetails() {
   }
 
   return (
-    <div className="container">
+    <div className="page">
       <div className="card">
-        <h2>Run {runId}</h2>
+        <div className="card-header">
+          <h2 className="card-title">Run {runId}</h2>
+          <span className={`status-pill ${run.status}`}>{run.status}</span>
+        </div>
         <div className="row">
-          <span className="status-pill">{run.status}</span>
           <span>{run.run_type}</span>
           <span className="muted">{run.created_at}</span>
         </div>
@@ -59,25 +67,29 @@ export default function RunDetails() {
 
       {config && (
         <div className="card">
-          <h3>Config snapshot</h3>
+          <h3 className="card-title">Config snapshot</h3>
           <textarea value={config} rows={16} readOnly style={{ width: "100%" }} />
         </div>
       )}
 
       {metrics.length > 0 && (
         <div className="card">
-          <h3>Loss vs Step (avg log_every)</h3>
-          <div className="muted">Среднее значение loss за последний интервал логирования.</div>
+          <div className="card-header">
+            <h3 className="card-title">Loss vs Step</h3>
+            <span className="muted">avg log_every</span>
+          </div>
           <LineChart data={metrics.map((m) => ({ step: m.step, loss: m.loss }))} />
         </div>
       )}
 
       {checkpoints.length > 0 && (
         <div className="card">
-          <h3>Checkpoints</h3>
+          <h3 className="card-title">Checkpoints</h3>
           <ul>
             {checkpoints.map((ckpt) => (
-              <li key={ckpt} className="muted">{ckpt}</li>
+              <li key={ckpt} className="muted">
+                {ckpt}
+              </li>
             ))}
           </ul>
         </div>
@@ -85,13 +97,20 @@ export default function RunDetails() {
 
       {samples.length > 0 && (
         <div className="card">
-          <h3>Samples</h3>
-          <div className="grid gallery">
+          <h3 className="card-title">Samples</h3>
+          <div className="gallery-grid">
             {samples.map((item) => {
-              const marker = "webui_runs/";
-              const idx = item.indexOf(marker);
-              const url = idx === -1 ? null : `http://127.0.0.1:8000/runs/${item.slice(idx + marker.length)}`;
-              return url ? <img key={item} src={url} alt="sample" /> : null;
+              const url = toRunsUrl(item);
+              return url ? (
+                <div key={item} className="image-card">
+                  <img src={url} alt="sample" />
+                  <div className="image-meta">
+                    <a href={url} target="_blank" rel="noreferrer">
+                      Open full
+                    </a>
+                  </div>
+                </div>
+              ) : null;
             })}
           </div>
         </div>
@@ -99,12 +118,12 @@ export default function RunDetails() {
 
       <div className="grid">
         <div className="card">
-          <h3>stdout</h3>
-          <LogViewer lines={stdout} />
+          <h3 className="card-title">stdout</h3>
+          <LogViewer lines={stdout} autoScroll={false} />
         </div>
         <div className="card">
-          <h3>stderr</h3>
-          <LogViewer lines={stderr} />
+          <h3 className="card-title">stderr</h3>
+          <LogViewer lines={stderr} autoScroll={false} />
         </div>
       </div>
     </div>
