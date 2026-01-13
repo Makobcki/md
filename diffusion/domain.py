@@ -12,8 +12,8 @@ from diffusion.diffusion import Diffusion
 class Batch:
     # Батч доменных данных: x — либо пиксели [B,3,H,W], либо латенты [B,4,h,w].
     x: torch.Tensor
-    txt_ids: torch.Tensor
-    txt_mask: torch.Tensor
+    txt_ids: Optional[torch.Tensor]
+    txt_mask: Optional[torch.Tensor]
     domain: str
     md5: Optional[list[str]] = None
 
@@ -22,8 +22,8 @@ class Batch:
 class PreparedBatch:
     # Подготовленный батч: все тензоры на устройстве/в формате домена.
     x: torch.Tensor
-    txt_ids: torch.Tensor
-    txt_mask: torch.Tensor
+    txt_ids: Optional[torch.Tensor]
+    txt_mask: Optional[torch.Tensor]
 
 
 class Domain(Protocol):
@@ -70,10 +70,16 @@ class PixelDomain:
         else:
             x = x.to(self.device, non_blocking=True)
         _assert_in_range("x0", x, -1.0, 1.0)
+        txt_ids = batch.txt_ids
+        txt_mask = batch.txt_mask
+        if txt_ids is not None:
+            txt_ids = txt_ids.to(self.device, non_blocking=True)
+        if txt_mask is not None:
+            txt_mask = txt_mask.to(self.device, non_blocking=True)
         return PreparedBatch(
             x=x,
-            txt_ids=batch.txt_ids.to(self.device, non_blocking=True),
-            txt_mask=batch.txt_mask.to(self.device, non_blocking=True),
+            txt_ids=txt_ids,
+            txt_mask=txt_mask,
         )
 
     def sample_noise_like(self, x0: torch.Tensor) -> torch.Tensor:
@@ -109,10 +115,16 @@ class LatentDomain:
             x = x.to(self.device, non_blocking=True, memory_format=torch.channels_last)
         else:
             x = x.to(self.device, non_blocking=True)
+        txt_ids = batch.txt_ids
+        txt_mask = batch.txt_mask
+        if txt_ids is not None:
+            txt_ids = txt_ids.to(self.device, non_blocking=True)
+        if txt_mask is not None:
+            txt_mask = txt_mask.to(self.device, non_blocking=True)
         return PreparedBatch(
             x=x,
-            txt_ids=batch.txt_ids.to(self.device, non_blocking=True),
-            txt_mask=batch.txt_mask.to(self.device, non_blocking=True),
+            txt_ids=txt_ids,
+            txt_mask=txt_mask,
         )
 
     def sample_noise_like(self, x0: torch.Tensor) -> torch.Tensor:

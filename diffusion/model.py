@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -31,6 +31,34 @@ def timestep_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
     return emb
 
 
+def _masked_mean(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask_f = mask.to(dtype=x.dtype)
+    denom = mask_f.sum(dim=1, keepdim=True).clamp(min=1.0)
+    return (x * mask_f.unsqueeze(-1)).sum(dim=1) / denom
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.eps = float(eps)
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+        return (x / rms) * self.weight
+
+
+class GEGLUFeedForward(nn.Module):
+    def __init__(self, dim: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.proj = nn.Linear(dim, hidden_dim * 2, bias=True)
+        self.out = nn.Linear(hidden_dim, dim, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        hidden, gate = self.proj(x).chunk(2, dim=-1)
+        return self.out(hidden * F.gelu(gate))
+
+
 class SDPATransformerBlock(nn.Module):
     def __init__(self, dim: int, n_heads: int, dropout: float = 0.1) -> None:
         super().__init__()
@@ -40,16 +68,14 @@ class SDPATransformerBlock(nn.Module):
         self.head_dim = dim // n_heads
         self.dropout = float(dropout)
 
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
+        self.norm1 = RMSNorm(dim)
+        self.norm2 = RMSNorm(dim)
         self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
         self.to_out = nn.Linear(dim, dim, bias=True)
-        self.ff = nn.Sequential(
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
-            nn.Linear(dim * 4, dim),
-        )
+        self.ff = GEGLUFeedForward(dim, hidden_dim=dim * 4)
         self.drop = nn.Dropout(self.dropout)
+        self.attn_gate = nn.Parameter(torch.ones(1))
+        self.ff_gate = nn.Parameter(torch.ones(1))
 
     def forward(self, x: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         b, t, _ = x.shape
@@ -71,10 +97,10 @@ class SDPATransformerBlock(nn.Module):
             is_causal=False,
         )
         attn_out = attn_out.transpose(1, 2).contiguous().view(b, t, -1)
-        x = x + self.drop(self.to_out(attn_out))
+        x = x + self.drop(self.to_out(attn_out)) * self.attn_gate
 
         h = self.norm2(x)
-        x = x + self.drop(self.ff(h))
+        x = x + self.drop(self.ff(h)) * self.ff_gate
         return x
 
 
@@ -89,7 +115,7 @@ class TextEncoder(nn.Module):
         self.blocks = nn.ModuleList(
             [SDPATransformerBlock(dim=dim, n_heads=n_heads) for _ in range(n_layers)]
         )
-        self.norm = nn.LayerNorm(dim)
+        self.norm = RMSNorm(dim)
 
     def forward(self, ids: torch.Tensor, attn_mask: torch.Tensor) -> torch.Tensor:
         b, t = ids.shape
@@ -167,6 +193,16 @@ class CrossAttention2d(nn.Module):
         return x_in + out
 
 
+class NoOpCrossAttention(nn.Module):
+    def forward(
+        self,
+        x: torch.Tensor,
+        ctx: Optional[torch.Tensor] = None,
+        ctx_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return x
+
+
 class ResBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, time_dim: int, dropout: float, use_scale_shift: bool):
         super().__init__()
@@ -231,6 +267,8 @@ class UNetConfig:
     text_layers: int = 4
     text_heads: int = 4
     text_max_len: int = 64
+    use_text_conditioning: bool = True
+    self_conditioning: bool = False
     use_scale_shift_norm: bool = False
     grad_checkpointing: bool = False
 
@@ -242,6 +280,8 @@ class UNet(nn.Module):
     def __init__(self, cfg: UNetConfig):
         super().__init__()
         self.cfg = cfg
+        self.use_text_conditioning = bool(cfg.use_text_conditioning)
+        self.self_conditioning = bool(cfg.self_conditioning)
 
         time_dim = cfg.base_channels * 4
         self.time_mlp = nn.Sequential(
@@ -250,16 +290,21 @@ class UNet(nn.Module):
             nn.Linear(time_dim, time_dim),
         )
 
-        self.text_enc = TextEncoder(
-            vocab_size=cfg.vocab_size,
-            dim=cfg.text_dim,
-            n_layers=cfg.text_layers,
-            n_heads=cfg.text_heads,
-            max_len=cfg.text_max_len,
-        )
+        self.text_enc: Optional[TextEncoder] = None
+        self.text_pool_proj: Optional[nn.Linear] = None
+        if self.use_text_conditioning:
+            self.text_enc = TextEncoder(
+                vocab_size=cfg.vocab_size,
+                dim=cfg.text_dim,
+                n_layers=cfg.text_layers,
+                n_heads=cfg.text_heads,
+                max_len=cfg.text_max_len,
+            )
+            self.text_pool_proj = nn.Linear(cfg.text_dim, time_dim)
 
         chs = [cfg.base_channels * m for m in cfg.channel_mults]
-        self.in_conv = nn.Conv2d(cfg.image_channels, chs[0], kernel_size=3, padding=1)
+        in_channels = cfg.image_channels * 2 if self.self_conditioning else cfg.image_channels
+        self.in_conv = nn.Conv2d(in_channels, chs[0], kernel_size=3, padding=1)
 
         # Down
         self.down_blocks = nn.ModuleList()
@@ -275,14 +320,21 @@ class UNet(nn.Module):
                 )
                 cur = ch
                 self.down_sa.append(SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim))
-                self.down_ca.append(CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim))
+                if self.use_text_conditioning:
+                    self.down_ca.append(CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim))
+                else:
+                    self.down_ca.append(NoOpCrossAttention())
             if level != len(chs) - 1:
                 self.downsamples.append(Downsample(cur))
 
         # Mid
         self.mid1 = ResBlock(cur, cur, time_dim=time_dim, dropout=cfg.dropout, use_scale_shift=cfg.use_scale_shift_norm)
         self.mid_sa = SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim)
-        self.mid_ca = CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim)
+        self.mid_ca = (
+            CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim)
+            if self.use_text_conditioning
+            else NoOpCrossAttention()
+        )
         self.mid2 = ResBlock(cur, cur, time_dim=time_dim, dropout=cfg.dropout, use_scale_shift=cfg.use_scale_shift_norm)
 
         # Up
@@ -299,7 +351,10 @@ class UNet(nn.Module):
                 )
                 cur = ch
                 self.up_sa.append(SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim))
-                self.up_ca.append(CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim))
+                if self.use_text_conditioning:
+                    self.up_ca.append(CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim))
+                else:
+                    self.up_ca.append(NoOpCrossAttention())
             if level != 0:
                 self.upsamples.append(Upsample(cur))
 
@@ -307,7 +362,14 @@ class UNet(nn.Module):
         self.out_conv = nn.Conv2d(cur, cfg.image_channels, kernel_size=3, padding=1)
         self.act = nn.SiLU()
 
-    def _maybe_attend(self, x: torch.Tensor, sa: nn.Module, ca: nn.Module, ctx: torch.Tensor, ctx_mask: torch.Tensor) -> torch.Tensor:
+    def _maybe_attend(
+        self,
+        x: torch.Tensor,
+        sa: nn.Module,
+        ca: nn.Module,
+        ctx: Optional[torch.Tensor],
+        ctx_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
         h, w = x.shape[-2], x.shape[-1]
         if (h in self.cfg.attn_resolutions) or (w in self.cfg.attn_resolutions):
             x = sa(x)
@@ -319,11 +381,36 @@ class UNet(nn.Module):
             return torch.utils.checkpoint.checkpoint(fn, *args, use_reentrant=False)
         return fn(*args)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor, txt_ids: torch.Tensor, txt_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        txt_ids: Optional[torch.Tensor],
+        txt_mask: Optional[torch.Tensor],
+        self_cond: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         te = timestep_embedding(t, self.cfg.base_channels)
         te = self.time_mlp(te)
 
-        ctx = self.text_enc(txt_ids, txt_mask)
+        ctx: Optional[torch.Tensor] = None
+        ctx_mask: Optional[torch.Tensor] = None
+        if self.self_conditioning:
+            if self_cond is None:
+                self_cond = torch.zeros_like(x)
+            if self_cond.shape != x.shape:
+                raise RuntimeError("self_cond shape mismatch with input.")
+            x = torch.cat([x, self_cond], dim=1)
+        if self.use_text_conditioning:
+            if txt_ids is None or txt_mask is None:
+                raise RuntimeError("txt_ids/txt_mask required when use_text_conditioning is enabled.")
+            if self.text_enc is None:
+                raise RuntimeError("Text encoder is not initialized.")
+            ctx = self.text_enc(txt_ids, txt_mask)
+            ctx_mask = txt_mask
+            if self.text_pool_proj is None:
+                raise RuntimeError("Text pooling projection is not initialized.")
+            pooled = _masked_mean(ctx, ctx_mask)
+            te = te + self.text_pool_proj(pooled)
 
         h = self.in_conv(x)
         skips = []
@@ -333,7 +420,7 @@ class UNet(nn.Module):
         for level in range(len(self.cfg.channel_mults)):
             for _ in range(self.cfg.num_res_blocks):
                 h = self._checkpointed(self.down_blocks[bi], h, te)
-                h = self._checkpointed(self._maybe_attend, h, self.down_sa[bi], self.down_ca[bi], ctx, txt_mask)
+                h = self._checkpointed(self._maybe_attend, h, self.down_sa[bi], self.down_ca[bi], ctx, ctx_mask)
                 skips.append(h)
                 bi += 1
             if level != len(self.cfg.channel_mults) - 1:
@@ -342,7 +429,7 @@ class UNet(nn.Module):
 
         h = self._checkpointed(self.mid1, h, te)
         h = self._checkpointed(self.mid_sa, h)
-        h = self._checkpointed(self.mid_ca, h, ctx, txt_mask)
+        h = self._checkpointed(self.mid_ca, h, ctx, ctx_mask)
         h = self._checkpointed(self.mid2, h, te)
 
         ui = 0
@@ -354,7 +441,7 @@ class UNet(nn.Module):
                     skip = F.interpolate(skip, size=h.shape[-2:], mode="nearest")
                 h = torch.cat([h, skip], dim=1)
                 h = self._checkpointed(self.up_blocks[ui], h, te)
-                h = self._checkpointed(self._maybe_attend, h, self.up_sa[ui], self.up_ca[ui], ctx, txt_mask)
+                h = self._checkpointed(self._maybe_attend, h, self.up_sa[ui], self.up_ca[ui], ctx, ctx_mask)
                 ui += 1
             if level != 0:
                 h = self._checkpointed(self.upsamples[usi], h)

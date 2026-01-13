@@ -36,6 +36,10 @@ class TrainConfig:
 
     lr: float = 1.0e-4
     weight_decay: float = 1.0e-4
+    lr_scheduler: str = "cosine"
+    warmup_steps: int = 1_000
+    min_lr_ratio: float = 0.1
+    decay_steps: int = 0
     max_steps: int = 120_000
     log_every: int = 50
     save_every: int = 2_000
@@ -57,6 +61,7 @@ class TrainConfig:
     text_layers: int = 4
     text_heads: int = 4
     text_max_len: int = 128
+    use_text_conditioning: bool = True
     use_scale_shift_norm: bool = True
     grad_checkpointing: bool = False
 
@@ -64,7 +69,10 @@ class TrainConfig:
     text_merges_path: str = "diffusion/bpe/merges.txt"
     tokenizer_type: str = "bpe"
 
-    cond_drop_prob: float = 0.10
+    cond_drop_prob: float = 0.15
+    token_drop_prob: float = 0.0
+    tag_drop_prob: float = 0.0
+    caption_drop_prob: float = 0.0
 
     amp: bool = True
     amp_dtype: str = "fp16"
@@ -73,6 +81,9 @@ class TrainConfig:
     compile_cudagraphs: bool = True
     grad_clip_norm: float = 1.0
     ema_decay: float = 0.999
+    ema_decay_fast: float = 0.999
+    ema_decay_slow: float = 0.9999
+    ema_switch_step: int = 10_000
     resume_ckpt: str = ""
     deterministic: bool = False
 
@@ -102,6 +113,28 @@ class TrainConfig:
     sanity_overfit_images: int = 0
     sanity_overfit_max_loss: float = 0.1
 
+    curriculum_enabled: bool = True
+    curriculum_steps: int = 20_000
+    curriculum_require_one_person: bool = True
+    curriculum_prefer_solo: bool = True
+    curriculum_exclude_multi: bool = True
+    curriculum_solo_weight: float = 2.0
+    curriculum_non_solo_weight: float = 1.0
+
+    self_conditioning: bool = True
+    self_cond_prob: float = 0.5
+
+    noise_schedule: str = "linear"
+    cosine_s: float = 0.008
+
+    eval_prompts_file: str = "./data/raw/Danbooru/prompts.txt"
+    eval_every: int = 500
+    eval_seed: int = 42
+    eval_sampler: str = "ddim"
+    eval_steps: int = 30
+    eval_cfg: float = 5.0
+    eval_n: int = 1
+
     image_size: int = 512
 
     extra: Dict[str, Any] = field(default_factory=dict, repr=False)
@@ -113,12 +146,20 @@ class TrainConfig:
             raise ValueError("text_max_len must be positive.")
         if self.timesteps <= 0:
             raise ValueError("timesteps must be positive.")
+        if self.warmup_steps < 0:
+            raise ValueError("warmup_steps must be non-negative.")
+        if self.min_lr_ratio <= 0 or self.min_lr_ratio > 1:
+            raise ValueError("min_lr_ratio must be in (0, 1].")
+        if self.decay_steps < 0:
+            raise ValueError("decay_steps must be non-negative.")
         if self.batch_size <= 0 or self.grad_accum_steps <= 0:
             raise ValueError("batch_size and grad_accum_steps must be positive.")
         if self.amp_dtype not in {"fp16", "bf16"}:
             raise ValueError("amp_dtype must be 'fp16' or 'bf16'.")
         if self.tokenizer_type != "bpe":
             raise ValueError("tokenizer_type must be 'bpe'.")
+        if self.lr_scheduler not in {"cosine", "linear"}:
+            raise ValueError("lr_scheduler must be 'cosine' or 'linear'.")
         if self.mode not in {"pixel", "latent"}:
             raise ValueError("mode must be 'pixel' or 'latent'.")
         if self.latent_channels <= 0:
@@ -129,6 +170,40 @@ class TrainConfig:
             raise ValueError("latent_dtype must be 'fp16' or 'bf16'.")
         if self.ckpt_keep_last < 0:
             raise ValueError("ckpt_keep_last must be non-negative.")
+        if self.curriculum_steps < 0:
+            raise ValueError("curriculum_steps must be non-negative.")
+        if self.curriculum_solo_weight <= 0 or self.curriculum_non_solo_weight <= 0:
+            raise ValueError("curriculum_solo_weight and curriculum_non_solo_weight must be positive.")
+        if self.self_cond_prob < 0 or self.self_cond_prob > 1:
+            raise ValueError("self_cond_prob must be in [0, 1].")
+        if self.noise_schedule not in {"linear", "cosine"}:
+            raise ValueError("noise_schedule must be 'linear' or 'cosine'.")
+        if self.cosine_s <= 0:
+            raise ValueError("cosine_s must be positive.")
+        if self.eval_every < 0:
+            raise ValueError("eval_every must be non-negative.")
+        if self.eval_steps < 0:
+            raise ValueError("eval_steps must be non-negative.")
+        if self.eval_cfg < 0:
+            raise ValueError("eval_cfg must be non-negative.")
+        if self.eval_n <= 0:
+            raise ValueError("eval_n must be positive.")
+        if self.eval_sampler not in {"ddim", "diffusion", "euler", "heun", "dpm_solver"}:
+            raise ValueError("eval_sampler must be one of: ddim, diffusion, euler, heun, dpm_solver.")
+        if not (0.0 <= self.cond_drop_prob <= 1.0):
+            raise ValueError("cond_drop_prob must be in [0, 1].")
+        if not (0.0 <= self.token_drop_prob <= 1.0):
+            raise ValueError("token_drop_prob must be in [0, 1].")
+        if not (0.0 <= self.tag_drop_prob <= 1.0):
+            raise ValueError("tag_drop_prob must be in [0, 1].")
+        if not (0.0 <= self.caption_drop_prob <= 1.0):
+            raise ValueError("caption_drop_prob must be in [0, 1].")
+        if not (0.0 < self.ema_decay_fast <= 1.0):
+            raise ValueError("ema_decay_fast must be in (0, 1].")
+        if not (0.0 < self.ema_decay_slow <= 1.0):
+            raise ValueError("ema_decay_slow must be in (0, 1].")
+        if self.ema_switch_step < 0:
+            raise ValueError("ema_switch_step must be non-negative.")
 
     @classmethod
     def from_yaml(cls, path: str) -> "TrainConfig":
