@@ -14,6 +14,7 @@ export default function GeneratePage() {
   const [error, setError] = useState("");
   const [gallery, setGallery] = useState([]);
   const [metrics, setMetrics] = useState([]);
+  const [useTextConditioning, setUseTextConditioning] = useState(true);
 
   useEffect(() => {
     const load = async () => {
@@ -40,6 +41,20 @@ export default function GeneratePage() {
     };
     load();
   }, []);
+
+  useEffect(() => {
+    const ckpt = args.ckpt;
+    if (!ckpt) {
+      setUseTextConditioning(true);
+      return;
+    }
+    api
+      .getCheckpointInfo(ckpt)
+      .then((info) => {
+        setUseTextConditioning(info.use_text_conditioning !== false);
+      })
+      .catch(() => setUseTextConditioning(true));
+  }, [args.ckpt]);
 
   useEffect(() => {
     const refresh = async () => {
@@ -98,7 +113,13 @@ export default function GeneratePage() {
   const handleStart = async () => {
     setError("");
     try {
-      const resp = await api.startSample(args);
+      const payload = { ...args };
+      if (!useTextConditioning) {
+        payload.prompt = "";
+        payload.neg_prompt = "";
+        payload.neg = "";
+      }
+      const resp = await api.startSample(payload);
       setRunId(resp.run_id);
       setCommand(resp.command);
       setOutput(resp.output);
@@ -161,7 +182,9 @@ export default function GeneratePage() {
             <div key={spec.name} className="card">
               <div className="muted">{spec.flags.join(", ")}</div>
               <label>{spec.name}</label>
-              {spec.name === "ckpt" && checkpoints.length > 0 ? (
+              {["prompt", "neg_prompt", "neg"].includes(spec.name) && !useTextConditioning ? (
+                <input type="text" value={args[spec.name] || ""} disabled />
+              ) : spec.name === "ckpt" && checkpoints.length > 0 ? (
                 <select
                   value={args[spec.name] || ""}
                   onChange={(e) => handleChange(spec.name, e.target.value)}
@@ -195,6 +218,9 @@ export default function GeneratePage() {
             </div>
           ))}
         </div>
+        {!useTextConditioning && (
+          <div className="muted">Text conditioning disabled; prompt inputs are ignored.</div>
+        )}
       </div>
 
       <div className="card">
