@@ -10,6 +10,9 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import torch
+
+from diffusion.utils import load_ckpt
 
 from .argparse_reader import parse_argparse_args
 from .job_manager import JobManager
@@ -178,6 +181,29 @@ def update_train_config(payload: Dict[str, Any]) -> Dict[str, Any]:
 @app.get("/api/checkpoints")
 def list_checkpoints() -> Dict[str, Any]:
     return {"items": job_manager.list_checkpoints()}
+
+
+@app.get("/api/checkpoints/info")
+def get_checkpoint_info(path: str) -> Dict[str, Any]:
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    ckpt_path = Path(path)
+    if not ckpt_path.is_absolute():
+        ckpt_path = ROOT_DIR / ckpt_path
+    try:
+        ckpt_path = ckpt_path.resolve()
+        ckpt_path.relative_to(ROOT_DIR)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid checkpoint path") from exc
+    if not ckpt_path.exists():
+        raise HTTPException(status_code=404, detail="checkpoint not found")
+    ck = load_ckpt(str(ckpt_path), torch.device("cpu"))
+    cfg = ck.get("cfg", {})
+    use_text_conditioning = bool(cfg.get("use_text_conditioning", True))
+    meta_flag = ck.get("meta", {}).get("use_text_conditioning")
+    if isinstance(meta_flag, bool):
+        use_text_conditioning = meta_flag
+    return {"path": str(ckpt_path), "use_text_conditioning": use_text_conditioning}
 
 
 @app.get("/api/out_dir/summary")

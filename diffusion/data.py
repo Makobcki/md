@@ -29,6 +29,7 @@ class DanbooruConfig:
     meta_dir: str = "meta"
     tags_dir: str = "tags"
     caption_field: str = "caption_llava_34b_no_tags_short"
+    use_text_conditioning: bool = True
     min_tag_count: int = 8          # danbooru_post.tag_count >= min_tag_count
     require_512: bool = True        # пропускать всё, что не 512x512
     val_ratio: float = 0.01         # 99/1
@@ -144,7 +145,8 @@ def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
 
     cache_key = (
         f"danbooru_index_{cfg.caption_field}_tags{cfg.min_tag_count}"
-        f"_req512{int(cfg.require_512)}_val{cfg.val_ratio}_tagsdir{cfg.tags_dir}.jsonl"
+        f"_req512{int(cfg.require_512)}_val{cfg.val_ratio}_tagsdir{cfg.tags_dir}"
+        f"_text{int(cfg.use_text_conditioning)}.jsonl"
     )
     cache_path = cache_dir / cache_key
 
@@ -182,22 +184,28 @@ def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
         if _extract_tag_count(meta) < int(cfg.min_tag_count):
             continue
 
-        cap = _extract_caption(meta, cfg.caption_field).strip()
-        if not cap:
-            continue
+        if cfg.use_text_conditioning:
+            cap = _extract_caption(meta, cfg.caption_field).strip()
+            if not cap:
+                continue
+        else:
+            cap = ""
 
         candidates = [p for p in img_dir.glob(f"{md5}.*") if p.suffix.lower() in _ALLOWED_EXTS]
         if not candidates:
             continue
         img_path = candidates[0]
 
-        tags_path = tags_dir / f"{md5}.txt"
-        if not tags_path.exists():
-            continue
-        tag_data = _read_tags_file(tags_path)
-        if not tag_data:
-            continue
-        tags_primary, tags_gender = tag_data
+        if cfg.use_text_conditioning:
+            tags_path = tags_dir / f"{md5}.txt"
+            if not tags_path.exists():
+                continue
+            tag_data = _read_tags_file(tags_path)
+            if not tag_data:
+                continue
+            tags_primary, tags_gender = tag_data
+        else:
+            tags_primary, tags_gender = [], []
 
         if cfg.require_512:
             try:
@@ -291,24 +299,34 @@ def _validate_latent_meta(
             raise RuntimeError(f"Missing metadata in latent cache: {cache_path}")
         return
     if expected.vae_pretrained and actual.vae_pretrained != expected.vae_pretrained:
-        raise RuntimeError(
+        msg = (
             "Latent cache VAE mismatch: "
             f"{actual.vae_pretrained} != {expected.vae_pretrained} ({cache_path})"
         )
+        if strict:
+            raise RuntimeError(msg)
+        print(f"[WARN] {msg}")
     if abs(actual.scaling_factor - expected.scaling_factor) > 1e-6:
-        raise RuntimeError(
+        msg = (
             "Latent cache scaling_factor mismatch: "
             f"{actual.scaling_factor} != {expected.scaling_factor} ({cache_path})"
         )
+        if strict:
+            raise RuntimeError(msg)
+        print(f"[WARN] {msg}")
     if tuple(actual.latent_shape) != tuple(expected.latent_shape):
-        raise RuntimeError(
+        msg = (
             "Latent cache shape mismatch: "
             f"{actual.latent_shape} != {expected.latent_shape} ({cache_path})"
         )
+        if strict:
+            raise RuntimeError(msg)
+        print(f"[WARN] {msg}")
     if expected.dtype and actual.dtype != expected.dtype:
-        raise RuntimeError(
-            f"Latent cache dtype mismatch: {actual.dtype} != {expected.dtype} ({cache_path})"
-        )
+        msg = f"Latent cache dtype mismatch: {actual.dtype} != {expected.dtype} ({cache_path})"
+        if strict:
+            raise RuntimeError(msg)
+        print(f"[WARN] {msg}")
 
 
 class DanbooruDataset(Dataset):
@@ -317,6 +335,9 @@ class DanbooruDataset(Dataset):
         entries: List[dict],
         tokenizer: Optional[BPETokenizer],
         cond_drop_prob: float,
+        token_drop_prob: float = 0.0,
+        tag_drop_prob: float = 0.0,
+        caption_drop_prob: float = 0.0,
         seed: int,
         cache_dir: Optional[str] = None,
         token_cache_key: Optional[str] = None,
@@ -332,6 +353,9 @@ class DanbooruDataset(Dataset):
         self.entries = entries
         self.tokenizer = tokenizer
         self.cond_drop_prob = float(cond_drop_prob)
+        self.token_drop_prob = float(token_drop_prob)
+        self.tag_drop_prob = float(tag_drop_prob)
+        self.caption_drop_prob = float(caption_drop_prob)
         self.rng = random.Random(int(seed))
         self.latent_cache_dir = str(latent_cache_dir) if latent_cache_dir else None
         self.latent_dtype = latent_dtype
@@ -356,7 +380,14 @@ class DanbooruDataset(Dataset):
             self._empty_ids = empty_ids
             self._empty_mask = empty_mask
 
-        if self.tokenizer is not None and cache_dir and token_cache_key:
+        if (
+            self.tokenizer is not None
+            and cache_dir
+            and token_cache_key
+            and self.token_drop_prob <= 0
+            and self.tag_drop_prob <= 0
+            and self.caption_drop_prob <= 0
+        ):
             cache_path = Path(cache_dir) / f"token_cache_{token_cache_key}.pt"
             self._token_cache_path = cache_path
             self._load_or_build_token_cache()
@@ -416,6 +447,12 @@ class DanbooruDataset(Dataset):
         cap = entry.get("caption", "") or ""
         tags_primary = list(entry.get("tags_primary", []))
         tags_gender = list(entry.get("tags_gender", []))
+
+        if self.caption_drop_prob > 0 and self.rng.random() < self.caption_drop_prob:
+            cap = ""
+        if self.tag_drop_prob > 0 and self.rng.random() < self.tag_drop_prob:
+            tags_primary = []
+            tags_gender = []
 
         if cap:
             ids_cap, mask_cap = self.tokenizer.encode(cap)
@@ -478,7 +515,6 @@ class DanbooruDataset(Dataset):
 
     def __getitem__(self, idx: int):
         e = self.entries[idx]
-        cap = e["caption"]
         md5 = e.get("md5", "")
         is_latent = False
         if self.return_latents:
@@ -495,8 +531,14 @@ class DanbooruDataset(Dataset):
         else:
             img = self._load_image(e["img"])
 
+        if self.tokenizer is None:
+            if self.include_is_latent:
+                return img, is_latent
+            return (img,)
+
         # classifier-free guidance training: drop text sometimes
         drop_cond = self.cond_drop_prob > 0 and self.rng.random() < self.cond_drop_prob
+        cap = e.get("caption", "")
         if drop_cond:
             cap = ""
 
@@ -519,9 +561,28 @@ class DanbooruDataset(Dataset):
 
         text = self._build_text(e)
         ids, mask = self.tokenizer.encode(text)
+        ids, mask = self._apply_token_dropout(ids, mask)
         if self.include_is_latent:
             return img, ids, mask, is_latent
         return img, ids, mask
+
+    def _apply_token_dropout(
+        self,
+        ids: torch.LongTensor,
+        mask: torch.BoolTensor,
+    ) -> Tuple[torch.LongTensor, torch.BoolTensor]:
+        if self.token_drop_prob <= 0:
+            return ids, mask
+        ids = ids.clone()
+        mask = mask.clone()
+        max_len = ids.shape[0]
+        for i in range(1, max_len - 1):
+            if not mask[i]:
+                continue
+            if self.rng.random() < self.token_drop_prob:
+                ids[i] = self.tokenizer.pad_id
+                mask[i] = False
+        return ids, mask
 
     def latent_cache_hit_rate(self) -> float | None:
         if not self.return_latents or self.latent_cache_total == 0:
@@ -537,20 +598,23 @@ def collate_with_tokenizer(
     # В режиме fallback элементы могут содержать флаг is_latent.
     if len(batch) == 0:
         raise RuntimeError("Empty batch.")
-    has_flag = len(batch[0]) >= 4
+    item_len = len(batch[0])
+    has_tokens = item_len >= 3
+    has_flag = item_len >= 4 or (not has_tokens and item_len >= 2)
 
-    if not has_flag:
+    if not has_tokens and not has_flag:
         imgs = torch.stack([b[0] for b in batch], dim=0)
-        ids = torch.stack([b[1] for b in batch], dim=0)
-        mask = torch.stack([b[2] for b in batch], dim=0)
-        return imgs, ids, mask
+        return imgs, None, None
 
     latents: list[Optional[torch.Tensor]] = [None] * len(batch)
     to_encode: list[torch.Tensor] = []
     encode_indices: list[int] = []
 
     for idx, item in enumerate(batch):
-        x, ids, mask, is_latent = item[:4]
+        if has_tokens:
+            x, ids, mask, is_latent = item[:4]
+        else:
+            x, is_latent = item[:2]
         if is_latent:
             latents[idx] = x
         else:
@@ -568,6 +632,8 @@ def collate_with_tokenizer(
         raise RuntimeError("Failed to assemble latent batch.")
 
     imgs = torch.stack([x for x in latents if x is not None], dim=0)
+    if not has_tokens:
+        return imgs, None, None
     ids = torch.stack([b[1] for b in batch], dim=0)
     mask = torch.stack([b[2] for b in batch], dim=0)
     return imgs, ids, mask

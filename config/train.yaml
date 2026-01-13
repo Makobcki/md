@@ -20,6 +20,10 @@ pin_memory: true
 persistent_workers: true
 
 lr: 1.0e-4
+lr_scheduler: cosine
+warmup_steps: 1000
+min_lr_ratio: 0.1
+decay_steps: 0
 weight_decay: 1.0e-4
 max_steps: 120000
 log_every: 50
@@ -44,13 +48,17 @@ text_dim: 256
 text_layers: 4
 text_heads: 4
 text_max_len: 128
+use_text_conditioning: true
 text_vocab_path: diffusion/bpe/vocab.json
 text_merges_path: diffusion/bpe/merges.txt
 tokenizer_type: bpe
 use_scale_shift_norm: true
 grad_checkpointing: false
 
-cond_drop_prob: 0.10
+cond_drop_prob: 0.15
+token_drop_prob: 0.0
+tag_drop_prob: 0.0
+caption_drop_prob: 0.0
 
 amp: true
 amp_dtype: fp16
@@ -59,6 +67,9 @@ compile_warmup_steps: 2
 compile_cudagraphs: true
 grad_clip_norm: 1.0
 ema_decay: 0.999
+ema_decay_fast: 0.999
+ema_decay_slow: 0.9999
+ema_switch_step: 10000
 resume_ckpt: ""
 deterministic: false
 tf32: true
@@ -83,3 +94,25 @@ ckpt_keep_last: 5
 sanity_overfit_steps: 100
 sanity_overfit_images: 2
 sanity_overfit_max_loss: 0.1
+
+curriculum_enabled: true
+curriculum_steps: 20000
+curriculum_require_one_person: true
+curriculum_prefer_solo: true
+curriculum_exclude_multi: true
+curriculum_solo_weight: 2.0
+curriculum_non_solo_weight: 1.0
+
+self_conditioning: true
+self_cond_prob: 0.5
+
+noise_schedule: linear
+cosine_s: 0.008
+
+eval_prompts_file: ./data/raw/Danbooru/prompts.txt
+eval_every: 500
+eval_seed: 42
+eval_sampler: ddim
+eval_steps: 30
+eval_cfg: 5.0
+eval_n: 1
