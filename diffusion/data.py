@@ -29,6 +29,7 @@ class DanbooruConfig:
     meta_dir: str = "meta"
     tags_dir: str = "tags"
     caption_field: str = "caption_llava_34b_no_tags_short"
+    images_only: bool = False
     use_text_conditioning: bool = True
     min_tag_count: int = 8          # danbooru_post.tag_count >= min_tag_count
     require_512: bool = True        # пропускать всё, что не 512x512
@@ -136,12 +137,69 @@ def build_or_load_index(cfg: DanbooruConfig) -> Tuple[List[dict], List[dict]]:
     entry: {"md5":..., "img":..., "caption":..., "tags_primary":..., "tags_gender":...}
     """
     root = Path(cfg.root)
-    meta_dir = root / cfg.meta_dir
     img_dir = root / cfg.image_dir
+    meta_dir = root / cfg.meta_dir
     tags_dir = root / cfg.tags_dir
     cache_dir = root / cfg.cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
     failed = _load_failed_list(root / cfg.failed_list)
+
+    if cfg.images_only:
+        cache_key = (
+            f"danbooru_index_images_only_req512{int(cfg.require_512)}"
+            f"_val{cfg.val_ratio}_imgdir{cfg.image_dir}.jsonl"
+        )
+        cache_path = cache_dir / cache_key
+
+        if cache_path.exists():
+            train_entries = []
+            val_entries = []
+            with open(cache_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    if obj.get("split") == "val":
+                        val_entries.append(obj["entry"])
+                    else:
+                        train_entries.append(obj["entry"])
+            return train_entries, val_entries
+
+        train_entries = []
+        val_entries = []
+        img_files = sorted(p for p in img_dir.iterdir() if p.suffix.lower() in _ALLOWED_EXTS)
+        for img_path in img_files:
+            md5 = img_path.stem
+            if not md5:
+                continue
+            if md5 in failed:
+                continue
+            if cfg.require_512:
+                try:
+                    with Image.open(img_path) as im:
+                        if im.size != (512, 512):
+                            continue
+                except Exception:
+                    continue
+
+            entry = {
+                "md5": md5,
+                "img": str(img_path),
+                "caption": "",
+                "tags_primary": [],
+                "tags_gender": [],
+            }
+            split = "val" if _split_is_val(md5, cfg.val_ratio) else "train"
+            if split == "val":
+                val_entries.append(entry)
+            else:
+                train_entries.append(entry)
+
+            with open(cache_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"split": split, "entry": entry}, ensure_ascii=False) + "\n")
+
+        return train_entries, val_entries
 
     cache_key = (
         f"danbooru_index_{cfg.caption_field}_tags{cfg.min_tag_count}"
