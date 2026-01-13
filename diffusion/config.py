@@ -100,6 +100,8 @@ class TrainConfig:
     latent_downsample_factor: int = 8
     latent_cache: bool = False
     latent_cache_dir: str = ".cache/latents"
+    latent_cache_sharded: bool = False
+    latent_cache_index: str = "index.jsonl"
     latent_dtype: str = "bf16"
     latent_precompute: bool = False
     latent_cache_fallback: bool = False
@@ -169,6 +171,8 @@ class TrainConfig:
             raise ValueError("latent_downsample_factor must be positive.")
         if self.latent_dtype not in {"fp16", "bf16"}:
             raise ValueError("latent_dtype must be 'fp16' or 'bf16'.")
+        if self.latent_cache_sharded and not self.latent_cache:
+            raise ValueError("latent_cache_sharded requires latent_cache=true.")
         if self.ckpt_keep_last < 0:
             raise ValueError("ckpt_keep_last must be non-negative.")
         if self.curriculum_steps < 0:
