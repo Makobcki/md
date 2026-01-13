@@ -10,18 +10,35 @@ class DiffusionConfig:
     beta_start: float = 1e-4
     beta_end: float = 2e-2
     prediction_type: str = "v"
+    noise_schedule: str = "linear"
+    cosine_s: float = 0.008
 
 
 class Diffusion:
     def __init__(self, cfg: DiffusionConfig, device: torch.device) -> None:
         if cfg.prediction_type != "v":
             raise ValueError(f"Only v-prediction is supported, got {cfg.prediction_type}")
+        if cfg.noise_schedule not in {"linear", "cosine"}:
+            raise ValueError(f"Unsupported noise_schedule={cfg.noise_schedule}")
+        if cfg.noise_schedule == "cosine" and cfg.cosine_s <= 0:
+            raise ValueError("cosine_s must be positive for cosine schedule.")
         self.cfg = cfg
         self.device = device
 
-        betas = torch.linspace(cfg.beta_start, cfg.beta_end, cfg.timesteps, dtype=torch.float32, device=device)
-        alphas = 1.0 - betas
-        alpha_bar = torch.cumprod(alphas, dim=0)
+        if cfg.noise_schedule == "linear":
+            betas = torch.linspace(cfg.beta_start, cfg.beta_end, cfg.timesteps, dtype=torch.float32, device=device)
+            alphas = 1.0 - betas
+            alpha_bar = torch.cumprod(alphas, dim=0)
+        else:
+            steps = cfg.timesteps
+            t = torch.linspace(0, steps, steps + 1, dtype=torch.float32, device=device) / float(steps)
+            s = float(cfg.cosine_s)
+            alpha_bar_fn = torch.cos(((t + s) / (1 + s)) * torch.pi / 2) ** 2
+            alpha_bar_fn = alpha_bar_fn / alpha_bar_fn[0]
+            betas = 1.0 - (alpha_bar_fn[1:] / alpha_bar_fn[:-1])
+            betas = betas.clamp(min=0.0, max=0.999)
+            alphas = 1.0 - betas
+            alpha_bar = torch.cumprod(alphas, dim=0)
 
         self.betas = betas
         self.alphas = alphas
