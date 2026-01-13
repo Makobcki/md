@@ -1197,7 +1197,7 @@ def main() -> None:
         opt.zero_grad(set_to_none=True)
         total_loss = 0.0
         data_time = 0.0
-        fwd_bwd_time = 0.0/blob/master/scripts/train.py
+        fwd_bwd_time = 0.0 # /blob/master/scripts/train.py
         last_batch_stats = {"x_std": None, "v_std": None}
 
         for _ in range(grad_accum):
