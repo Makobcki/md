@@ -625,6 +625,9 @@ def main() -> None:
         meta_flag = ck.get("meta", {}).get("use_text_conditioning")
         if isinstance(meta_flag, bool):
             use_text_conditioning = meta_flag
+    images_only = bool(run_cfg.images_only)
+    if images_only:
+        use_text_conditioning = False
     effective_cond_drop_prob = float(run_cfg.cond_drop_prob) if use_text_conditioning else 1.0
     effective_token_drop_prob = float(run_cfg.token_drop_prob) if use_text_conditioning else 0.0
     effective_tag_drop_prob = float(run_cfg.tag_drop_prob) if use_text_conditioning else 0.0
@@ -646,6 +649,7 @@ def main() -> None:
         "meta_dir": run_cfg.meta_dir,
         "tags_dir": run_cfg.tags_dir,
         "caption_field": run_cfg.caption_field,
+        "images_only": run_cfg.images_only,
         "min_tag_count": run_cfg.min_tag_count,
         "require_512": run_cfg.require_512,
         "val_ratio": run_cfg.val_ratio,
@@ -736,6 +740,7 @@ def main() -> None:
         meta_dir=str(run_cfg.meta_dir),
         tags_dir=str(run_cfg.tags_dir),
         caption_field=str(run_cfg.caption_field),
+        images_only=images_only,
         use_text_conditioning=use_text_conditioning,
         min_tag_count=int(run_cfg.min_tag_count),
         require_512=bool(run_cfg.require_512),
@@ -1182,7 +1187,7 @@ def main() -> None:
         opt.zero_grad(set_to_none=True)
         total_loss = 0.0
         data_time = 0.0
-        fwd_bwd_time = 0.0
+        fwd_bwd_time = 0.0/blob/master/scripts/train.py
         last_batch_stats = {"x_std": None, "v_std": None}
 
         for _ in range(grad_accum):

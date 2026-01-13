@@ -18,6 +18,7 @@ class TrainConfig:
     meta_dir: str = "meta"
     tags_dir: str = "tags"
     caption_field: str = "caption_llava_34b_no_tags_short"
+    images_only: bool = False
     min_tag_count: int = 8
     require_512: bool = True
     val_ratio: float = 0.01
