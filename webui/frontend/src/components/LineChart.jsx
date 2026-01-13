@@ -29,15 +29,9 @@ export default function LineChart({ data, height = 180 }) {
   return (
     <svg className="chart" viewBox={`0 0 ${width} ${height}`} width="100%" height={height}>
       <rect x="0" y="0" width={width} height={height} fill="transparent" />
-      <polyline fill="none" stroke="#60a5fa" strokeWidth="2" points={points} />
+      <polyline fill="none" stroke="#22d3ee" strokeWidth="2" points={points} />
       {cleaned.map((d) => (
-        <circle
-          key={d.step}
-          cx={scaleX(d.step)}
-          cy={scaleY(d.loss)}
-          r="2"
-          fill="#60a5fa"
-        />
+        <circle key={d.step} cx={scaleX(d.step)} cy={scaleY(d.loss)} r="2" fill="#22d3ee" />
       ))}
     </svg>
   );
