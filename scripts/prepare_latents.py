@@ -143,6 +143,7 @@ def main() -> None:
         meta_dir=str(cfg.meta_dir),
         tags_dir=str(cfg.tags_dir),
         caption_field=str(cfg.caption_field),
+        use_text_conditioning=bool(cfg.use_text_conditioning),
         min_tag_count=int(cfg.min_tag_count),
         require_512=bool(cfg.require_512),
         val_ratio=float(cfg.val_ratio),
