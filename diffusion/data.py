@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from diffusion.text import BPETokenizer
 
@@ -319,19 +321,30 @@ def latent_shard_index_path(cache_dir: str | Path, index_name: str) -> Path:
     return Path(cache_dir) / index_name
 
 
-def load_latent_shard_index(path: Path) -> dict[str, Path]:
+@dataclass(frozen=True)
+class LatentShardLocation:
+    shard_path: Path
+    index: int
+
+
+def load_latent_shard_index(path: Path) -> dict[str, LatentShardLocation]:
     if not path.exists():
         raise FileNotFoundError(f"Missing shard index: {path}")
-    index: dict[str, Path] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    index: dict[str, LatentShardLocation] = {}
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         if not line.strip():
             continue
         obj = json.loads(line)
         md5 = obj.get("md5")
         shard = obj.get("shard")
-        if not isinstance(md5, str) or not isinstance(shard, str):
-            continue
-        index[md5] = path.parent / "shards" / shard
+        idx = obj.get("idx")
+        if not isinstance(md5, str) or not isinstance(shard, str) or not isinstance(idx, int):
+            raise ValueError(f"Invalid shard index entry at line {line_no}: {line}")
+        if idx < 0:
+            raise ValueError(f"Shard index entry has negative idx at line {line_no}: {line}")
+        if md5 in index:
+            raise ValueError(f"Duplicate md5 in shard index at line {line_no}: {md5}")
+        index[md5] = LatentShardLocation(path.parent / "shards" / shard, idx)
     return index
 
 
@@ -429,6 +442,7 @@ class DanbooruDataset(Dataset):
         latent_expected_meta: Optional[LatentCacheMetadata] = None,
         include_is_latent: bool = False,
         latent_missing_log_path: Optional[Path] = None,
+        latent_shard_cache_size: int = 2,
     ):
         self.entries = entries
         self.tokenizer = tokenizer
@@ -447,6 +461,7 @@ class DanbooruDataset(Dataset):
         self.latent_expected_meta = latent_expected_meta
         self.include_is_latent = bool(include_is_latent)
         self.latent_missing_log_path = latent_missing_log_path
+        self.latent_shard_cache_size = int(latent_shard_cache_size)
         self.latent_cache_total = len(entries)
         self.latent_cache_hits = 0
         self.latent_cache_missing = 0
@@ -456,10 +471,15 @@ class DanbooruDataset(Dataset):
         self._token_cache_md5: Optional[list[str]] = None
         self._empty_ids: Optional[torch.LongTensor] = None
         self._empty_mask: Optional[torch.BoolTensor] = None
-        self._shard_index: dict[str, Path] | None = None
-        self._shard_cache_path: Optional[Path] = None
-        self._shard_cache_items: dict[str, torch.Tensor] | None = None
-        self._shard_cache_meta: Optional[LatentCacheMetadata] = None
+        self._shard_index: dict[str, LatentShardLocation] | None = None
+        self._entry_shard_locations: Optional[list[Optional[LatentShardLocation]]] = None
+        self._shard_to_entry_indices: Optional[dict[Path, list[int]]] = None
+        self._shard_tensor_cache: "OrderedDict[Path, torch.Tensor]" = OrderedDict()
+        self.current_shard_id: Optional[str] = None
+        self.current_shard_tensor: Optional[torch.Tensor] = None
+
+        if self.latent_shard_cache_size <= 0:
+            raise ValueError("latent_shard_cache_size must be positive.")
 
         if self.tokenizer is not None:
             empty_ids, empty_mask = self.tokenizer.encode("")
@@ -490,20 +510,24 @@ class DanbooruDataset(Dataset):
                     index_path = latent_shard_index_path(self.latent_cache_dir, "index.jsonl")
                 self._shard_index = load_latent_shard_index(index_path)
             filtered = []
+            shard_locations: list[Optional[LatentShardLocation]] = []
             for entry in self.entries:
                 md5 = entry.get("md5", "")
                 if not md5:
                     self._log_missing_latent(md5, "missing_md5")
                     self.latent_cache_missing += 1
+                    shard_locations.append(None)
                     continue
                 if self.latent_cache_sharded:
                     shard_path = self._shard_index.get(md5) if self._shard_index else None
-                    if shard_path is not None and shard_path.exists():
+                    if shard_path is not None and shard_path.shard_path.exists():
                         filtered.append(entry)
+                        shard_locations.append(shard_path)
                         self.latent_cache_hits += 1
                     else:
                         self._log_missing_latent(md5, "missing_shard_index")
                         self.latent_cache_missing += 1
+                        shard_locations.append(None)
                     continue
                 cache_path = latent_cache_path(self.latent_cache_dir, md5)
                 if cache_path.exists():
@@ -512,6 +536,21 @@ class DanbooruDataset(Dataset):
                 else:
                     self._log_missing_latent(md5, f"missing_cache:{cache_path}")
                     self.latent_cache_missing += 1
+            if self.latent_cache_sharded:
+                if self.latent_cache_strict:
+                    kept_locations = [
+                        loc for entry, loc in zip(self.entries, shard_locations) if loc is not None
+                    ]
+                    self.entries = filtered
+                    self._entry_shard_locations = kept_locations
+                else:
+                    self._entry_shard_locations = shard_locations
+                shard_to_indices: dict[Path, list[int]] = {}
+                for idx, loc in enumerate(self._entry_shard_locations or []):
+                    if loc is None:
+                        continue
+                    shard_to_indices.setdefault(loc.shard_path, []).append(idx)
+                self._shard_to_entry_indices = shard_to_indices
             if self.latent_cache_strict:
                 self.entries = filtered
 
@@ -525,7 +564,7 @@ class DanbooruDataset(Dataset):
         if not self.latent_cache_dir:
             raise RuntimeError("latent_cache_dir is required for latent mode.")
         if self.latent_cache_sharded:
-            return self._load_latent_sharded(md5)
+            raise RuntimeError("Use _load_latent_sharded for sharded latent cache.")
         cache_path = latent_cache_path(self.latent_cache_dir, md5)
         if not cache_path.exists():
             raise FileNotFoundError(f"Missing latent cache: {cache_path}")
@@ -541,46 +580,61 @@ class DanbooruDataset(Dataset):
             latent = latent.to(dtype=self.latent_dtype)
         return latent
 
-    def _load_latent_sharded(self, md5: str) -> torch.Tensor:
+    def _load_latent_sharded(self, entry_idx: int) -> torch.Tensor:
         if not self.latent_cache_dir:
             raise RuntimeError("latent_cache_dir is required for latent mode.")
-        if self._shard_index is None:
+        if self._entry_shard_locations is None:
             raise RuntimeError("Shard index is not loaded.")
-        shard_path = self._shard_index.get(md5)
-        if shard_path is None or not shard_path.exists():
-            raise FileNotFoundError(f"Missing shard entry for md5={md5}")
-        if self._shard_cache_path != shard_path:
-            payload = torch.load(shard_path, map_location="cpu")
-            if not isinstance(payload, dict) or int(payload.get("format_version", 0)) != 2:
-                raise RuntimeError(f"Invalid shard payload format: {shard_path}")
-            meta_common = payload.get("meta_common")
-            items = payload.get("items")
-            if not isinstance(meta_common, dict) or not isinstance(items, dict):
-                raise RuntimeError(f"Invalid shard payload contents: {shard_path}")
-            meta_obj = LatentCacheMetadata(
-                vae_pretrained=str(meta_common.get("vae_pretrained", "")),
-                scaling_factor=float(meta_common.get("scaling_factor", 0.0)),
-                latent_shape=tuple(meta_common.get("latent_shape", ())),
-                dtype=str(meta_common.get("dtype", "")),
-                format_version=int(meta_common.get("format_version", 2)),
+        if entry_idx < 0 or entry_idx >= len(self.entries):
+            raise IndexError("entry_idx out of range.")
+        location = self._entry_shard_locations[entry_idx]
+        if location is None:
+            raise FileNotFoundError(f"Missing shard entry for idx={entry_idx}")
+        shard_tensor = self._get_shard_tensor(location.shard_path)
+        if shard_tensor.dim() != 4:
+            raise RuntimeError(f"Shard tensor must be 4D, got {tuple(shard_tensor.shape)}")
+        if location.index >= shard_tensor.shape[0]:
+            raise RuntimeError(
+                f"Shard index out of range: {location.index} >= {shard_tensor.shape[0]}"
             )
-            _validate_latent_meta(
-                expected=self.latent_expected_meta,
-                actual=meta_obj,
-                strict=self.latent_cache_strict,
-                cache_path=shard_path,
-            )
-            self._shard_cache_path = shard_path
-            self._shard_cache_items = items
-            self._shard_cache_meta = meta_obj
-        if self._shard_cache_items is None:
-            raise RuntimeError("Shard cache is empty.")
-        latent = self._shard_cache_items.get(md5)
-        if not isinstance(latent, torch.Tensor):
-            raise RuntimeError(f"Missing latent in shard: {md5}")
-        if self.latent_dtype is not None:
-            latent = latent.to(dtype=self.latent_dtype)
-        return latent
+        return shard_tensor[location.index]
+
+    def _get_shard_tensor(self, shard_path: Path) -> torch.Tensor:
+        cached = self._shard_tensor_cache.get(shard_path)
+        if cached is not None:
+            self._shard_tensor_cache.move_to_end(shard_path)
+            self.current_shard_id = shard_path.name
+            self.current_shard_tensor = cached
+            return cached
+        payload = torch.load(shard_path, map_location="cpu")
+        if not isinstance(payload, dict) or int(payload.get("format_version", 0)) != 3:
+            raise RuntimeError(f"Invalid shard payload format: {shard_path}")
+        meta_common = payload.get("meta_common")
+        latents = payload.get("latents")
+        if not isinstance(meta_common, dict) or not isinstance(latents, torch.Tensor):
+            raise RuntimeError(f"Invalid shard payload contents: {shard_path}")
+        meta_obj = LatentCacheMetadata(
+            vae_pretrained=str(meta_common.get("vae_pretrained", "")),
+            scaling_factor=float(meta_common.get("scaling_factor", 0.0)),
+            latent_shape=tuple(meta_common.get("latent_shape", ())),
+            dtype=str(meta_common.get("dtype", "")),
+            format_version=int(meta_common.get("format_version", 3)),
+        )
+        _validate_latent_meta(
+            expected=self.latent_expected_meta,
+            actual=meta_obj,
+            strict=self.latent_cache_strict,
+            cache_path=shard_path,
+        )
+        if self.latent_dtype is not None and latents.dtype != self.latent_dtype:
+            latents = latents.to(dtype=self.latent_dtype)
+        latents = latents.contiguous()
+        if len(self._shard_tensor_cache) >= self.latent_shard_cache_size:
+            self._shard_tensor_cache.popitem(last=False)
+        self._shard_tensor_cache[shard_path] = latents
+        self.current_shard_id = shard_path.name
+        self.current_shard_tensor = latents
+        return latents
 
     def _log_missing_latent(self, md5: str, reason: str) -> None:
         if self.latent_missing_log_path is None:
@@ -666,7 +720,7 @@ class DanbooruDataset(Dataset):
         if self.return_latents:
             if self.latent_cache_sharded:
                 try:
-                    img = self._load_latent(md5)
+                    img = self._load_latent_sharded(idx)
                     is_latent = True
                 except FileNotFoundError:
                     if self.latent_cache_fallback:
@@ -746,6 +800,58 @@ class DanbooruDataset(Dataset):
         if not self.return_latents or self.latent_cache_total == 0:
             return None
         return self.latent_cache_hits / max(self.latent_cache_total, 1)
+
+    def shard_to_entry_indices(self) -> Optional[dict[Path, list[int]]]:
+        if not self.latent_cache_sharded:
+            return None
+        if self._shard_to_entry_indices is None:
+            return None
+        return {path: list(indices) for path, indices in self._shard_to_entry_indices.items()}
+
+
+class ShardAwareBatchSampler(Sampler[list[int]]):
+    def __init__(
+        self,
+        *,
+        shard_to_entry_indices: dict[Path, list[int]],
+        batch_size: int,
+        drop_last: bool,
+        seed: int,
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive.")
+        if not shard_to_entry_indices:
+            raise ValueError("shard_to_entry_indices must be non-empty.")
+        self._shard_to_entry_indices = {
+            shard: list(indices) for shard, indices in shard_to_entry_indices.items()
+        }
+        self._batch_size = int(batch_size)
+        self._drop_last = bool(drop_last)
+        self._seed = int(seed)
+        self._epoch = 0
+
+    def __iter__(self) -> Iterator[list[int]]:
+        rng = random.Random(self._seed + self._epoch)
+        shard_items = list(self._shard_to_entry_indices.items())
+        rng.shuffle(shard_items)
+        for _, indices in shard_items:
+            local_indices = list(indices)
+            rng.shuffle(local_indices)
+            for i in range(0, len(local_indices), self._batch_size):
+                batch = local_indices[i : i + self._batch_size]
+                if len(batch) < self._batch_size and self._drop_last:
+                    continue
+                yield batch
+        self._epoch += 1
+
+    def __len__(self) -> int:
+        total = 0
+        for indices in self._shard_to_entry_indices.values():
+            if self._drop_last:
+                total += len(indices) // self._batch_size
+            else:
+                total += int(math.ceil(len(indices) / self._batch_size))
+        return total
 
 
 def collate_with_tokenizer(

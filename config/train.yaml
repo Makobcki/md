@@ -90,6 +90,7 @@ latent_dtype: bf16
 latent_precompute: false
 latent_cache_fallback: false
 latent_cache_strict: true
+latent_shard_cache_size: 2
 vae_pretrained: ""
 vae_freeze: true
 vae_scaling_factor: 0.18215
