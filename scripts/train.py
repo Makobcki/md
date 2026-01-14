@@ -23,6 +23,7 @@ from diffusion.data import (
     DanbooruConfig,
     DanbooruDataset,
     LatentCacheMetadata,
+    ShardAwareBatchSampler,
     build_or_load_index,
     build_token_cache_key,
     collate_with_tokenizer,
@@ -827,6 +828,7 @@ def main() -> None:
         latent_expected_meta=latent_expected_meta,
         include_is_latent=bool(run_cfg.latent_cache_fallback),
         latent_missing_log_path=out_dir / "latent_missing.txt" if mode == "latent" else None,
+        latent_shard_cache_size=int(run_cfg.latent_shard_cache_size),
     )
     if mode == "latent" and len(ds) == 0:
         raise RuntimeError("latent cache is empty; run scripts/prepare_latents.py before training.")
@@ -856,19 +858,44 @@ def main() -> None:
     nw = _resolve_num_workers(int(run_cfg.num_workers))
     if latent_encoder is not None:
         nw = 0
-    dl_full = DataLoader(
-        ds,
-        batch_size=int(run_cfg.batch_size),
-        shuffle=True,
-        num_workers=nw,
-        pin_memory=bool(run_cfg.pin_memory),
-        drop_last=True,
-        persistent_workers=bool(run_cfg.persistent_workers) and nw > 0,
-        prefetch_factor=int(run_cfg.prefetch_factor) if nw > 0 else None,
-        collate_fn=lambda batch: collate_with_tokenizer(batch, latent_encoder=latent_encoder),
-    )
     curriculum_steps = int(run_cfg.curriculum_steps)
     curriculum_enabled = bool(run_cfg.curriculum_enabled) and use_text_conditioning and curriculum_steps > 0
+    use_shard_sampler = mode == "latent" and bool(run_cfg.latent_cache_sharded)
+    if use_shard_sampler and curriculum_enabled:
+        curriculum_enabled = False
+        if is_main:
+            print("[WARN] curriculum disabled for shard-aware latent sampling")
+    if use_shard_sampler:
+        shard_to_indices = ds.shard_to_entry_indices()
+        if not shard_to_indices:
+            raise RuntimeError("Shard-aware sampling requires a valid shard index.")
+        batch_sampler = ShardAwareBatchSampler(
+            shard_to_entry_indices=shard_to_indices,
+            batch_size=int(run_cfg.batch_size),
+            drop_last=True,
+            seed=int(run_cfg.seed),
+        )
+        dl_full = DataLoader(
+            ds,
+            batch_sampler=batch_sampler,
+            num_workers=nw,
+            pin_memory=bool(run_cfg.pin_memory),
+            persistent_workers=bool(run_cfg.persistent_workers) and nw > 0,
+            prefetch_factor=int(run_cfg.prefetch_factor) if nw > 0 else None,
+            collate_fn=lambda batch: collate_with_tokenizer(batch, latent_encoder=latent_encoder),
+        )
+    else:
+        dl_full = DataLoader(
+            ds,
+            batch_size=int(run_cfg.batch_size),
+            shuffle=True,
+            num_workers=nw,
+            pin_memory=bool(run_cfg.pin_memory),
+            drop_last=True,
+            persistent_workers=bool(run_cfg.persistent_workers) and nw > 0,
+            prefetch_factor=int(run_cfg.prefetch_factor) if nw > 0 else None,
+            collate_fn=lambda batch: collate_with_tokenizer(batch, latent_encoder=latent_encoder),
+        )
     dl_curr = None
     if curriculum_enabled:
         weights = _build_curriculum_weights(
@@ -1200,7 +1227,8 @@ def main() -> None:
         fwd_bwd_time = 0.0 # /blob/master/scripts/train.py
         last_batch_stats = {"x_std": None, "v_std": None}
 
-        for _ in range(grad_accum):
+        capture_batch_stats = step % log_every == 0 and step >= warmup_end_step
+        for accum_idx in range(grad_accum):
             with timing.section("data_fetch") as t_data:
                 try:
                     x0, txt_ids, txt_mask = next(it)
@@ -1222,8 +1250,9 @@ def main() -> None:
             _assert_finite("alpha_bar[t]", alpha_bar_t)
             xt = domain.q_sample(x0, t, noise)
             v_tgt = domain.v_target(x0, t, noise)
-            last_batch_stats["x_std"] = float(x0.detach().std().cpu().item())
-            last_batch_stats["v_std"] = float(v_tgt.detach().std().cpu().item())
+            if capture_batch_stats and accum_idx == grad_accum - 1:
+                last_batch_stats["x_std"] = float(x0.detach().float().std().item())
+                last_batch_stats["v_std"] = float(v_tgt.detach().float().std().item())
 
             with timing.section("fwd_bwd") as t_fwd:
                 with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
