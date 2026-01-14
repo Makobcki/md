@@ -416,7 +416,7 @@ class DanbooruDataset(Dataset):
         token_drop_prob: float = 0.0,
         tag_drop_prob: float = 0.0,
         caption_drop_prob: float = 0.0,
-        seed: int,
+        seed: int = 42,
         cache_dir: Optional[str] = None,
         token_cache_key: Optional[str] = None,
         latent_cache_dir: Optional[str] = None,

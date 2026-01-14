@@ -257,6 +257,10 @@ class JobManager:
             env["WEBUI"] = "1"
             env["WEBUI_RUN_DIR"] = str(run_dir)
             env["PYTHONUNBUFFERED"] = "1"
+
+            repo_root_str = str(self.repo_root)
+            env["PYTHONPATH"] = repo_root_str + os.pathsep + env.get("PYTHONPATH", "")
+
             self._start_process(run, env)
             return run
 
@@ -329,10 +333,16 @@ class JobManager:
             self._write_notes(run_dir, {"type": "sample", "args": args, "output": str(output_path), **notes})
 
             env = os.environ.copy()
+            env["WEBUI"] = "1"
+            env["WEBUI_RUN_DIR"] = str(run_dir)
             env["PYTHONUNBUFFERED"] = "1"
+
+            # чтобы импортировался локальный пакет repo_root/diffusion
+            repo_root_str = str(self.repo_root)
+            env["PYTHONPATH"] = repo_root_str + os.pathsep + env.get("PYTHONPATH", "")
+
             self._start_process(run, env)
             return run
-
     def start_prepare_latents(self, args: Dict[str, Any]) -> RunRecord:
         with self.lock:
             if self.process is not None:
@@ -383,7 +393,14 @@ class JobManager:
             self._write_notes(run_dir, {"type": "latent_cache", "args": args})
 
             env = os.environ.copy()
+            env["WEBUI"] = "1"
+            env["WEBUI_RUN_DIR"] = str(run_dir)
             env["PYTHONUNBUFFERED"] = "1"
+
+            # чтобы импортировался локальный пакет repo_root/diffusion
+            repo_root_str = str(self.repo_root)
+            env["PYTHONPATH"] = repo_root_str + os.pathsep + env.get("PYTHONPATH", "")
+
             self._start_process(run, env)
             return run
 
