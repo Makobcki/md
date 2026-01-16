@@ -106,6 +106,7 @@ class TrainConfig:
     latent_precompute: bool = False
     latent_cache_fallback: bool = False
     latent_cache_strict: bool = True
+    latent_shard_cache_size: int = 2
     vae_pretrained: str = ""
     vae_freeze: bool = True
     vae_scaling_factor: float = 0.18215
@@ -173,6 +174,8 @@ class TrainConfig:
             raise ValueError("latent_dtype must be 'fp16' or 'bf16'.")
         if self.latent_cache_sharded and not self.latent_cache:
             raise ValueError("latent_cache_sharded requires latent_cache=true.")
+        if self.latent_shard_cache_size <= 0:
+            raise ValueError("latent_shard_cache_size must be positive.")
         if self.ckpt_keep_last < 0:
             raise ValueError("ckpt_keep_last must be non-negative.")
         if self.curriculum_steps < 0:

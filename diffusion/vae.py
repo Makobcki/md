@@ -56,6 +56,7 @@ class VAEWrapper:
         """
         ctx = torch.no_grad() if self.cfg.freeze else torch.enable_grad()
         with ctx:
+            x = x.to(device=self.device, dtype=self.dtype)
             posterior = self.vae.encode(x).latent_dist
             z = posterior.sample()
             return z * self.cfg.scaling_factor
@@ -66,7 +67,18 @@ class VAEWrapper:
         """
         ctx = torch.no_grad() if self.cfg.freeze else torch.enable_grad()
         with ctx:
+            # 1. Нормализация латентов
             z_in = z / self.cfg.scaling_factor
-            x = self.vae.decode(z_in).sample
-            # VAE outputs in [-1, 1]; map to [0, 1].
+
+            # 2. Приведение dtype/device к VAE (КРИТИЧНО)
+            z_in = z_in.to(device=self.device, dtype=self.dtype)
+
+            # 3. Decode
+            if self.device.type == "cuda":
+                with torch.autocast(device_type="cuda", dtype=self.dtype):
+                    x = self.vae.decode(z_in).sample
+            else:
+                x = self.vae.decode(z_in).sample
+
+            # 4. [-1, 1] -> [0, 1]
             return ((x + 1.0) / 2.0).clamp(0.0, 1.0)
