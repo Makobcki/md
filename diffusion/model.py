@@ -254,7 +254,7 @@ class Upsample(nn.Module):
 
 @dataclass(frozen=True)
 class UNetConfig:
-    image_channels: int = 3
+    image_channels: int = 4
     base_channels: int = 64
     channel_mults: Tuple[int, ...] = (1, 2, 3, 4)
     num_res_blocks: int = 2

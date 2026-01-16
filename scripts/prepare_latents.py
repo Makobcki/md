@@ -199,14 +199,16 @@ class _ShardWriter:
         self.shard_size = shard_size
         self.index_path = index_path
         self.meta_common = meta_common
-        self.current_items: dict[str, torch.Tensor] = {}
+        self.current_md5s: list[str] = []
+        self.current_latents: list[torch.Tensor] = []
         self.current_count = 0
         self.shard_id = start_shard_id
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         self.index_fp = self.index_path.open("a", encoding="utf-8")
 
     def add(self, md5: str, latent: torch.Tensor) -> Optional[tuple[Path, list[str]]]:
-        self.current_items[md5] = latent
+        self.current_md5s.append(md5)
+        self.current_latents.append(latent)
         self.current_count += 1
         if self.current_count >= self.shard_size:
             return self.flush()
@@ -217,20 +219,22 @@ class _ShardWriter:
             return None
         shard_name = f"shard_{self.shard_id:06d}.pt"
         shard_path = self.shard_dir / shard_name
+        latents = torch.stack(self.current_latents, dim=0).contiguous()
         payload = {
-            "format_version": 2,
+            "format_version": 3,
             "meta_common": self.meta_common,
-            "items": self.current_items,
+            "latents": latents,
         }
         tmp_path = shard_path.with_suffix(".pt.tmp")
         torch.save(payload, tmp_path)
         tmp_path.replace(shard_path)
-        md5s = list(self.current_items.keys())
-        for md5 in md5s:
-            line = {"md5": md5, "shard": shard_name}
+        for idx, md5 in enumerate(self.current_md5s):
+            line = {"md5": md5, "shard": shard_name, "idx": idx}
             self.index_fp.write(json.dumps(line, ensure_ascii=False) + "\n")
         self.index_fp.flush()
-        self.current_items = {}
+        md5s = list(self.current_md5s)
+        self.current_md5s = []
+        self.current_latents = []
         self.current_count = 0
         self.shard_id += 1
         return shard_path, md5s
@@ -249,9 +253,9 @@ def main() -> None:
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--prefetch-factor", type=int, default=2)
     ap.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--device", default=None)
-    ap.add_argument("--latent-dtype", default=None, choices=("fp16", "bf16"))
-    ap.add_argument("--autocast-dtype", default=None, choices=("fp16", "bf16"))
+    ap.add_argument("--device", default='cuda')
+    ap.add_argument("--latent-dtype", default='fp16', choices=("fp16", "bf16"))
+    ap.add_argument("--autocast-dtype", default='fp16', choices=("fp16", "bf16"))
     ap.add_argument("--queue-size", type=int, default=64)
     ap.add_argument("--writer-threads", type=int, default=1)
     ap.add_argument("--shard-size", type=int, default=4096)
@@ -350,7 +354,7 @@ def main() -> None:
     }
 
     meta_common = {
-        "format_version": 2,
+        "format_version": 3,
         "vae_id": str(cfg.vae_pretrained),
         "vae_pretrained": str(cfg.vae_pretrained),
         "scaling_factor": float(cfg.vae_scaling_factor),
@@ -358,6 +362,7 @@ def main() -> None:
                          int(cfg.image_size) // int(cfg.latent_downsample_factor),
                          int(cfg.image_size) // int(cfg.latent_downsample_factor)],
         "dtype": str(cfg.latent_dtype),
+        "layout": "contiguous",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "code_version": code_version,
     }
