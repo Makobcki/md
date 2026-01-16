@@ -13,7 +13,7 @@ def _as_tuple(value: Iterable[int] | Iterable[float]) -> Tuple:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    data_root: str = "./data/raw/Danbooru"
+    data_root: str = "./data_loader/raw/Danbooru"
     image_dir: str = "image_512"
     meta_dir: str = "meta"
     tags_dir: str = "tags"
@@ -131,7 +131,7 @@ class TrainConfig:
     noise_schedule: str = "linear"
     cosine_s: float = 0.008
 
-    eval_prompts_file: str = "./data/raw/Danbooru/prompts.txt"
+    eval_prompts_file: str = "./data_loader/raw/Danbooru/prompts.txt"
     eval_every: int = 500
     eval_seed: int = 42
     eval_sampler: str = "ddim"

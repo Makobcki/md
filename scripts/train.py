@@ -19,9 +19,9 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 import yaml
 
 from diffusion.config import TrainConfig
-from diffusion.data import (
-    DanbooruConfig,
-    DanbooruDataset,
+from data_loader import (
+    DataConfig,
+    ImageTextDataset,
     LatentCacheMetadata,
     ShardAwareBatchSampler,
     build_or_load_index,
@@ -29,12 +29,12 @@ from diffusion.data import (
     collate_with_tokenizer,
 )
 from diffusion.diffusion import Diffusion, DiffusionConfig
-from diffusion.ddim import (
-    ddpm_ancestral_sample,
+from samplers import (
     ddim_sample,
     dpm_solver_sample,
     euler_sample,
     heun_sample,
+    ddpm_ancestral_sample,
 )
 from diffusion.domain import Batch, LatentDomain, PixelDomain
 from diffusion.events import EventBus, JsonlFileSink, StdoutJsonSink
@@ -496,7 +496,7 @@ def _sanity_overfit(
 
     max_images = min(max_images, len(entries))
     sanity_entries = entries[:max_images]
-    sanity_ds = DanbooruDataset(
+    sanity_ds = ImageTextDataset(
         entries=sanity_entries,
         tokenizer=tokenizer if use_text_conditioning else None,
         cond_drop_prob=0.0 if use_text_conditioning else 1.0,
@@ -744,7 +744,7 @@ def main() -> None:
     # ----------------------------
     # Dataset + vocab
     # ----------------------------
-    dcfg = DanbooruConfig(
+    dcfg = DataConfig(
         root=str(run_cfg.data_root),
         image_dir=str(run_cfg.image_dir),
         meta_dir=str(run_cfg.meta_dir),
@@ -800,7 +800,7 @@ def main() -> None:
             latent_shape=(int(run_cfg.latent_channels), latent_side, latent_side),
             dtype=str(run_cfg.latent_dtype),
         )
-    ds = DanbooruDataset(
+    ds = ImageTextDataset(
         entries=train_entries,
         tokenizer=tokenizer,
         cond_drop_prob=effective_cond_drop_prob,
