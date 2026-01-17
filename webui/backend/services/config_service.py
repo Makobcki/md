@@ -7,7 +7,7 @@ import os
 
 import yaml
 
-from diffusion.config import TrainConfig
+from config.train import TrainConfig
 
 
 def get_config_path(repo_root: Path) -> Path:
