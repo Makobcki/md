@@ -13,7 +13,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from diffusion.config import TrainConfig
+from config.train import TrainConfig
 from .services import config_service
 
 
@@ -223,7 +223,8 @@ class JobManager:
             cmd = [
                 os.environ.get("PYTHON", sys.executable),
                 "-u",
-                "scripts/train.py",
+                "-m",
+                "train.cli",
             ]
             if resume:
                 cmd.extend(["--resume", str(resume)])
@@ -281,7 +282,7 @@ class JobManager:
             cmd = [
                 os.environ.get("PYTHON", sys.executable),
                 "-u",
-                "scripts/sample.py",
+                "sample/cli.py",
             ]
             output_path = args.get("out")
             notes: Dict[str, Any] = {"args": args}

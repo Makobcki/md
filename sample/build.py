@@ -8,7 +8,8 @@ import torch
 from diffusion.config import TrainConfig
 from diffusion.diffusion import Diffusion, DiffusionConfig
 from diffusion.model import UNet, UNetConfig
-from diffusion.text import BPETokenizer, TextConfig
+from text_enc import BPETokenizer
+from text_enc.build import build_tokenizer_from_dict
 from diffusion.utils import EMA, load_ckpt
 from diffusion.vae import VAEWrapper
 
@@ -66,19 +67,8 @@ def build_diffusion(cfg: Dict[str, Any], device: torch.device) -> Diffusion:
 
 
 def build_tokenizer(cfg: Dict[str, Any]) -> BPETokenizer:
-    vocab_path = cfg.get("text_vocab_path")
-    merges_path = cfg.get("text_merges_path")
-    if not vocab_path or not merges_path:
-        raise RuntimeError("Checkpoint missing text_vocab_path/text_merges_path.")
-
-    text_cfg = TextConfig(
-        vocab_path=str(vocab_path),
-        merges_path=str(merges_path),
-        max_len=int(cfg.get("text_max_len", 64)),
-        lowercase=True,
-        strip_punct=True,
-    )
-    return BPETokenizer.from_files(vocab_path, merges_path, text_cfg)
+    tokenizer, _text_cfg = build_tokenizer_from_dict(cfg)
+    return tokenizer
 
 
 def build_unet_config(
