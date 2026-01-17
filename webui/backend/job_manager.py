@@ -282,8 +282,7 @@ class JobManager:
             cmd = [
                 os.environ.get("PYTHON", sys.executable),
                 "-u",
-                "-m",
-                "sample",
+                "sample/cli.py",
             ]
             output_path = args.get("out")
             notes: Dict[str, Any] = {"args": args}
