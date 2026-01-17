@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Tuple
 
 
 @dataclass(frozen=True)
@@ -18,3 +20,19 @@ class DataConfig:
     seed: int = 42
     cache_dir: str = ".cache"       # внутри root
     failed_list: str = "failed/md5.txt"
+
+
+@dataclass(frozen=True)
+class LatentShardLocation:
+    shard_path: Path
+    index: int
+
+
+@dataclass(frozen=True)
+class LatentCacheMetadata:
+    # Метаданные кеша латентов для проверки совместимости.
+    vae_pretrained: str
+    scaling_factor: float
+    latent_shape: Tuple[int, int, int]
+    dtype: str
+    format_version: int = 1
