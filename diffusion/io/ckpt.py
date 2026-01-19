@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable
 
 import os
-import random
-
-import numpy as np
 
 import torch
 import torch.nn as nn
@@ -15,20 +12,8 @@ import torch.nn as nn
 _KNOWN_PREFIXES = ("_orig_mod.", "module.")
 CKPT_FORMAT_VERSION = 2
 
-def unwrap_model(model: nn.Module) -> nn.Module:
-    """
-    Возвращает базовую (не-обёрнутую) модель:
-    - torch.compile -> model._orig_mod
-    - DDP/DataParallel -> model.module
-    """
-    if hasattr(model, "_orig_mod"):
-        return getattr(model, "_orig_mod")
-    if hasattr(model, "module"):
-        return getattr(model, "module")
-    return model
 
 def _strip_prefixes(key: str) -> str:
-    # Убираем префиксы рекурсивно (на случай "_orig_mod.module.")
     changed = True
     while changed:
         changed = False
@@ -40,27 +25,18 @@ def _strip_prefixes(key: str) -> str:
 
 
 def sanitize_state_dict(sd: Any) -> Any:
-    """
-    Нормализует ключи state_dict/EMA:
-    - убирает _orig_mod. и module.
-    """
     if not isinstance(sd, dict):
         return sd
 
     out: Dict[str, Any] = {}
     for k, v in sd.items():
         nk = _strip_prefixes(str(k))
-        # Если коллизия, предпочитаем "чистый" ключ
         if nk not in out or str(k) == nk:
             out[nk] = v
     return out
 
 
 def sanitize_ckpt(ck: Any) -> Any:
-    """
-    Нормализует словарь чекпоинта: model/ema.
-    Делает load/save совместимыми между compiled / non-compiled.
-    """
     if not isinstance(ck, dict):
         return ck
 
@@ -107,39 +83,6 @@ def normalize_state_dict_for_model(state_dict: dict, model: nn.Module, name: str
     return normalize_state_dict_for_keys(state_dict, model.state_dict().keys(), name)
 
 
-class EMA:
-    def __init__(self, model: nn.Module, decay: float = 0.999) -> None:
-        self.decay = float(decay)
-        self.shadow: Dict[str, torch.Tensor] = {}
-
-        base = unwrap_model(model)
-        for name, p in base.named_parameters():
-            if p.requires_grad:
-                self.shadow[name] = p.detach().clone()
-
-    @torch.no_grad()
-    def update(self, model: nn.Module) -> None:
-        base = unwrap_model(model)
-        for name, p in base.named_parameters():
-            if not p.requires_grad:
-                continue
-
-            if name not in self.shadow:
-                # если архитектуру поменяли во время resume — не падаем
-                self.shadow[name] = p.detach().clone()
-                continue
-
-            self.shadow[name].mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
-
-    @torch.no_grad()
-    def copy_to(self, model: nn.Module) -> None:
-        base = unwrap_model(model)
-        for name, p in base.named_parameters():
-            if name in self.shadow:
-                p.data.copy_(self.shadow[name].data)
-
-
-
 def load_ckpt(path: str, device: torch.device) -> dict:
     ck = torch.load(path, map_location=device)
     ck = sanitize_ckpt(ck)
@@ -156,7 +99,6 @@ def load_ckpt(path: str, device: torch.device) -> dict:
 
 
 def save_ckpt(path: str, obj: dict) -> None:
-    # нормализуем перед сохранением → новые ckpt будут “чистыми”
     obj = sanitize_ckpt(obj)
     if isinstance(obj, dict):
         if "format_version" not in obj:
@@ -174,9 +116,6 @@ def save_ckpt(path: str, obj: dict) -> None:
 
 
 def resolve_resume_path(resume: str, out_dir: Path) -> str:
-    """
-    Поддерживает resume форматы: "latest", "step" (число), абсолютный/относительный путь.
-    """
     resume = str(resume).strip()
     if not resume:
         return ""
@@ -195,6 +134,17 @@ def resolve_resume_path(resume: str, out_dir: Path) -> str:
             raise RuntimeError(f"Checkpoint not found for step {step}: {ckpt_path}")
         return str(ckpt_path)
     return resume
+
+
+def strip_state_dict_prefixes(sd: dict, prefixes: Iterable[str] = ("_orig_mod.", "module.")) -> dict:
+    out = {}
+    for k, v in sd.items():
+        nk = k
+        for p in prefixes:
+            if nk.startswith(p):
+                nk = nk[len(p):]
+        out[nk] = v
+    return out
 
 
 def _upgrade_ckpt_v1_to_v2(ck: dict) -> dict:
@@ -231,70 +181,3 @@ def _fsync_dir(path: Path) -> None:
         pass
     finally:
         os.close(fd)
-
-
-def seed_everything(seed: int, deterministic: bool = False) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        torch.use_deterministic_algorithms(True)
-    else:
-        torch.backends.cudnn.benchmark = True
-
-
-def build_run_metadata(perf: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
-    meta = {
-        "torch_version": str(torch.__version__),
-        "cuda_available": torch.cuda.is_available(),
-        "cuda_version": (str(torch.version.cuda) if torch.version.cuda is not None else None),
-        "cudnn_version": torch.backends.cudnn.version(),
-        "device_count": torch.cuda.device_count(),
-        "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
-    }
-    if perf:
-        meta["perf"] = dict(perf)
-    try:
-        import subprocess
-
-        meta["git_commit"] = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=str(Path.cwd()), stderr=subprocess.DEVNULL
-        ).decode("utf-8").strip()
-    except Exception:
-        meta["git_commit"] = None
-    return _normalize_metadata(meta)
-
-
-def _normalize_metadata(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, bytes):
-        try:
-            return value.decode("utf-8")
-        except Exception:
-            return value.hex()
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, torch.device):
-        return str(value)
-    if isinstance(value, torch.dtype):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(k): _normalize_metadata(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_normalize_metadata(v) for v in value]
-    return str(value)
-
-
-def strip_state_dict_prefixes(sd: dict, prefixes=("_orig_mod.", "module.")) -> dict:
-    out = {}
-    for k, v in sd.items():
-        nk = k
-        for p in prefixes:
-            if nk.startswith(p):
-                nk = nk[len(p):]
-        out[nk] = v
-    return out

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -12,7 +11,7 @@ from diffusion.events import EventBus, StdoutJsonSink
 from diffusion.perf import PerfConfig, configure_performance
 
 from .build import build_all
-from samplers.guided_v import (
+from samplers import (
     ddpm_ancestral_sample,
     ddim_sample,
     dpm_solver_sample,

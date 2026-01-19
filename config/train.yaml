@@ -1,4 +1,4 @@
-data_root: ./data_loader/raw/anime
+data_root: ./data/raw/anime
 image_dir: image_512
 meta_dir: meta
 tags_dir: tags
@@ -113,7 +113,7 @@ self_cond_prob: 1 # 0.2
 noise_schedule: cosine
 cosine_s: 0.008
 
-eval_prompts_file: ./data_loader/raw/anime/prompts.txt
+eval_prompts_file: ./data/raw/anime/prompts.txt
 eval_every: 1000
 eval_seed: 42
 eval_sampler: euler

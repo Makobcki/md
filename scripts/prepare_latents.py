@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -16,9 +15,9 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from diffusion.config import TrainConfig
+from config.train import TrainConfig
+from data_loader import DataConfig, build_or_load_index, latent_cache_path, load_image_tensor
 from diffusion.events import EventBus, JsonlFileSink, StdoutJsonSink
-from diffusion.data import DanbooruConfig, build_or_load_index, latent_cache_path, load_image_tensor
 from diffusion.utils import build_run_metadata
 from diffusion.vae import VAEWrapper
 
@@ -282,7 +281,7 @@ def main() -> None:
 
     code_version = build_run_metadata().get("git_commit")
 
-    dcfg = DanbooruConfig(
+    dcfg = DataConfig(
         root=str(cfg.data_root),
         image_dir=str(cfg.image_dir),
         meta_dir=str(cfg.meta_dir),
@@ -493,7 +492,6 @@ def main() -> None:
         h2d_start = time.perf_counter()
         x = torch.stack(xs, dim=0).to(device=device, dtype=dtype, non_blocking=True)
         h2d_ms = (time.perf_counter() - h2d_start) * 1000.0
-        # load_image_tensor возвращает [-1, 1], это ожидаемый диапазон входа VAE.
 
         encode_start = time.perf_counter()
         try:

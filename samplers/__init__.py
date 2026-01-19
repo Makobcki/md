@@ -5,8 +5,10 @@ from .ddpm import ddpm_ancestral_sample
 from .euler import euler_sample
 from .heun import heun_sample
 from .dpm_solver import dpm_solver_sample
+from .guided_v import _guided_v
 
 __all__ = [
+    "_guided_v",
     "ddim_sample",
     "ddpm_ancestral_sample",
     "heun_sample",

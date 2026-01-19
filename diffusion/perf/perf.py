@@ -8,7 +8,6 @@ import torch
 
 @dataclass(frozen=True)
 class PerfConfig:
-    # Настройки производительности и SDPA.
     tf32: bool
     cudnn_benchmark: bool
     channels_last: bool
@@ -18,11 +17,6 @@ class PerfConfig:
 
 
 def configure_performance(cfg: PerfConfig, device: torch.device) -> Dict[str, bool]:
-    """
-    Применяет настройки производительности (TF32, cudnn, SDPA backends).
-
-    Возвращает фактически активные флаги (для run metadata / логов).
-    """
     torch.set_float32_matmul_precision("high")
     torch.backends.cuda.matmul.allow_tf32 = bool(cfg.tf32)
     torch.backends.cudnn.allow_tf32 = bool(cfg.tf32)
