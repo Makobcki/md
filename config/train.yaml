@@ -1,9 +1,9 @@
-data_root: ./data/raw/Danbooru
+data_root: ./data/raw/anime
 image_dir: image_512
 meta_dir: meta
 tags_dir: tags
 caption_field: caption_llava_34b_no_tags_short
-images_only: false
+images_only: true
 min_tag_count: 8
 require_512: true
 val_ratio: 0.01
@@ -11,23 +11,23 @@ cache_dir: .cache
 failed_list: failed/md5.txt
 
 seed: 42
-out_dir: ./runs/danbooru_512
+out_dir: ./runs/anime
 
-batch_size: 1
-grad_accum_steps: 8
-num_workers: 8
+batch_size: 32
+grad_accum_steps: 2
+num_workers: 4
 prefetch_factor: 4
 pin_memory: true
 persistent_workers: true
 
-lr: 1.0e-4
+lr: 1.5e-4
 lr_scheduler: cosine
-warmup_steps: 1000
-min_lr_ratio: 0.1
+warmup_steps: 3000
+min_lr_ratio: 0.05
 decay_steps: 0
 weight_decay: 1.0e-4
-max_steps: 120000
-log_every: 50
+max_steps: 200001
+log_every: 10
 save_every: 2000
 
 timesteps: 1000
@@ -36,20 +36,20 @@ beta_end: 2.0e-2
 min_snr_gamma: 5.0
 prediction_type: v
 
-base_channels: 64
+base_channels: 128
 channel_mults: [1, 2, 3, 4]
-num_res_blocks: 2
+num_res_blocks: 3
 dropout: 0.10
 
 attn_resolutions: [32, 16]
-attn_heads: 4
+attn_heads: 8
 attn_head_dim: 32
 
 text_dim: 256
 text_layers: 4
 text_heads: 4
 text_max_len: 128
-use_text_conditioning: true
+use_text_conditioning: false
 text_vocab_path: diffusion/bpe/vocab.json
 text_merges_path: diffusion/bpe/merges.txt
 tokenizer_type: bpe
@@ -62,15 +62,15 @@ tag_drop_prob: 0.0
 caption_drop_prob: 0.0
 
 amp: true
-amp_dtype: fp16
-compile: false
-compile_warmup_steps: 2
+amp_dtype: bf16
+compile: true
+compile_warmup_steps: 10
 compile_cudagraphs: true
 grad_clip_norm: 1.0
 ema_decay: 0.999
 ema_decay_fast: 0.999
-ema_decay_slow: 0.9999
-ema_switch_step: 10000
+ema_decay_slow: 0.99995
+ema_switch_step: 20000
 resume_ckpt: ""
 deterministic: false
 tf32: true
@@ -79,27 +79,27 @@ channels_last: true
 enable_flash_sdp: true
 enable_mem_efficient_sdp: true
 enable_math_sdp: false
-mode: pixel
+mode: latent
 latent_channels: 4
 latent_downsample_factor: 8
-latent_cache: false
+latent_cache: true
 latent_cache_dir: .cache/latents
-latent_cache_sharded: false
+latent_cache_sharded: true
 latent_cache_index: index.jsonl
-latent_dtype: bf16
+latent_dtype: fp16
 latent_precompute: false
 latent_cache_fallback: false
 latent_cache_strict: true
-latent_shard_cache_size: 2
-vae_pretrained: ""
+latent_shard_cache_size: 3
+vae_pretrained: "./vae_sd_mse"
 vae_freeze: true
 vae_scaling_factor: 0.18215
 ckpt_keep_last: 5
-sanity_overfit_steps: 100
+sanity_overfit_steps: 0
 sanity_overfit_images: 2
 sanity_overfit_max_loss: 0.1
 
-curriculum_enabled: true
+curriculum_enabled: false
 curriculum_steps: 20000
 curriculum_require_one_person: true
 curriculum_prefer_solo: true
@@ -108,15 +108,15 @@ curriculum_solo_weight: 2.0
 curriculum_non_solo_weight: 1.0
 
 self_conditioning: true
-self_cond_prob: 0.5
+self_cond_prob: 1 # 0.2
 
-noise_schedule: linear
+noise_schedule: cosine
 cosine_s: 0.008
 
-eval_prompts_file: ./data/raw/Danbooru/prompts.txt
-eval_every: 500
+eval_prompts_file: ./data/raw/anime/prompts.txt
+eval_every: 1000
 eval_seed: 42
-eval_sampler: ddim
-eval_steps: 30
+eval_sampler: euler
+eval_steps: 60
 eval_cfg: 5.0
 eval_n: 1
