@@ -6,6 +6,7 @@ import torch
 
 from diffusion.diffusion import Diffusion
 from diffusion.model import UNet
+from .guided_v import _guided_v
 
 @torch.no_grad()
 def ddim_sample(
@@ -59,7 +60,11 @@ def ddim_sample(
         a_prev = diffusion.alpha_bar[t_prev].view(-1, 1, 1, 1)
 
         sigma = eta * torch.sqrt((1.0 - a_prev) / (1.0 - a_t) * (1.0 - a_t / a_prev))
-        z = torch.randn_like(x, generator=generator) if eta > 0 else torch.zeros_like(x)
+
+        if float(sigma.max().item()) > 0.0:
+            z = torch.empty_like(x).normal_(generator=generator)
+        else:
+            z = torch.zeros_like(x)
 
         dir_xt = torch.sqrt(torch.clamp(1.0 - a_prev - sigma**2, min=0.0)) * eps
         x = torch.sqrt(a_prev) * x0 + dir_xt + sigma * z

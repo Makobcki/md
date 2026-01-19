@@ -6,7 +6,7 @@ import torch
 
 from diffusion.diffusion import Diffusion
 from diffusion.model import UNet
-from guided_v import _guided_v
+from .guided_v import _guided_v
 
 @torch.no_grad()
 def euler_sample(

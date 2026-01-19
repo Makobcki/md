@@ -10,7 +10,6 @@ def collate_with_tokenizer(
     *,
     latent_encoder: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
 ):
-    # В режиме fallback элементы могут содержать флаг is_latent.
     if len(batch) == 0:
         raise RuntimeError("Empty batch.")
     item_len = len(batch[0])

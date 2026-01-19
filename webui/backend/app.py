@@ -236,7 +236,7 @@ def get_out_dir_summary() -> Dict[str, Any]:
 
 @app.get("/api/sample/args")
 def get_sample_args() -> Dict[str, Any]:
-    sample_path = ROOT_DIR / "scripts" / "sample.py"
+    sample_path = ROOT_DIR / "sample" / "cli.py"
     return {"items": parse_argparse_args(sample_path)}
 
 
