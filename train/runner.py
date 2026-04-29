@@ -382,7 +382,7 @@ def run(cfg: TrainConfig) -> None:
     if mode == "latent":
         _assert_divisible(int(cfg.image_size), int(cfg.latent_downsample_factor), "image_size")
 
-    image_channels = 4 if mode == "pixel" else int(cfg.latent_channels)
+    image_channels = 3 if mode == "pixel" else int(cfg.latent_channels)
     unet_cfg = UNetConfig(
         image_channels=image_channels,
         base_channels=int(model_cfg.base_channels),
