@@ -73,6 +73,23 @@ def _atomic_write_yaml(path: Path, payload: dict) -> None:
             tmp_path.unlink()
 
 
+def _validate_resume_compatibility(cfg: TrainConfig, model_cfg: TrainConfig) -> None:
+    fields = (
+        "mode",
+        "latent_channels",
+        "image_size",
+        "self_conditioning",
+        "use_text_conditioning",
+    )
+    mismatches = [
+        f"{name}: ckpt={getattr(model_cfg, name)!r}, config={getattr(cfg, name)!r}"
+        for name in fields
+        if getattr(model_cfg, name) != getattr(cfg, name)
+    ]
+    if mismatches:
+        raise RuntimeError("resume config mismatch: " + "; ".join(mismatches))
+
+
 def run(cfg: TrainConfig) -> None:
     os.environ.setdefault(
         "PYTORCH_CUDA_ALLOC_CONF",
@@ -107,6 +124,7 @@ def run(cfg: TrainConfig) -> None:
         ck = load_ckpt(resume_path, device)
         if "cfg" in ck and isinstance(ck["cfg"], dict):
             model_cfg = TrainConfig.from_dict(ck["cfg"])
+        _validate_resume_compatibility(cfg, model_cfg)
 
     use_text_conditioning = bool(model_cfg.use_text_conditioning)
     if ck is not None:
@@ -173,6 +191,7 @@ def run(cfg: TrainConfig) -> None:
         "compile_warmup_steps": cfg.compile_warmup_steps,
         "compile_cudagraphs": cfg.compile_cudagraphs,
         "grad_clip_norm": cfg.grad_clip_norm,
+        "fail_on_nonfinite_grad": cfg.fail_on_nonfinite_grad,
         "ema_decay": cfg.ema_decay,
         "ema_decay_fast": cfg.ema_decay_fast,
         "ema_decay_slow": cfg.ema_decay_slow,
