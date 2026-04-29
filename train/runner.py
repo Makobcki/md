@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -55,6 +56,21 @@ def _resolve_num_workers(requested: int) -> int:
 def _assert_divisible(value: int, divisor: int, name: str) -> None:
     if value % divisor != 0:
         raise RuntimeError(f"{name} must be divisible by {divisor}, got {value}.")
+
+
+def _atomic_write_yaml(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            yaml.safe_dump(payload, f, sort_keys=False, allow_unicode=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
 def run(cfg: TrainConfig) -> None:
@@ -144,6 +160,8 @@ def run(cfg: TrainConfig) -> None:
         "max_steps": cfg.max_steps,
         "log_every": cfg.log_every,
         "save_every": cfg.save_every,
+        "val_every": cfg.val_every,
+        "val_batches": cfg.val_batches,
         "use_text_conditioning": use_text_conditioning,
         "cond_drop_prob": effective_cond_drop_prob,
         "token_drop_prob": effective_token_drop_prob,
@@ -235,14 +253,12 @@ def run(cfg: TrainConfig) -> None:
         cfg_dict["text_max_len"] = int(text_cfg.max_len)
 
     mode = str(cfg.mode)
-    train_entries, _val_entries = build_or_load_index(dcfg)
-    with open(out_dir / "config_snapshot.yaml", "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg_dict, f, sort_keys=False, allow_unicode=True)
+    train_entries, val_entries = build_or_load_index(dcfg)
+    _atomic_write_yaml(out_dir / "config_snapshot.yaml", cfg_dict)
     run_meta = build_run_metadata(perf_active)
     run_meta["use_text_conditioning"] = use_text_conditioning
     run_meta["self_conditioning"] = self_conditioning
-    with open(out_dir / "run_meta.yaml", "w", encoding="utf-8") as f:
-        yaml.safe_dump(run_meta, f, sort_keys=False, allow_unicode=True)
+    _atomic_write_yaml(out_dir / "run_meta.yaml", run_meta)
 
     latent_dtype = torch.bfloat16 if cfg.latent_dtype == "bf16" else torch.float16
     latent_expected_meta: LatentCacheMetadata | None = None
@@ -290,6 +306,41 @@ def run(cfg: TrainConfig) -> None:
         latent_missing_log_path=out_dir / "latent_missing.txt" if mode == "latent" else None,
         latent_shard_cache_size=int(cfg.latent_shard_cache_size),
     )
+    ds_val: Optional[ImageTextDataset] = None
+    if val_entries and int(cfg.val_every) > 0 and int(cfg.val_batches) > 0:
+        ds_val = ImageTextDataset(
+            entries=val_entries,
+            tokenizer=tokenizer,
+            cond_drop_prob=0.0 if use_text_conditioning else 1.0,
+            token_drop_prob=0.0,
+            tag_drop_prob=0.0,
+            caption_drop_prob=0.0,
+            seed=int(cfg.seed),
+            cache_dir=str(Path(cfg.data_root) / cfg.cache_dir),
+            token_cache_key=(
+                build_token_cache_key(
+                    vocab_path=model_cfg.text_vocab_path,
+                    merges_path=model_cfg.text_merges_path,
+                    caption_field=cfg.caption_field,
+                    max_len=int(text_cfg.max_len),
+                    lowercase=bool(text_cfg.lowercase),
+                    strip_punct=bool(text_cfg.strip_punct),
+                )
+                if text_cfg is not None
+                else None
+            ),
+            latent_cache_dir=str(Path(cfg.data_root) / cfg.latent_cache_dir),
+            latent_cache_sharded=bool(cfg.latent_cache_sharded),
+            latent_cache_index_path=str(cfg.latent_cache_index),
+            latent_dtype=latent_dtype,
+            return_latents=(mode == "latent"),
+            latent_cache_strict=bool(cfg.latent_cache_strict),
+            latent_cache_fallback=bool(cfg.latent_cache_fallback),
+            latent_expected_meta=latent_expected_meta,
+            include_is_latent=bool(cfg.latent_cache_fallback),
+            latent_missing_log_path=out_dir / "latent_missing_val.txt" if mode == "latent" else None,
+            latent_shard_cache_size=int(cfg.latent_shard_cache_size),
+        )
     if mode == "latent" and len(ds) == 0:
         raise RuntimeError("latent cache is empty; run scripts/prepare_latents.py before training.")
 
@@ -374,6 +425,19 @@ def run(cfg: TrainConfig) -> None:
             num_workers=nw,
             pin_memory=bool(cfg.pin_memory),
             drop_last=True,
+            persistent_workers=bool(cfg.persistent_workers) and nw > 0,
+            prefetch_factor=int(cfg.prefetch_factor) if nw > 0 else None,
+            collate_fn=lambda batch: collate_with_tokenizer(batch, latent_encoder=latent_encoder),
+        )
+    dl_val = None
+    if ds_val is not None and len(ds_val) > 0:
+        dl_val = DataLoader(
+            ds_val,
+            batch_size=int(cfg.batch_size),
+            shuffle=False,
+            num_workers=nw,
+            pin_memory=bool(cfg.pin_memory),
+            drop_last=False,
             persistent_workers=bool(cfg.persistent_workers) and nw > 0,
             prefetch_factor=int(cfg.prefetch_factor) if nw > 0 else None,
             collate_fn=lambda batch: collate_with_tokenizer(batch, latent_encoder=latent_encoder),
@@ -543,6 +607,7 @@ def run(cfg: TrainConfig) -> None:
         ds=ds,
         dl_full=dl_full,
         dl_curr=dl_curr,
+        dl_val=dl_val,
         diff=diff,
         domain=domain,
         model=model,

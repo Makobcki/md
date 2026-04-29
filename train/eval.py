@@ -85,64 +85,67 @@ def _run_eval_sampling(
     eval_dir = out_dir / "eval" / f"step_{step:07d}"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
-    saved_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
-    ema.copy_to(model)
     was_training = model.training
-    model.eval()
+    swapped_ema = False
+    try:
+        ema.swap_to(model)
+        swapped_ema = True
+        model.eval()
 
-    sampler_fn = _select_sampler(eval_sampler)
-    device = diffusion.device
+        sampler_fn = _select_sampler(eval_sampler)
+        device = diffusion.device
 
-    if mode == "latent":
-        latent_h = image_size // latent_downsample_factor
-        latent_w = image_size // latent_downsample_factor
-        shape = (1, latent_channels, latent_h, latent_w)
-    else:
-        shape = (1, 3, image_size, image_size)
+        if mode == "latent":
+            latent_h = image_size // latent_downsample_factor
+            latent_w = image_size // latent_downsample_factor
+            shape = (1, latent_channels, latent_h, latent_w)
+        else:
+            shape = (1, 3, image_size, image_size)
 
-    for idx, prompt in enumerate(prompts):
-        samples = []
-        for i in range(eval_n):
-            seed = int(eval_seed) + idx * eval_n + i
-            gen = torch.Generator(device=device)
-            gen.manual_seed(seed)
-            noise = torch.randn(shape, device=device, generator=gen)
-            if use_text_conditioning:
-                ids, mask = tokenizer.encode(prompt)
-                ids = ids.unsqueeze(0).to(device)
-                mask = mask.unsqueeze(0).to(device)
-                un_ids, un_mask = tokenizer.encode("")
-                un_ids = un_ids.unsqueeze(0).to(device)
-                un_mask = un_mask.unsqueeze(0).to(device)
-            else:
-                ids = None
-                mask = None
-                un_ids = None
-                un_mask = None
-            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
-                x = sampler_fn(
-                    model=model,
-                    diffusion=diffusion,
-                    shape=shape,
-                    txt_ids=ids,
-                    txt_mask=mask,
-                    steps=eval_steps,
-                    cfg_scale=eval_cfg,
-                    uncond_ids=un_ids,
-                    uncond_mask=un_mask,
-                    self_conditioning=self_conditioning,
-                    noise=noise,
-                    generator=gen,
-                )
-            if mode == "latent":
-                x = vae.decode(x)
-            if mode == "pixel":
-                x = (x.clamp(-1, 1) + 1) / 2.0
-            samples.append(x.cpu())
+        for idx, prompt in enumerate(prompts):
+            samples = []
+            for i in range(eval_n):
+                seed = int(eval_seed) + idx * eval_n + i
+                gen = torch.Generator(device=device)
+                gen.manual_seed(seed)
+                noise = torch.randn(shape, device=device, generator=gen)
+                if use_text_conditioning:
+                    ids, mask = tokenizer.encode(prompt)
+                    ids = ids.unsqueeze(0).to(device)
+                    mask = mask.unsqueeze(0).to(device)
+                    un_ids, un_mask = tokenizer.encode("")
+                    un_ids = un_ids.unsqueeze(0).to(device)
+                    un_mask = un_mask.unsqueeze(0).to(device)
+                else:
+                    ids = None
+                    mask = None
+                    un_ids = None
+                    un_mask = None
+                with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
+                    x = sampler_fn(
+                        model=model,
+                        diffusion=diffusion,
+                        shape=shape,
+                        txt_ids=ids,
+                        txt_mask=mask,
+                        steps=eval_steps,
+                        cfg_scale=eval_cfg,
+                        uncond_ids=un_ids,
+                        uncond_mask=un_mask,
+                        self_conditioning=self_conditioning,
+                        noise=noise,
+                        generator=gen,
+                    )
+                if mode == "latent":
+                    x = vae.decode(x)
+                if mode == "pixel":
+                    x = (x.clamp(-1, 1) + 1) / 2.0
+                samples.append(x.cpu())
 
-        batch = torch.cat(samples, dim=0)
-        out_path = eval_dir / f"prompt_{idx:02d}.png"
-        save_image(batch, out_path, nrow=eval_n)
-
-    model.load_state_dict(saved_state, strict=True)
-    model.train(was_training)
+            batch = torch.cat(samples, dim=0)
+            out_path = eval_dir / f"prompt_{idx:02d}.png"
+            save_image(batch, out_path, nrow=eval_n)
+    finally:
+        if swapped_ema:
+            ema.restore(model)
+        model.train(was_training)

@@ -8,6 +8,7 @@ import os
 import yaml
 
 from config.train import TrainConfig
+from .atomic import atomic_write_text
 
 
 def get_config_path(repo_root: Path) -> Path:
@@ -23,7 +24,9 @@ def read_config_text(repo_root: Path) -> str:
 
 
 def parse_config_text(text: str) -> TrainConfig:
-    data = yaml.safe_load(text) or {}
+    data = yaml.safe_load(text)
+    if data is None:
+        data = {}
     if not isinstance(data, dict):
         raise ValueError("config must be a YAML mapping")
     return TrainConfig.from_dict(data)
@@ -37,5 +40,5 @@ def validate_config_text(text: str) -> Dict[str, Any]:
 def write_config_text(repo_root: Path, text: str) -> Dict[str, Any]:
     cfg_dict = validate_config_text(text)
     path = get_config_path(repo_root)
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text)
     return cfg_dict
