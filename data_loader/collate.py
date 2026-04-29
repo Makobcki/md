@@ -25,8 +25,11 @@ def collate_with_tokenizer(
     encode_indices: list[int] = []
 
     for idx, item in enumerate(batch):
-        if has_tokens:
-            x, ids, mask, is_latent = item[:4]
+        if has_tokens and not has_flag:
+            imgs = torch.stack([b[0] for b in batch], dim=0)
+            ids = torch.stack([b[1] for b in batch], dim=0)
+            mask = torch.stack([b[2] for b in batch], dim=0)
+            return imgs, ids, mask
         else:
             x, is_latent = item[:2]
         if is_latent:
