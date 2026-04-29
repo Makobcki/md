@@ -1,3 +1,6 @@
 .venv/
+.idea/
 webui/frontend/node_modules/
 data/
+**__pycache__/
+
