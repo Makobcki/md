@@ -341,6 +341,13 @@ def run_training_loop(
             else:
                 opt.step()
 
+        if int(run_cfg.ema_switch_step) > 0:
+            ema.decay = (
+                float(run_cfg.ema_decay_slow)
+                if step >= int(run_cfg.ema_switch_step) 
+                else float(run_cfg.ema_decay_fast)
+            )
+
         ema.update(model)
 
         bad_grads = _find_bad_grads(model)
