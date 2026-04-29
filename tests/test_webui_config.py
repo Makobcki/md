@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import os
 from pathlib import Path
 from typing import Iterator
 
@@ -10,11 +9,12 @@ from fastapi import HTTPException
 
 
 @pytest.fixture()
-def app_module(tmp_path: Path) -> Iterator[object]:
+def app_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[object]:
     cfg_src = Path(__file__).resolve().parents[1] / "config" / "train.yaml"
     cfg_dst = tmp_path / "train.yaml"
     cfg_dst.write_text(cfg_src.read_text(encoding="utf-8"), encoding="utf-8")
-    os.environ["WEBUI_CONFIG_PATH"] = str(cfg_dst)
+    monkeypatch.setenv("WEBUI_CONFIG_PATH", str(cfg_dst))
+    monkeypatch.setenv("WEBUI_RUNS_DIR", str(tmp_path / "webui_runs"))
     import webui.backend.app as app_module
     importlib.reload(app_module)
     yield app_module
