@@ -20,13 +20,20 @@ from samplers import (
 )
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
+
+
 @torch.no_grad()
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--n", type=int, default=8)
-    ap.add_argument("--steps", type=int, default=30)
+    ap.add_argument("--steps", type=_positive_int, default=30)
     ap.add_argument("--prompt", default="")
     ap.add_argument("--neg", default="", help="Deprecated; use --neg_prompt")
     ap.add_argument("--neg_prompt", default="")
@@ -110,7 +117,7 @@ def main() -> None:
     latent_h = built.latent_h
     latent_w = built.latent_w
 
-    per_image_steps = max(int(args.steps), 0)
+    per_image_steps = int(args.steps)
     total_steps = per_image_steps * max(args.n, 1)
 
     samples = []

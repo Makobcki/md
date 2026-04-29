@@ -14,6 +14,7 @@ from .types import DataConfig
 
 _ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 _GENDER_TAG_RE = re.compile(r"^\d+(?:boy|boys|girl|girls)$")
+_INDEX_SCHEMA_VERSION = 2
 
 
 def _read_json(path: Path) -> Optional[dict]:
@@ -90,7 +91,8 @@ def build_token_cache_key(
     strip_punct: bool,
 ) -> str:
     h = hashlib.sha1()
-    h.update(b"token_cache_v1")
+    h.update(b"token_cache_v2")
+    h.update(b"text_builder_v2")
     h.update(str(caption_field).encode("utf-8"))
     h.update(str(max_len).encode("utf-8"))
     h.update(str(int(lowercase)).encode("utf-8"))
@@ -98,6 +100,50 @@ def build_token_cache_key(
     h.update(_hash_file(Path(vocab_path)).encode("utf-8"))
     h.update(_hash_file(Path(merges_path)).encode("utf-8"))
     return h.hexdigest()[:16]
+
+
+def _load_index_cache(cache_path: Path) -> Optional[Tuple[List[dict], List[dict]]]:
+    if not cache_path.exists():
+        return None
+    train_entries: List[dict] = []
+    val_entries: List[dict] = []
+    saw_meta = False
+    saw_done = False
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                if obj.get("type") == "meta":
+                    if int(obj.get("schema_version", 0)) != _INDEX_SCHEMA_VERSION:
+                        return None
+                    saw_meta = True
+                    continue
+                if obj.get("type") == "done":
+                    saw_done = True
+                    continue
+                if obj.get("split") == "val":
+                    val_entries.append(obj["entry"])
+                else:
+                    train_entries.append(obj["entry"])
+    except Exception:
+        return None
+    if not saw_meta or not saw_done:
+        return None
+    return train_entries, val_entries
+
+
+def _write_index_cache_atomic(cache_path: Path, rows: list[dict]) -> None:
+    tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "meta", "schema_version": _INDEX_SCHEMA_VERSION}, ensure_ascii=False) + "\n")
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        f.write(json.dumps({"type": "done", "schema_version": _INDEX_SCHEMA_VERSION}, ensure_ascii=False) + "\n")
+    tmp_path.replace(cache_path)
 
 
 def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
@@ -120,23 +166,14 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
         )
         cache_path = cache_dir / cache_key
 
-        if cache_path.exists():
-            train_entries = []
-            val_entries = []
-            with open(cache_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    obj = json.loads(line)
-                    if obj.get("split") == "val":
-                        val_entries.append(obj["entry"])
-                    else:
-                        train_entries.append(obj["entry"])
+        cached = _load_index_cache(cache_path)
+        if cached is not None:
+            train_entries, val_entries = cached
             return train_entries, val_entries
 
         train_entries = []
         val_entries = []
+        rows = []
         img_files = sorted(p for p in img_dir.iterdir() if p.suffix.lower() in _ALLOWED_EXTS)
         for img_path in img_files:
             md5 = img_path.stem
@@ -164,10 +201,9 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
                 val_entries.append(entry)
             else:
                 train_entries.append(entry)
+            rows.append({"split": split, "entry": entry})
 
-            with open(cache_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"split": split, "entry": entry}, ensure_ascii=False) + "\n")
-
+        _write_index_cache_atomic(cache_path, rows)
         return train_entries, val_entries
 
     cache_key = (
@@ -177,23 +213,14 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
     )
     cache_path = cache_dir / cache_key
 
-    if cache_path.exists():
-        train_entries: List[dict] = []
-        val_entries: List[dict] = []
-        with open(cache_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                obj = json.loads(line)
-                if obj.get("split") == "val":
-                    val_entries.append(obj["entry"])
-                else:
-                    train_entries.append(obj["entry"])
+    cached = _load_index_cache(cache_path)
+    if cached is not None:
+        train_entries, val_entries = cached
         return train_entries, val_entries
 
     train_entries = []
     val_entries = []
+    rows = []
 
     meta_files = sorted(meta_dir.glob("*.json"))
     for mp in meta_files:
@@ -254,8 +281,7 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
             val_entries.append(entry)
         else:
             train_entries.append(entry)
+        rows.append({"split": split, "entry": entry})
 
-        with open(cache_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"split": split, "entry": entry}, ensure_ascii=False) + "\n")
-
+    _write_index_cache_atomic(cache_path, rows)
     return train_entries, val_entries

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from config.train import TrainConfig
 from .services import config_service
+from .services.atomic import atomic_write_json, atomic_write_text
 
 
 @dataclass
@@ -57,7 +58,10 @@ class JobManager:
     def _load_state(self) -> None:
         if not self.state_path.exists():
             return
-        data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return
         for item in data.get("runs", []):
             if "pid" not in item:
                 item["pid"] = None
@@ -70,7 +74,7 @@ class JobManager:
     def _save_state(self) -> None:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         data = {"runs": [asdict(r) for r in self.runs.values()]}
-        self.state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(self.state_path, data)
 
     def _new_run_id(self) -> str:
         return f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -84,7 +88,7 @@ class JobManager:
 
     def _write_notes(self, run_dir: Path, notes: Dict[str, Any]) -> None:
         notes_path = run_dir / "notes.json"
-        notes_path.write_text(json.dumps(notes, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(notes_path, notes)
 
     def _read_train_config(self) -> Dict[str, Any]:
         cfg_path = config_service.get_config_path(self.repo_root)
@@ -139,6 +143,7 @@ class JobManager:
             stderr=subprocess.PIPE,
             bufsize=1,
             text=True,
+            start_new_session=True,
         )
         self.process = proc
         self.current_run_id = run.run_id
@@ -218,7 +223,7 @@ class JobManager:
 
             config_snapshot = run_dir / "config_snapshot.yaml"
             cfg_path = self.repo_root / "config" / "train.yaml"
-            config_snapshot.write_text(cfg_path.read_text(encoding="utf-8"), encoding="utf-8")
+            atomic_write_text(config_snapshot, cfg_path.read_text(encoding="utf-8"))
 
             cmd = [
                 os.environ.get("PYTHON", sys.executable),
@@ -407,6 +412,14 @@ class JobManager:
             return run
 
     def stop_current(self, timeout_int: int = 8, timeout_term: int = 5) -> Optional[RunRecord]:
+        def _send(pid: int, sig: signal.Signals) -> None:
+            try:
+                os.killpg(pid, sig)
+            except ProcessLookupError:
+                return
+            except OSError:
+                os.kill(pid, sig)
+
         with self.lock:
             if self.process is None or self.current_run_id is None:
                 if self.current_run_id:
@@ -415,7 +428,7 @@ class JobManager:
                         run.status = "stopping"
                         self._save_state()
                         try:
-                            os.kill(run.pid, signal.SIGINT)
+                            _send(run.pid, signal.SIGINT)
                         except OSError:
                             return run
                         deadline = time.time() + timeout_int
@@ -430,7 +443,7 @@ class JobManager:
                                 return run
                             time.sleep(0.2)
                         try:
-                            os.kill(run.pid, signal.SIGTERM)
+                            _send(run.pid, signal.SIGTERM)
                         except OSError:
                             return run
                         deadline = time.time() + timeout_term
@@ -445,7 +458,7 @@ class JobManager:
                                 return run
                             time.sleep(0.2)
                         try:
-                            os.kill(run.pid, signal.SIGKILL)
+                            _send(run.pid, signal.SIGKILL)
                         except OSError:
                             return run
                         return run
@@ -457,14 +470,14 @@ class JobManager:
 
             proc = self.process
             try:
-                proc.send_signal(signal.SIGINT)
+                _send(proc.pid, signal.SIGINT)
                 proc.wait(timeout=timeout_int)
                 return run
             except subprocess.TimeoutExpired:
-                proc.terminate()
+                _send(proc.pid, signal.SIGTERM)
                 try:
                     proc.wait(timeout=timeout_term)
                     return run
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    _send(proc.pid, signal.SIGKILL)
                     return run
