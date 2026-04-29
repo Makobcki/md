@@ -24,6 +24,13 @@ class LatentDomain:
             x = x.to(self.device, non_blocking=True, memory_format=torch.channels_last)
         else:
             x = x.to(self.device, non_blocking=True)
+        if x.dim() != 4:
+            raise RuntimeError(f"latent batch must be 4D, got shape={tuple(x.shape)}")
+        if not torch.isfinite(x).all():
+            raise RuntimeError("latent batch has NaN/Inf values")
+        std = float(x.detach().float().std().item())
+        if std <= 0.0:
+            raise RuntimeError(f"latent batch std must be positive, got {std}")
         txt_ids = batch.txt_ids
         txt_mask = batch.txt_mask
         if txt_ids is not None:

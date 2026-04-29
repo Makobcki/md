@@ -3,7 +3,7 @@ image_dir: image_512
 meta_dir: meta
 tags_dir: tags
 caption_field: caption_llava_34b_no_tags_short
-images_only: true
+images_only: false
 min_tag_count: 8
 require_512: true
 val_ratio: 0.01
@@ -29,6 +29,8 @@ weight_decay: 1.0e-4
 max_steps: 200001
 log_every: 10
 save_every: 2000
+val_every: 1000
+val_batches: 8
 
 timesteps: 1000
 beta_start: 1.0e-4
@@ -49,7 +51,7 @@ text_dim: 256
 text_layers: 4
 text_heads: 4
 text_max_len: 128
-use_text_conditioning: false
+use_text_conditioning: true
 text_vocab_path: diffusion/bpe/vocab.json
 text_merges_path: diffusion/bpe/merges.txt
 tokenizer_type: bpe
@@ -108,7 +110,7 @@ curriculum_solo_weight: 2.0
 curriculum_non_solo_weight: 1.0
 
 self_conditioning: true
-self_cond_prob: 1 # 0.2
+self_cond_prob: 0.5
 
 noise_schedule: cosine
 cosine_s: 0.008

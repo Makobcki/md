@@ -56,6 +56,102 @@ def _grad_norm(model: torch.nn.Module) -> float:
     return total ** 0.5
 
 
+def _diffusion_loss(
+    *,
+    model: UNet,
+    diff: Diffusion,
+    domain: PixelDomain | LatentDomain,
+    x0: torch.Tensor,
+    txt_ids: Optional[torch.Tensor],
+    txt_mask: Optional[torch.Tensor],
+    self_conditioning: bool,
+    self_cond_prob: float,
+    min_snr_gamma: float,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype,
+    capture_stats: bool = False,
+) -> tuple[torch.Tensor, dict[str, Optional[float]]]:
+    b = x0.shape[0]
+    t = torch.randint(0, diff.cfg.timesteps, (b,), device=x0.device, dtype=torch.long)
+    noise = domain.sample_noise_like(x0)
+    alpha_bar_t = diff.alpha_bar[t]
+    _assert_finite("alpha_bar[t]", alpha_bar_t)
+    xt = domain.q_sample(x0, t, noise)
+    v_tgt = domain.v_target(x0, t, noise)
+
+    stats: dict[str, Optional[float]] = {"x_std": None, "v_std": None}
+    if capture_stats:
+        stats["x_std"] = float(x0.detach().float().std().item())
+        stats["v_std"] = float(v_tgt.detach().float().std().item())
+
+    with torch.amp.autocast("cuda", enabled=amp_enabled, dtype=amp_dtype):
+        self_cond = None
+        if self_conditioning and self_cond_prob > 0:
+            if torch.rand((), device=xt.device).item() < self_cond_prob:
+                with torch.no_grad():
+                    v_sc = model(xt, t, txt_ids, txt_mask, None)
+                    self_cond = diff.v_to_x0(xt, t, v_sc).detach()
+        v_pred = model(xt, t, txt_ids, txt_mask, self_cond)
+        _assert_finite("v_pred", v_pred)
+        if v_pred.shape != v_tgt.shape:
+            raise RuntimeError("v_pred/v_target shape mismatch")
+        per = F.mse_loss(
+            v_pred,
+            v_tgt.to(dtype=v_pred.dtype),
+            reduction="none",
+        ).mean(dim=[1, 2, 3])
+        w = get_min_snr_weights(diff.alpha_bar[t], gamma=min_snr_gamma)
+        loss = (per * w).mean()
+
+    return loss, stats
+
+
+@torch.no_grad()
+def _run_validation_loss(
+    *,
+    model: UNet,
+    diff: Diffusion,
+    domain: PixelDomain | LatentDomain,
+    dl_val: DataLoader,
+    max_batches: int,
+    min_snr_gamma: float,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+) -> Optional[float]:
+    if max_batches <= 0:
+        return None
+
+    was_training = model.training
+    model.eval()
+    losses: list[float] = []
+    try:
+        for batch_idx, (x0, txt_ids, txt_mask) in enumerate(dl_val):
+            if batch_idx >= max_batches:
+                break
+            batch = Batch(x=x0, txt_ids=txt_ids, txt_mask=txt_mask, domain=domain.name)
+            prepared = domain.prepare_batch(batch)
+            loss, _ = _diffusion_loss(
+                model=model,
+                diff=diff,
+                domain=domain,
+                x0=prepared.x,
+                txt_ids=prepared.txt_ids,
+                txt_mask=prepared.txt_mask,
+                self_conditioning=False,
+                self_cond_prob=0.0,
+                min_snr_gamma=min_snr_gamma,
+                amp_enabled=use_amp,
+                amp_dtype=amp_dtype,
+            )
+            losses.append(float(loss.detach().cpu()))
+    finally:
+        model.train(was_training)
+
+    if not losses:
+        return None
+    return sum(losses) / len(losses)
+
+
 def _configure_cudagraphs(enabled: bool) -> None:
     if not hasattr(torch, "_inductor"):
         return
@@ -90,6 +186,7 @@ def run_training_loop(
     ds: ImageTextDataset,
     dl_full: DataLoader,
     dl_curr: Optional[DataLoader],
+    dl_val: Optional[DataLoader],
     diff: Diffusion,
     domain: PixelDomain | LatentDomain,
     model: UNet,
@@ -231,6 +328,8 @@ def run_training_loop(
     log_loss_count = 0
     best_loss: Optional[float] = None
     best_step: Optional[int] = None
+    best_val_loss: Optional[float] = None
+    best_val_step: Optional[int] = None
 
     for step in range(start_step, max_steps):
         if bool(run_cfg.curriculum_enabled) and dl_curr is not None and step == int(run_cfg.curriculum_steps):
@@ -272,36 +371,24 @@ def run_training_loop(
             txt_ids = prepared.txt_ids
             txt_mask = prepared.txt_mask
 
-            b = x0.shape[0]
-            t = torch.randint(0, diff.cfg.timesteps, (b,), device=x0.device, dtype=torch.long)
-            noise = domain.sample_noise_like(x0)
-            alpha_bar_t = diff.alpha_bar[t]
-            _assert_finite("alpha_bar[t]", alpha_bar_t)
-            xt = domain.q_sample(x0, t, noise)
-            v_tgt = domain.v_target(x0, t, noise)
-            if capture_batch_stats and accum_idx == grad_accum - 1:
-                last_batch_stats["x_std"] = float(x0.detach().float().std().item())
-                last_batch_stats["v_std"] = float(v_tgt.detach().float().std().item())
-
             with timing.section("fwd_bwd") as t_fwd:
-                with torch.amp.autocast("cuda", enabled=bool(run_cfg.amp) and device.type == "cuda", dtype=amp_dtype):
-                    self_cond = None
-                    if self_conditioning and self_cond_prob > 0:
-                        if torch.rand((), device=xt.device).item() < self_cond_prob:
-                            with torch.no_grad():
-                                v_sc = model(xt, t, txt_ids, txt_mask, None)
-                                self_cond = diff.v_to_x0(xt, t, v_sc).detach()
-                    v_pred = model(xt, t, txt_ids, txt_mask, self_cond)
-                    _assert_finite("v_pred", v_pred)
-                    if v_pred.shape != v_tgt.shape:
-                        raise RuntimeError("v_pred/v_target shape mismatch")
-                    per = F.mse_loss(
-                        v_pred,
-                        v_tgt.to(dtype=v_pred.dtype),
-                        reduction="none",
-                    ).mean(dim=[1, 2, 3])  # [B]
-                    w = get_min_snr_weights(diff.alpha_bar[t], gamma=min_snr_gamma)        # [B]
-                    loss = (per * w).mean() / grad_accum
+                raw_loss, batch_stats = _diffusion_loss(
+                    model=model,
+                    diff=diff,
+                    domain=domain,
+                    x0=x0,
+                    txt_ids=txt_ids,
+                    txt_mask=txt_mask,
+                    self_conditioning=self_conditioning,
+                    self_cond_prob=self_cond_prob,
+                    min_snr_gamma=min_snr_gamma,
+                    amp_enabled=bool(run_cfg.amp) and device.type == "cuda",
+                    amp_dtype=amp_dtype,
+                    capture_stats=capture_batch_stats and accum_idx == grad_accum - 1,
+                )
+                loss = raw_loss / grad_accum
+                if batch_stats["x_std"] is not None:
+                    last_batch_stats = batch_stats
 
             if not torch.isfinite(loss):
                 dump_path = out_dir / f"nan_dump_{step:07d}.pt"
@@ -316,8 +403,6 @@ def run_training_loop(
                     "batch_stats": {
                         "x0_min": float(x0.min().item()),
                         "x0_max": float(x0.max().item()),
-                        "alpha_bar_min": float(alpha_bar_t.min().item()),
-                        "alpha_bar_max": float(alpha_bar_t.max().item()),
                     },
                 })
                 raise RuntimeError(f"Non-finite loss at step={step}: {loss.item()}")
@@ -371,6 +456,53 @@ def run_training_loop(
         step_time = time.perf_counter() - step_start
         timing.add_cpu("step_total", step_time)
 
+        val_loss: Optional[float] = None
+        if (
+            is_main
+            and dl_val is not None
+            and int(run_cfg.val_every) > 0
+            and int(run_cfg.val_batches) > 0
+            and step % int(run_cfg.val_every) == 0
+        ):
+            val_loss = _run_validation_loss(
+                model=model,
+                diff=diff,
+                domain=domain,
+                dl_val=dl_val,
+                max_batches=int(run_cfg.val_batches),
+                min_snr_gamma=min_snr_gamma,
+                use_amp=bool(run_cfg.amp) and device.type == "cuda",
+                amp_dtype=amp_dtype,
+            )
+            if val_loss is not None and (best_val_loss is None or val_loss < best_val_loss):
+                best_val_loss = float(val_loss)
+                best_val_step = int(step)
+                best_val_path = out_dir / "ckpt_best_val.pt"
+                save_ckpt(str(best_val_path), {
+                    "step": step,
+                    "model": model.state_dict(),
+                    "opt": opt.state_dict(),
+                    "scaler": scaler.state_dict(),
+                    "ema": ema.shadow,
+                    "cfg": cfg_dict,
+                    "meta": run_meta,
+                })
+                event_bus.emit({
+                    "type": "log",
+                    "message": f"saved best validation checkpoint {best_val_path}",
+                    "step": step,
+                    "best_val_loss": best_val_loss,
+                    "best_val_step": best_val_step,
+                })
+            if not (step % log_every == 0 and step >= warmup_end_step):
+                event_bus.emit({
+                    "type": "metric",
+                    "step": step,
+                    "val_loss": float(val_loss) if val_loss is not None else None,
+                    "max_steps": int(run_cfg.max_steps),
+                    "domain": domain.name,
+                })
+
         log_loss_sum += float(total_loss)
         log_loss_count += 1
 
@@ -419,6 +551,7 @@ def run_training_loop(
                     "type": "metric",
                     "step": step,
                     "loss": float(loss_mean),
+                    "val_loss": float(val_loss) if val_loss is not None else None,
                     "lr": float(opt.param_groups[0]["lr"]),
                     "grad_norm": float(grad_norm),
                     "x_std": last_batch_stats["x_std"],

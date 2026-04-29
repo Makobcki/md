@@ -152,7 +152,7 @@ class ImageTextDataset(Dataset):
         self.token_drop_prob = float(token_drop_prob)
         self.tag_drop_prob = float(tag_drop_prob)
         self.caption_drop_prob = float(caption_drop_prob)
-        self.rng = random.Random(int(seed))
+        self.seed = int(seed)
         self.latent_cache_dir = str(latent_cache_dir) if latent_cache_dir else None
         self.latent_cache_sharded = bool(latent_cache_sharded)
         self.latent_cache_index_path = str(latent_cache_index_path) if latent_cache_index_path else None
@@ -345,14 +345,24 @@ class ImageTextDataset(Dataset):
         with self.latent_missing_log_path.open("a", encoding="utf-8") as f:
             f.write(f"{md5}\t{reason}\n")
 
-    def _build_text(self, entry: dict) -> str:
+    def _entry_text_fingerprint(self, entry: dict) -> str:
+        payload = {
+            "caption": entry.get("caption", "") or "",
+            "tags_primary": list(entry.get("tags_primary", [])),
+            "tags_gender": list(entry.get("tags_gender", [])),
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+    def _build_text(self, entry: dict, rng: random.Random | None = None) -> str:
         cap = entry.get("caption", "") or ""
         tags_primary = list(entry.get("tags_primary", []))
         tags_gender = list(entry.get("tags_gender", []))
 
-        if self.caption_drop_prob > 0 and self.rng.random() < self.caption_drop_prob:
+        rng = rng or random.Random(self.seed)
+
+        if self.caption_drop_prob > 0 and rng.random() < self.caption_drop_prob:
             cap = ""
-        if self.tag_drop_prob > 0 and self.rng.random() < self.tag_drop_prob:
+        if self.tag_drop_prob > 0 and rng.random() < self.tag_drop_prob:
             tags_primary = []
             tags_gender = []
 
@@ -377,14 +387,19 @@ class ImageTextDataset(Dataset):
             try:
                 payload = torch.load(cache_path, map_location="cpu")
                 md5_list = payload.get("md5", [])
+                text_hash = payload.get("text_hash", [])
                 ids = payload.get("ids")
                 mask = payload.get("mask")
+                expected_text_hash = [self._entry_text_fingerprint(e) for e in self.entries]
                 if (
                     isinstance(md5_list, list)
+                    and isinstance(text_hash, list)
                     and ids is not None
                     and mask is not None
                     and len(md5_list) == len(self.entries)
+                    and len(text_hash) == len(self.entries)
                     and all(md5 == e.get("md5") for md5, e in zip(md5_list, self.entries))
+                    and text_hash == expected_text_hash
                 ):
                     self._token_cache_md5 = md5_list
                     self._token_cache_ids = ids
@@ -396,21 +411,27 @@ class ImageTextDataset(Dataset):
         ids_list: list[torch.LongTensor] = []
         mask_list: list[torch.BoolTensor] = []
         md5_list = []
+        text_hash = []
         for entry in self.entries:
             text = self._build_text(entry)
             ids, mask = self.tokenizer.encode(text)
             ids_list.append(ids)
             mask_list.append(mask)
             md5_list.append(entry.get("md5", ""))
+            text_hash.append(self._entry_text_fingerprint(entry))
         ids_tensor = torch.stack(ids_list, dim=0)
         mask_tensor = torch.stack(mask_list, dim=0)
         payload = {
+            "schema_version": 2,
             "md5": md5_list,
+            "text_hash": text_hash,
             "ids": ids_tensor,
             "mask": mask_tensor,
         }
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(payload, cache_path)
+        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        torch.save(payload, tmp_path)
+        tmp_path.replace(cache_path)
         self._token_cache_md5 = md5_list
         self._token_cache_ids = ids_tensor
         self._token_cache_mask = mask_tensor
@@ -419,6 +440,7 @@ class ImageTextDataset(Dataset):
         e = self.entries[idx]
         md5 = e.get("md5", "")
         is_latent = False
+        rng = random.Random(self.seed + int(idx))
         if self.return_latents:
             if self.latent_cache_sharded:
                 try:
@@ -450,7 +472,7 @@ class ImageTextDataset(Dataset):
                 return img, is_latent
             return (img,)
 
-        drop_cond = self.cond_drop_prob > 0 and self.rng.random() < self.cond_drop_prob
+        drop_cond = self.cond_drop_prob > 0 and rng.random() < self.cond_drop_prob
         if drop_cond:
             if self._empty_ids is None or self._empty_mask is None:
                 empty_ids, empty_mask = self.tokenizer.encode("")
@@ -465,9 +487,9 @@ class ImageTextDataset(Dataset):
                 return img, self._token_cache_ids[idx], self._token_cache_mask[idx], is_latent
             return img, self._token_cache_ids[idx], self._token_cache_mask[idx]
 
-        text = self._build_text(e)
+        text = self._build_text(e, rng)
         ids, mask = self.tokenizer.encode(text)
-        ids, mask = self._apply_token_dropout(ids, mask)
+        ids, mask = self._apply_token_dropout(ids, mask, rng)
         if self.include_is_latent:
             return img, ids, mask, is_latent
         return img, ids, mask
@@ -476,6 +498,7 @@ class ImageTextDataset(Dataset):
         self,
         ids: torch.LongTensor,
         mask: torch.BoolTensor,
+        rng: random.Random,
     ) -> Tuple[torch.LongTensor, torch.BoolTensor]:
         if self.token_drop_prob <= 0:
             return ids, mask
@@ -485,7 +508,7 @@ class ImageTextDataset(Dataset):
         for i in range(1, max_len - 1):
             if not mask[i]:
                 continue
-            if self.rng.random() < self.token_drop_prob:
+            if rng.random() < self.token_drop_prob:
                 ids[i] = self.tokenizer.pad_id
                 mask[i] = False
         return ids, mask
