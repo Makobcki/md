@@ -68,7 +68,7 @@ class CrossAttention2d(nn.Module):
         v = v.view(b, -1, self.heads, self.head_dim).transpose(1, 2)
 
         # boolean mask for SDPA: True = mask
-        attn_mask = (~ctx_mask).unsqueeze(1).unsqueeze(1)  # [B,1,1,T]
+        attn_mask = ctx_mask.unsqueeze(1).unsqueeze(1)  # [B,1,1,T]
 
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
         out = out.transpose(2, 3).contiguous().view(b, self.inner, h, w)
