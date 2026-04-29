@@ -19,7 +19,7 @@ from .services import config_service
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-RUNS_DIR = ROOT_DIR / "webui_runs"
+RUNS_DIR = Path(os.environ.get("WEBUI_RUNS_DIR", ROOT_DIR / "webui_runs"))
 
 
 class WSManager:
@@ -53,11 +53,12 @@ class WSManager:
 
 logger = logging.getLogger("webui")
 ws_manager = WSManager()
-job_manager = JobManager(ROOT_DIR, ws_manager)
+job_manager = JobManager(ROOT_DIR, ws_manager, RUNS_DIR)
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
     job_manager.set_loop(asyncio.get_running_loop())
     yield
 
@@ -78,8 +79,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RUNS_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/runs", StaticFiles(directory=str(RUNS_DIR)), name="runs")
+app.mount("/runs", StaticFiles(directory=str(RUNS_DIR), check_dir=False), name="runs")
 
 
 def _get_out_dir() -> Path:
@@ -91,16 +91,54 @@ def _get_out_dir() -> Path:
     return out_dir
 
 
-def _require_token(authorization: str | None = Header(default=None)) -> None:
+def _token_is_valid(value: str | None) -> bool:
     expected = os.environ.get("WEBUI_AUTH_TOKEN")
     if not expected:
-        return
-    if authorization == f"Bearer {expected}" or authorization == expected:
+        return True
+    return value == f"Bearer {expected}" or value == expected
+
+
+def _require_token(authorization: str | None = Header(default=None)) -> None:
+    if _token_is_valid(authorization):
         return
     raise HTTPException(status_code=401, detail="invalid auth token")
 
 
-def _bounded_repo_path(value: str | None, *, required: bool = False) -> str | None:
+async def _require_ws_token(websocket: WebSocket) -> bool:
+    expected = os.environ.get("WEBUI_AUTH_TOKEN")
+    if not expected:
+        return True
+    token = websocket.query_params.get("token")
+    authorization = websocket.headers.get("authorization")
+    if _token_is_valid(authorization) or _token_is_valid(token):
+        return True
+    await websocket.close(code=1008)
+    return False
+
+
+def _configured_allowed_roots() -> list[Path]:
+    roots = [ROOT_DIR, RUNS_DIR]
+    try:
+        roots.append(_get_out_dir())
+    except Exception as exc:
+        logger.warning("failed to resolve configured out_dir for path validation: %s", exc)
+    extra = os.environ.get("WEBUI_ALLOWED_PATHS", "")
+    for item in extra.split(os.pathsep):
+        item = item.strip()
+        if item:
+            roots.append(Path(item))
+    return roots
+
+
+def _configured_allowed_files() -> list[Path]:
+    try:
+        return [config_service.get_config_path(ROOT_DIR).resolve()]
+    except Exception as exc:
+        logger.warning("failed to resolve configured config path for path validation: %s", exc)
+        return []
+
+
+def _bounded_path(value: str | None, *, required: bool = False) -> str | None:
     if not value:
         if required:
             raise ValueError("path is required")
@@ -109,10 +147,13 @@ def _bounded_repo_path(value: str | None, *, required: bool = False) -> str | No
     if not path.is_absolute():
         path = ROOT_DIR / path
     resolved = path.resolve()
-    try:
-        resolved.relative_to(ROOT_DIR.resolve())
-    except ValueError as exc:
-        raise ValueError("path must be inside repository") from exc
+    allowed_roots = [root.resolve() for root in _configured_allowed_roots()]
+    allowed_files = _configured_allowed_files()
+    if resolved not in allowed_files and not any(
+        resolved == root or resolved.is_relative_to(root) for root in allowed_roots
+    ):
+        allowed = ", ".join(str(root) for root in [*allowed_roots, *allowed_files])
+        raise ValueError(f"path must be inside an allowed root: {allowed}")
     return str(resolved)
 
 
@@ -133,8 +174,8 @@ class SampleArgs(BaseModel):
 
     @model_validator(mode="after")
     def _validate_paths(self) -> "SampleArgs":
-        self.ckpt = _bounded_repo_path(self.ckpt, required=True) or self.ckpt
-        self.out = _bounded_repo_path(self.out)
+        self.ckpt = _bounded_path(self.ckpt, required=True) or self.ckpt
+        self.out = _bounded_path(self.out)
         return self
 
     def to_cli_args(self) -> Dict[str, Any]:
@@ -155,7 +196,7 @@ class TrainRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_resume(self) -> "TrainRequest":
-        self.resume = _bounded_repo_path(self.resume)
+        self.resume = _bounded_path(self.resume)
         return self
 
 
@@ -169,7 +210,7 @@ class LatentArgs(BaseModel):
     num_workers: int = Field(default=4, ge=0, le=64, alias="num-workers")
     prefetch_factor: int = Field(default=2, ge=1, le=32, alias="prefetch-factor")
     pin_memory: bool = Field(default=True, alias="pin-memory")
-    device: Literal["auto", "cpu", "cuda"] = "cuda"
+    device: Literal["auto", "cpu", "cuda"] = "auto"
     latent_dtype: Literal["fp16", "bf16"] = Field(default="fp16", alias="latent-dtype")
     autocast_dtype: Literal["fp16", "bf16"] = Field(default="fp16", alias="autocast-dtype")
     queue_size: int = Field(default=64, ge=1, le=4096, alias="queue-size")
@@ -180,9 +221,7 @@ class LatentArgs(BaseModel):
 
     @model_validator(mode="after")
     def _validate_config(self) -> "LatentArgs":
-        self.config = _bounded_repo_path(self.config, required=True) or self.config
-        if self.device == "auto":
-            self.device = "cuda"
+        self.config = _bounded_path(self.config, required=True) or self.config
         return self
 
     def to_cli_args(self) -> Dict[str, Any]:
@@ -242,17 +281,16 @@ def _tail_text(path: Path, limit: int) -> str:
 @app.get("/api/runs/{run_id}/logs/{stream}")
 def get_run_log(
     run_id: str,
-    stream: str,
+    stream: Literal["stdout", "stderr"],
     limit: int = Query(default=2000, ge=1, le=50000),
 ) -> Dict[str, Any]:
+    if stream not in {"stdout", "stderr"}:
+        raise HTTPException(status_code=400, detail="invalid log stream")
     try:
         run = job_manager.get_run(run_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    if stream == "stdout":
-        path = Path(run.log_stdout)
-    else:
-        path = Path(run.log_stderr)
+    path = Path(run.log_stdout if stream == "stdout" else run.log_stderr)
     if not path.exists():
         return {"content": ""}
     return {"content": _tail_text(path, limit)}
@@ -315,12 +353,8 @@ def list_checkpoints() -> Dict[str, Any]:
 def get_checkpoint_info(path: str) -> Dict[str, Any]:
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
-    ckpt_path = Path(path)
-    if not ckpt_path.is_absolute():
-        ckpt_path = ROOT_DIR / ckpt_path
     try:
-        ckpt_path = ckpt_path.resolve()
-        ckpt_path.relative_to(ROOT_DIR)
+        ckpt_path = Path(_bounded_path(path, required=True) or path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid checkpoint path") from exc
     if not ckpt_path.exists():
@@ -440,6 +474,8 @@ def stop_latent_cache(_: None = Depends(_require_token)) -> Dict[str, Any]:
 
 @app.websocket("/ws/logs/{run_id}")
 async def ws_logs(websocket: WebSocket, run_id: str) -> None:
+    if not await _require_ws_token(websocket):
+        return
     await ws_manager.connect(run_id, "logs", websocket)
     try:
         while True:
@@ -450,6 +486,8 @@ async def ws_logs(websocket: WebSocket, run_id: str) -> None:
 
 @app.websocket("/ws/metrics/{run_id}")
 async def ws_metrics(websocket: WebSocket, run_id: str) -> None:
+    if not await _require_ws_token(websocket):
+        return
     await ws_manager.connect(run_id, "metrics", websocket)
     try:
         while True:

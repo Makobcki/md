@@ -39,9 +39,9 @@ class RunRecord:
 
 
 class JobManager:
-    def __init__(self, repo_root: Path, ws_manager: Any) -> None:
+    def __init__(self, repo_root: Path, ws_manager: Any, runs_dir: Path | None = None) -> None:
         self.repo_root = repo_root
-        self.runs_dir = repo_root / "webui_runs"
+        self.runs_dir = runs_dir or (repo_root / "webui_runs")
         self.state_path = self.runs_dir / "state.json"
         self.ws_manager = ws_manager
         self.lock = threading.Lock()
@@ -93,6 +93,25 @@ class JobManager:
     def _read_train_config(self) -> Dict[str, Any]:
         cfg_path = config_service.get_config_path(self.repo_root)
         return TrainConfig.from_yaml(str(cfg_path)).to_dict()
+
+    def _allowed_output_roots(self) -> list[Path]:
+        roots = [self.repo_root, self.runs_dir]
+        try:
+            out_dir = Path(self._read_train_config().get("out_dir", "./runs"))
+            if not out_dir.is_absolute():
+                out_dir = self.repo_root / out_dir
+            roots.append(out_dir)
+        except Exception:
+            pass
+        for item in os.environ.get("WEBUI_ALLOWED_PATHS", "").split(os.pathsep):
+            item = item.strip()
+            if item:
+                roots.append(Path(item))
+        return [root.resolve() for root in roots]
+
+    def _is_allowed_output_path(self, path: Path) -> bool:
+        resolved = path.resolve()
+        return any(resolved == root or resolved.is_relative_to(root) for root in self._allowed_output_roots())
 
     def list_runs(self) -> List[RunRecord]:
         return sorted(self.runs.values(), key=lambda r: r.created_at, reverse=True)
@@ -190,7 +209,7 @@ class JobManager:
             run.exit_code = proc.returncode
             run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
             run.pid = None
-            if run.status == "stopping" and proc.returncode == 0:
+            if run.status == "stopping":
                 run.status = "stopped"
             elif proc.returncode == 0:
                 run.status = "done"
@@ -298,13 +317,11 @@ class JobManager:
                 output_path = Path(output_path)
                 if output_path.is_absolute():
                     resolved = output_path.resolve()
-                    try:
-                        resolved.relative_to(self.repo_root.resolve())
-                    except ValueError:
+                    if self._is_allowed_output_path(resolved):
+                        output_path = resolved
+                    else:
                         output_path = samples_dir / output_path.name
                         notes["warning"] = "output path outside repo; rewritten into run samples"
-                    else:
-                        output_path = resolved
                 else:
                     output_path = samples_dir / output_path.name
             args["out"] = str(output_path)
@@ -411,7 +428,12 @@ class JobManager:
             self._start_process(run, env)
             return run
 
-    def stop_current(self, timeout_int: int = 8, timeout_term: int = 5) -> Optional[RunRecord]:
+    def stop_current(
+        self,
+        timeout_int: int = 8,
+        timeout_term: int = 5,
+        timeout_kill: int = 2,
+    ) -> Optional[RunRecord]:
         def _send(pid: int, sig: signal.Signals) -> None:
             try:
                 os.killpg(pid, sig)
@@ -461,6 +483,17 @@ class JobManager:
                             _send(run.pid, signal.SIGKILL)
                         except OSError:
                             return run
+                        deadline = time.time() + timeout_kill
+                        while time.time() < deadline:
+                            if not self._pid_alive(run.pid):
+                                run.status = "stopped"
+                                run.exit_code = -signal.SIGKILL
+                                run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                                run.pid = None
+                                self.current_run_id = None
+                                self._save_state()
+                                return run
+                            time.sleep(0.2)
                         return run
                 return None
             run = self.runs[self.current_run_id]
@@ -480,4 +513,8 @@ class JobManager:
                     return run
                 except subprocess.TimeoutExpired:
                     _send(proc.pid, signal.SIGKILL)
+                    try:
+                        proc.wait(timeout=timeout_kill)
+                    except subprocess.TimeoutExpired:
+                        return run
                     return run
