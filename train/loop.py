@@ -210,6 +210,7 @@ def run_training_loop(
     save_every = int(run_cfg.save_every)
     min_snr_gamma = float(run_cfg.min_snr_gamma)
     grad_clip = float(run_cfg.grad_clip_norm)
+    fail_on_nonfinite_grad = bool(getattr(run_cfg, "fail_on_nonfinite_grad", False))
     base_lr = float(run_cfg.lr)
     warmup_steps = int(run_cfg.warmup_steps)
     decay_steps = int(run_cfg.decay_steps) if int(run_cfg.decay_steps) > 0 else max(max_steps - warmup_steps, 0)
@@ -419,24 +420,9 @@ def run_training_loop(
         else:
             grad_norm = _grad_norm(model)
 
-        with timing.section("opt_step") as t_opt:
-            if scaler.is_enabled():
-                scaler.step(opt)
-                scaler.update()
-            else:
-                opt.step()
-
-        if int(run_cfg.ema_switch_step) > 0:
-            ema.decay = (
-                float(run_cfg.ema_decay_slow)
-                if step >= int(run_cfg.ema_switch_step) 
-                else float(run_cfg.ema_decay_fast)
-            )
-
-        ema.update(model)
-
         bad_grads = _find_bad_grads(model)
-        if bad_grads:
+        skipped_nonfinite_grad = False
+        if bad_grads and (fail_on_nonfinite_grad or not scaler.is_enabled()):
             dump_path = out_dir / f"nan_dump_{step:07d}.pt"
             save_ckpt(str(dump_path), {
                 "step": step,
@@ -451,6 +437,31 @@ def run_training_loop(
                 },
             })
             raise RuntimeError(f"Non-finite grads at step={step}: {bad_grads[:5]}")
+        if bad_grads:
+            skipped_nonfinite_grad = True
+
+        with timing.section("opt_step") as t_opt:
+            if scaler.is_enabled():
+                scaler.step(opt)
+                scaler.update()
+            else:
+                opt.step()
+
+        if int(run_cfg.ema_switch_step) > 0:
+            ema.decay = (
+                float(run_cfg.ema_decay_slow)
+                if step >= int(run_cfg.ema_switch_step) 
+                else float(run_cfg.ema_decay_fast)
+            )
+
+        if skipped_nonfinite_grad and is_main:
+            event_bus.emit({
+                "type": "log",
+                "message": f"skipped optimizer step after non-finite grads: {bad_grads[:5]}",
+                "step": step,
+            })
+        else:
+            ema.update(model)
 
         opt_time = time.perf_counter() - opt_step_start
         step_time = time.perf_counter() - step_start
@@ -554,6 +565,7 @@ def run_training_loop(
                     "val_loss": float(val_loss) if val_loss is not None else None,
                     "lr": float(opt.param_groups[0]["lr"]),
                     "grad_norm": float(grad_norm),
+                    "skipped_nonfinite_grad": bool(skipped_nonfinite_grad),
                     "x_std": last_batch_stats["x_std"],
                     "v_std": last_batch_stats["v_std"],
                     "ema_decay": float(ema.decay),
@@ -571,9 +583,11 @@ def run_training_loop(
                     "max_steps": int(run_cfg.max_steps),
                     "latent_cache_hit_rate": float(ds.latent_cache_hit_rate() or 0.0) if domain.name == "latent" else None,
                     "domain": domain.name,
+                    "latent_dtype": str(run_cfg.latent_dtype) if domain.name == "latent" else None,
+                    "amp_dtype": str(run_cfg.amp_dtype),
                 }
                 event_bus.emit(payload)
-                if best_loss is None or loss_mean < best_loss:
+                if not skipped_nonfinite_grad and (best_loss is None or loss_mean < best_loss):
                     best_loss = float(loss_mean)
                     best_step = int(step)
                     best_path = out_dir / "ckpt_best.pt"
@@ -640,6 +654,9 @@ def run_training_loop(
                 use_amp=bool(run_cfg.amp) and device.type == "cuda",
                 amp_dtype=amp_dtype,
             )
+
+        if is_main:
+            pbar.update(1)
 
         if stop_requested["value"]:
             stop_path = out_dir / f"ckpt_stop_{step:07d}.pt"

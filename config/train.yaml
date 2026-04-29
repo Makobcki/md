@@ -65,10 +65,11 @@ caption_drop_prob: 0.0
 
 amp: true
 amp_dtype: bf16
-compile: true
+compile: false
 compile_warmup_steps: 10
 compile_cudagraphs: true
 grad_clip_norm: 1.0
+fail_on_nonfinite_grad: false
 ema_decay: 0.999
 ema_decay_fast: 0.999
 ema_decay_slow: 0.99995

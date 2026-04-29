@@ -258,7 +258,7 @@ def main() -> None:
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--prefetch-factor", type=int, default=2)
     ap.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=True)
-    ap.add_argument("--device", default='cuda')
+    ap.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
     ap.add_argument("--latent-dtype", default='fp16', choices=("fp16", "bf16"))
     ap.add_argument("--autocast-dtype", default='fp16', choices=("fp16", "bf16"))
     ap.add_argument("--queue-size", type=int, default=64)
@@ -304,7 +304,10 @@ def main() -> None:
     )
     train_entries, _ = build_or_load_index(dcfg)
 
-    device_str = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "auto":
+        device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device_str = args.device
     device = torch.device(device_str)
     dtype = _latent_dtype(args.latent_dtype or cfg.latent_dtype)
     autocast_dtype = _latent_dtype(args.autocast_dtype or cfg.latent_dtype)

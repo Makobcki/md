@@ -505,8 +505,11 @@ class ImageTextDataset(Dataset):
         ids = ids.clone()
         mask = mask.clone()
         max_len = ids.shape[0]
+        protected_ids = {self.tokenizer.bos_id, self.tokenizer.eos_id}
         for i in range(1, max_len - 1):
             if not mask[i]:
+                continue
+            if int(ids[i].item()) in protected_ids:
                 continue
             if rng.random() < self.token_drop_prob:
                 ids[i] = self.tokenizer.pad_id

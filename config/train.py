@@ -89,6 +89,7 @@ class TrainConfig:
     compile_warmup_steps: int = 2
     compile_cudagraphs: bool = True
     grad_clip_norm: float = 1.0
+    fail_on_nonfinite_grad: bool = False
     ema_decay: float = 0.999
     ema_decay_fast: float = 0.999
     ema_decay_slow: float = 0.9999

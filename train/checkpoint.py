@@ -23,7 +23,7 @@ __all__ = [
 def _prune_checkpoints(out_dir: Path, keep_last: int) -> None:
     if keep_last <= 0:
         return
-    ckpts = sorted(out_dir.glob("ckpt_*.pt"))
+    ckpts = sorted(out_dir.glob("ckpt_[0-9][0-9][0-9][0-9][0-9][0-9][0-9].pt"))
     to_remove = ckpts[:-keep_last]
     for p in to_remove:
         try:

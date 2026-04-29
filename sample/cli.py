@@ -32,7 +32,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--n", type=int, default=8)
+    ap.add_argument("--n", type=_positive_int, default=8)
     ap.add_argument("--steps", type=_positive_int, default=30)
     ap.add_argument("--prompt", default="")
     ap.add_argument("--neg", default="", help="Deprecated; use --neg_prompt")
