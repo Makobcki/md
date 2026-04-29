@@ -36,7 +36,7 @@ class SDPATransformerBlock(nn.Module):
         v = v.view(b, t, self.n_heads, self.head_dim).transpose(1, 2)
 
         key_padding = ~attn_mask
-        sdpa_mask = key_padding.unsqueeze(1).unsqueeze(2)
+        sdpa_mask = attn_mask.unsqueeze(1).unsqueeze(2)
         attn_out = F.scaled_dot_product_attention(
             q,
             k,
