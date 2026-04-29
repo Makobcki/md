@@ -7,6 +7,7 @@ import torch
 from diffusion.diffusion import Diffusion
 from diffusion.model import UNet
 from .guided_v import _guided_v
+from .validation import validate_steps
 
 
 def _sigma_from_sqrt_a(sqrt_a: torch.Tensor) -> torch.Tensor:
@@ -35,6 +36,7 @@ def dpm_solver_sample(
     generator: Optional[torch.Generator] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> torch.Tensor:
+    steps = validate_steps(steps)
     device = diffusion.device
     b, _, _, _ = shape
 
@@ -89,5 +91,4 @@ def dpm_solver_sample(
     v_last = _guided_v(model, x, t_last, txt_ids, txt_mask, self_cond, cfg_scale, uncond_ids, uncond_mask)
     x0_last = sqrt_a_last * x - sigma_last * v_last
     return x0_last
-
 

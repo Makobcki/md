@@ -2,13 +2,17 @@ const DEFAULT_API_BASE =
   window.location.port === "5173" ? "http://127.0.0.1:8000" : window.location.origin;
 const API_BASE = (import.meta?.env?.VITE_API_BASE || DEFAULT_API_BASE).replace(/\/+$/, "");
 export const API_ORIGIN = new URL(API_BASE).origin;
+const AUTH_TOKEN = import.meta?.env?.VITE_AUTH_TOKEN || window.localStorage?.getItem("WEBUI_AUTH_TOKEN") || "";
 
 export async function fetchJson(path, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : {}),
+    ...(options.headers || {}),
+  };
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
-    },
     ...options,
+    headers,
   });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));

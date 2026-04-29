@@ -7,6 +7,7 @@ import torch
 from diffusion.diffusion import Diffusion
 from diffusion.model import UNet
 from .guided_v import _guided_v
+from .validation import validate_steps
 
 @torch.no_grad()
 def euler_sample(
@@ -24,6 +25,7 @@ def euler_sample(
     generator: Optional[torch.Generator] = None,
     progress_cb: Optional[Callable[[int, int], None]] = None,
 ) -> torch.Tensor:
+    steps = validate_steps(steps)
     device = diffusion.device
     b, _, _, _ = shape
     if noise is None:

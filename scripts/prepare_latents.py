@@ -203,7 +203,12 @@ class _ShardWriter:
         self.current_count = 0
         self.shard_id = start_shard_id
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        self.index_fp = self.index_path.open("a", encoding="utf-8")
+        self.tmp_index_path = self.index_path.with_suffix(self.index_path.suffix + ".tmp")
+        if self.index_path.exists():
+            self.tmp_index_path.write_text(self.index_path.read_text(encoding="utf-8"), encoding="utf-8")
+            self.index_fp = self.tmp_index_path.open("a", encoding="utf-8")
+        else:
+            self.index_fp = self.tmp_index_path.open("w", encoding="utf-8")
 
     def add(self, md5: str, latent: torch.Tensor) -> Optional[tuple[Path, list[str]]]:
         self.current_md5s.append(md5)
@@ -241,6 +246,7 @@ class _ShardWriter:
     def close(self) -> None:
         self.flush()
         self.index_fp.close()
+        self.tmp_index_path.replace(self.index_path)
 
 
 def main() -> None:
@@ -638,12 +644,16 @@ def _save_latent_cpu(
         "latent": z.to(dtype=dtype, device="cpu"),
         "meta": meta,
     }
-    torch.save(payload, out_path)
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    torch.save(payload, tmp_path)
+    tmp_path.replace(out_path)
 
 
 def _validate_latent_tensor(z: torch.Tensor, cfg: TrainConfig) -> None:
     if z.dim() != 3:
         raise RuntimeError(f"latent must be 3D, got {tuple(z.shape)}")
+    if not torch.isfinite(z).all():
+        raise RuntimeError("latent has NaN/Inf values")
     if z.shape[0] != int(cfg.latent_channels):
         raise RuntimeError(f"latent_channels mismatch: {z.shape[0]} != {cfg.latent_channels}")
     h = int(cfg.image_size) // int(cfg.latent_downsample_factor)

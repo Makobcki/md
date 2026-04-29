@@ -50,6 +50,8 @@ class TrainConfig:
     max_steps: int = 120_000
     log_every: int = 50
     save_every: int = 2_000
+    val_every: int = 500
+    val_batches: int = 8
 
     timesteps: int = 1_000
     beta_start: float = 1.0e-4
@@ -164,6 +166,10 @@ class TrainConfig:
             raise ValueError("decay_steps must be non-negative.")
         if self.batch_size <= 0 or self.grad_accum_steps <= 0:
             raise ValueError("batch_size and grad_accum_steps must be positive.")
+        if self.val_every < 0:
+            raise ValueError("val_every must be non-negative.")
+        if self.val_batches < 0:
+            raise ValueError("val_batches must be non-negative.")
         if self.amp_dtype not in {"fp16", "bf16"}:
             raise ValueError("amp_dtype must be 'fp16' or 'bf16'.")
         if self.tokenizer_type != "bpe":
@@ -196,8 +202,8 @@ class TrainConfig:
             raise ValueError("cosine_s must be positive.")
         if self.eval_every < 0:
             raise ValueError("eval_every must be non-negative.")
-        if self.eval_steps < 0:
-            raise ValueError("eval_steps must be non-negative.")
+        if self.eval_steps <= 0:
+            raise ValueError("eval_steps must be positive.")
         if self.eval_cfg < 0:
             raise ValueError("eval_cfg must be non-negative.")
         if self.eval_n <= 0:
