@@ -41,3 +41,20 @@ def test_cross_attention_sdpa_mask_uses_true_for_valid_tokens(monkeypatch: pytes
     layer(torch.randn(2, 4, 2, 2), torch.randn(2, 3, 8), expected)
 
     assert torch.equal(captured["attn_mask"], expected.unsqueeze(1).unsqueeze(1))
+
+
+def test_windowed_self_attention_preserves_shape() -> None:
+    from model.unet.attention import SelfAttention2d
+
+    layer = SelfAttention2d(
+        in_ch=4,
+        heads=2,
+        head_dim=2,
+        attention_type="windowed",
+        window_size=2,
+    )
+    x = torch.randn(2, 4, 5, 3)
+
+    out = layer(x)
+
+    assert out.shape == x.shape
