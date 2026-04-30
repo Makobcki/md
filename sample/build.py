@@ -85,16 +85,23 @@ def build_unet_config(
         num_res_blocks=int(cfg.get("num_res_blocks", 2)),
         dropout=float(cfg.get("dropout", 0.1)),
         attn_resolutions=tuple(cfg.get("attn_resolutions", [32, 16])),
+        cross_attn_resolutions=tuple(cfg.get("cross_attn_resolutions", [])),
         attn_heads=int(cfg.get("attn_heads", 4)),
         attn_head_dim=int(cfg.get("attn_head_dim", 32)),
+        self_attn_type=str(cfg.get("self_attn_type", "global")),
+        self_attn_window_size=int(cfg.get("self_attn_window_size", 8)),
+        cross_attn_dim=int(cfg.get("cross_attn_dim", 0)),
+        mid_blocks=int(cfg.get("mid_blocks", 1)),
         vocab_size=len(tokenizer.vocab) if tokenizer is not None else 0,
         text_dim=int(cfg.get("text_dim", 256)),
         text_layers=int(cfg.get("text_layers", 4)),
         text_heads=int(cfg.get("text_heads", 4)),
         text_max_len=int(cfg.get("text_max_len", 64)),
+        text_spatial_conditioning=bool(cfg.get("text_spatial_conditioning", False)),
         use_text_conditioning=use_text_conditioning,
         use_scale_shift_norm=bool(cfg.get("use_scale_shift_norm", False)),
         self_conditioning=self_conditioning,
+        zero_init_residual=bool(cfg.get("zero_init_residual", False)),
     )
 
 
