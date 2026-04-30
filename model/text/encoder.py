@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from .ff import GEGLUFeedForward
 from .norms import RMSNorm
@@ -53,10 +54,20 @@ class SDPATransformerBlock(nn.Module):
 
 
 class TextEncoder(nn.Module):
-    def __init__(self, vocab_size: int, dim: int, n_layers: int, n_heads: int, max_len: int):
+    def __init__(
+        self,
+        vocab_size: int,
+        dim: int,
+        n_layers: int,
+        n_heads: int,
+        max_len: int,
+        *,
+        checkpoint_blocks: bool = False,
+    ):
         super().__init__()
         self.dim = dim
         self.max_len = max_len
+        self.checkpoint_blocks = bool(checkpoint_blocks)
 
         self.tok = nn.Embedding(vocab_size, dim)
         self.pos = nn.Embedding(max_len, dim)
@@ -70,5 +81,8 @@ class TextEncoder(nn.Module):
         pos = torch.arange(0, t, device=ids.device).unsqueeze(0).expand(b, t)
         x = self.tok(ids) + self.pos(pos)
         for block in self.blocks:
-            x = block(x, attn_mask)
+            if self.checkpoint_blocks and self.training:
+                x = checkpoint(block, x, attn_mask, use_reentrant=False)
+            else:
+                x = block(x, attn_mask)
         return self.norm(x)
