@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from model.text.encoder import TextEncoder
 from model.text.utils import masked_mean
@@ -23,17 +24,27 @@ class UNetConfig:
     num_res_blocks: int = 2
     dropout: float = 0.1
     attn_resolutions: Tuple[int, ...] = (32, 16)
+    cross_attn_resolutions: Tuple[int, ...] = ()
     attn_heads: int = 4
     attn_head_dim: int = 32
+    self_attn_type: str = "global"
+    self_attn_window_size: int = 8
+    cross_attn_dim: int = 0
+    mid_blocks: int = 1
     vocab_size: int = 50_000
     text_dim: int = 256
     text_layers: int = 4
     text_heads: int = 4
     text_max_len: int = 64
+    text_spatial_conditioning: bool = False
     use_text_conditioning: bool = True
     self_conditioning: bool = False
     use_scale_shift_norm: bool = False
     grad_checkpointing: bool = False
+    checkpoint_resblocks: bool = False
+    checkpoint_attention: bool = False
+    checkpoint_text_encoder: bool = False
+    zero_init_residual: bool = False
 
 
 class UNet(nn.Module):
@@ -45,8 +56,11 @@ class UNet(nn.Module):
         self.cfg = cfg
         self.use_text_conditioning = bool(cfg.use_text_conditioning)
         self.self_conditioning = bool(cfg.self_conditioning)
+        self.cross_attn_dim = int(cfg.cross_attn_dim) if int(cfg.cross_attn_dim) > 0 else int(cfg.text_dim)
+        self.cross_attn_resolutions = tuple(cfg.cross_attn_resolutions) or tuple(cfg.attn_resolutions)
 
         time_dim = cfg.base_channels * 4
+        chs = [cfg.base_channels * m for m in cfg.channel_mults]
         self.time_mlp = nn.Sequential(
             nn.Linear(cfg.base_channels, time_dim),
             nn.SiLU(),
@@ -54,7 +68,9 @@ class UNet(nn.Module):
         )
 
         self.text_enc: Optional[TextEncoder] = None
+        self.text_ctx_proj: Optional[nn.Linear] = None
         self.text_pool_proj: Optional[nn.Linear] = None
+        self.text_spatial_proj: Optional[nn.Linear] = None
         if self.use_text_conditioning:
             self.text_enc = TextEncoder(
                 vocab_size=cfg.vocab_size,
@@ -62,10 +78,17 @@ class UNet(nn.Module):
                 n_layers=cfg.text_layers,
                 n_heads=cfg.text_heads,
                 max_len=cfg.text_max_len,
+                checkpoint_blocks=cfg.checkpoint_text_encoder or cfg.grad_checkpointing,
             )
+            if self.cross_attn_dim != cfg.text_dim:
+                self.text_ctx_proj = nn.Linear(cfg.text_dim, self.cross_attn_dim)
             self.text_pool_proj = nn.Linear(cfg.text_dim, time_dim)
+            if cfg.text_spatial_conditioning:
+                self.text_spatial_proj = nn.Linear(cfg.text_dim, chs[0])
+                nn.init.zeros_(self.text_spatial_proj.weight)
+                if self.text_spatial_proj.bias is not None:
+                    nn.init.zeros_(self.text_spatial_proj.bias)
 
-        chs = [cfg.base_channels * m for m in cfg.channel_mults]
         in_channels = cfg.image_channels * 2 if self.self_conditioning else cfg.image_channels
         self.in_conv = nn.Conv2d(in_channels, chs[0], kernel_size=3, padding=1)
 
@@ -79,26 +102,112 @@ class UNet(nn.Module):
         for level, ch in enumerate(chs):
             for _ in range(cfg.num_res_blocks):
                 self.down_blocks.append(
-                    ResBlock(cur, ch, time_dim=time_dim, dropout=cfg.dropout, use_scale_shift=cfg.use_scale_shift_norm)
+                    ResBlock(
+                        cur,
+                        ch,
+                        time_dim=time_dim,
+                        dropout=cfg.dropout,
+                        use_scale_shift=cfg.use_scale_shift_norm,
+                        zero_init=cfg.zero_init_residual,
+                    )
                 )
                 cur = ch
-                self.down_sa.append(SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim))
+                self.down_sa.append(
+                    SelfAttention2d(
+                        cur,
+                        cfg.attn_heads,
+                        cfg.attn_head_dim,
+                        attention_type=cfg.self_attn_type,
+                        window_size=cfg.self_attn_window_size,
+                        zero_init=cfg.zero_init_residual,
+                    )
+                )
                 if self.use_text_conditioning:
-                    self.down_ca.append(CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim))
+                    self.down_ca.append(
+                        CrossAttention2d(
+                            cur,
+                            self.cross_attn_dim,
+                            cfg.attn_heads,
+                            cfg.attn_head_dim,
+                            zero_init=cfg.zero_init_residual,
+                        )
+                    )
                 else:
                     self.down_ca.append(NoOpCrossAttention())
             if level != len(chs) - 1:
                 self.downsamples.append(Downsample(cur))
 
         # Mid
-        self.mid1 = ResBlock(cur, cur, time_dim=time_dim, dropout=cfg.dropout, use_scale_shift=cfg.use_scale_shift_norm)
-        self.mid_sa = SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim)
+        self.mid1 = ResBlock(
+            cur,
+            cur,
+            time_dim=time_dim,
+            dropout=cfg.dropout,
+            use_scale_shift=cfg.use_scale_shift_norm,
+            zero_init=cfg.zero_init_residual,
+        )
+        self.mid_sa = SelfAttention2d(
+            cur,
+            cfg.attn_heads,
+            cfg.attn_head_dim,
+            attention_type=cfg.self_attn_type,
+            window_size=cfg.self_attn_window_size,
+            zero_init=cfg.zero_init_residual,
+        )
         self.mid_ca = (
-            CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim)
+            CrossAttention2d(
+                cur,
+                self.cross_attn_dim,
+                cfg.attn_heads,
+                cfg.attn_head_dim,
+                zero_init=cfg.zero_init_residual,
+            )
             if self.use_text_conditioning
             else NoOpCrossAttention()
         )
-        self.mid2 = ResBlock(cur, cur, time_dim=time_dim, dropout=cfg.dropout, use_scale_shift=cfg.use_scale_shift_norm)
+        self.mid2 = ResBlock(
+            cur,
+            cur,
+            time_dim=time_dim,
+            dropout=cfg.dropout,
+            use_scale_shift=cfg.use_scale_shift_norm,
+            zero_init=cfg.zero_init_residual,
+        )
+        self.extra_mid_blocks = nn.ModuleList()
+        self.extra_mid_sa = nn.ModuleList()
+        self.extra_mid_ca = nn.ModuleList()
+        for _ in range(max(int(cfg.mid_blocks) - 1, 0)):
+            self.extra_mid_blocks.append(
+                ResBlock(
+                    cur,
+                    cur,
+                    time_dim=time_dim,
+                    dropout=cfg.dropout,
+                    use_scale_shift=cfg.use_scale_shift_norm,
+                    zero_init=cfg.zero_init_residual,
+                )
+            )
+            self.extra_mid_sa.append(
+                SelfAttention2d(
+                    cur,
+                    cfg.attn_heads,
+                    cfg.attn_head_dim,
+                    attention_type=cfg.self_attn_type,
+                    window_size=cfg.self_attn_window_size,
+                    zero_init=cfg.zero_init_residual,
+                )
+            )
+            self.extra_mid_ca.append(
+                CrossAttention2d(
+                    cur,
+                    self.cross_attn_dim,
+                    cfg.attn_heads,
+                    cfg.attn_head_dim,
+                    zero_init=cfg.zero_init_residual,
+                )
+                if self.use_text_conditioning
+                else NoOpCrossAttention()
+            )
 
         # Up
         self.up_blocks = nn.ModuleList()
@@ -110,12 +219,36 @@ class UNet(nn.Module):
             ch = chs[level]
             for _ in range(cfg.num_res_blocks):
                 self.up_blocks.append(
-                    ResBlock(cur + ch, ch, time_dim=time_dim, dropout=cfg.dropout, use_scale_shift=cfg.use_scale_shift_norm)
+                    ResBlock(
+                        cur + ch,
+                        ch,
+                        time_dim=time_dim,
+                        dropout=cfg.dropout,
+                        use_scale_shift=cfg.use_scale_shift_norm,
+                        zero_init=cfg.zero_init_residual,
+                    )
                 )
                 cur = ch
-                self.up_sa.append(SelfAttention2d(cur, cfg.attn_heads, cfg.attn_head_dim))
+                self.up_sa.append(
+                    SelfAttention2d(
+                        cur,
+                        cfg.attn_heads,
+                        cfg.attn_head_dim,
+                        attention_type=cfg.self_attn_type,
+                        window_size=cfg.self_attn_window_size,
+                        zero_init=cfg.zero_init_residual,
+                    )
+                )
                 if self.use_text_conditioning:
-                    self.up_ca.append(CrossAttention2d(cur, cfg.text_dim, cfg.attn_heads, cfg.attn_head_dim))
+                    self.up_ca.append(
+                        CrossAttention2d(
+                            cur,
+                            self.cross_attn_dim,
+                            cfg.attn_heads,
+                            cfg.attn_head_dim,
+                            zero_init=cfg.zero_init_residual,
+                        )
+                    )
                 else:
                     self.up_ca.append(NoOpCrossAttention())
             if level != 0:
@@ -136,13 +269,20 @@ class UNet(nn.Module):
         h, w = x.shape[-2], x.shape[-1]
         if (h in self.cfg.attn_resolutions) or (w in self.cfg.attn_resolutions):
             x = sa(x)
+        if (h in self.cross_attn_resolutions) or (w in self.cross_attn_resolutions):
             x = ca(x, ctx, ctx_mask)
         return x
 
-    def _checkpointed(self, fn, *args):
-        if self.cfg.grad_checkpointing and self.training:
-            return torch.utils.checkpoint.checkpoint(fn, *args, use_reentrant=False)
+    def _checkpointed(self, enabled: bool, fn, *args):
+        if enabled and self.training:
+            return checkpoint(fn, *args, use_reentrant=False)
         return fn(*args)
+
+    def _checkpoint_resblocks(self) -> bool:
+        return bool(self.cfg.grad_checkpointing or self.cfg.checkpoint_resblocks)
+
+    def _checkpoint_attention(self) -> bool:
+        return bool(self.cfg.grad_checkpointing or self.cfg.checkpoint_attention)
 
     def forward(
         self,
@@ -174,26 +314,42 @@ class UNet(nn.Module):
                 raise RuntimeError("Text pooling projection is not initialized.")
             pooled = masked_mean(ctx, ctx_mask)
             te = te + self.text_pool_proj(pooled)
+            if self.text_ctx_proj is not None:
+                ctx = self.text_ctx_proj(ctx)
 
         h = self.in_conv(x)
+        if self.use_text_conditioning and self.text_spatial_proj is not None:
+            h = h + self.text_spatial_proj(pooled).unsqueeze(-1).unsqueeze(-1)
         skips = []
 
         bi = 0
         dsi = 0
         for level in range(len(self.cfg.channel_mults)):
             for _ in range(self.cfg.num_res_blocks):
-                h = self._checkpointed(self.down_blocks[bi], h, te)
-                h = self._checkpointed(self._maybe_attend, h, self.down_sa[bi], self.down_ca[bi], ctx, ctx_mask)
+                h = self._checkpointed(self._checkpoint_resblocks(), self.down_blocks[bi], h, te)
+                h = self._checkpointed(
+                    self._checkpoint_attention(),
+                    self._maybe_attend,
+                    h,
+                    self.down_sa[bi],
+                    self.down_ca[bi],
+                    ctx,
+                    ctx_mask,
+                )
                 skips.append(h)
                 bi += 1
             if level != len(self.cfg.channel_mults) - 1:
-                h = self._checkpointed(self.downsamples[dsi], h)
+                h = self._checkpointed(bool(self.cfg.grad_checkpointing), self.downsamples[dsi], h)
                 dsi += 1
 
-        h = self._checkpointed(self.mid1, h, te)
-        h = self._checkpointed(self.mid_sa, h)
-        h = self._checkpointed(self.mid_ca, h, ctx, ctx_mask)
-        h = self._checkpointed(self.mid2, h, te)
+        h = self._checkpointed(self._checkpoint_resblocks(), self.mid1, h, te)
+        h = self._checkpointed(self._checkpoint_attention(), self.mid_sa, h)
+        h = self._checkpointed(self._checkpoint_attention(), self.mid_ca, h, ctx, ctx_mask)
+        h = self._checkpointed(self._checkpoint_resblocks(), self.mid2, h, te)
+        for mid_block, mid_sa, mid_ca in zip(self.extra_mid_blocks, self.extra_mid_sa, self.extra_mid_ca):
+            h = self._checkpointed(self._checkpoint_resblocks(), mid_block, h, te)
+            h = self._checkpointed(self._checkpoint_attention(), mid_sa, h)
+            h = self._checkpointed(self._checkpoint_attention(), mid_ca, h, ctx, ctx_mask)
 
         ui = 0
         usi = 0
@@ -203,11 +359,19 @@ class UNet(nn.Module):
                 if skip.shape[-2:] != h.shape[-2:]:
                     skip = F.interpolate(skip, size=h.shape[-2:], mode="nearest")
                 h = torch.cat([h, skip], dim=1)
-                h = self._checkpointed(self.up_blocks[ui], h, te)
-                h = self._checkpointed(self._maybe_attend, h, self.up_sa[ui], self.up_ca[ui], ctx, ctx_mask)
+                h = self._checkpointed(self._checkpoint_resblocks(), self.up_blocks[ui], h, te)
+                h = self._checkpointed(
+                    self._checkpoint_attention(),
+                    self._maybe_attend,
+                    h,
+                    self.up_sa[ui],
+                    self.up_ca[ui],
+                    ctx,
+                    ctx_mask,
+                )
                 ui += 1
             if level != 0:
-                h = self._checkpointed(self.upsamples[usi], h)
+                h = self._checkpointed(bool(self.cfg.grad_checkpointing), self.upsamples[usi], h)
                 usi += 1
 
         h = self.out_conv(self.act(self.out_norm(h)))
