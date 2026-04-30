@@ -18,3 +18,16 @@ def test_train_yaml_defaults_disable_compile_and_nonfinite_grad_fail() -> None:
 
     assert cfg.compile is False
     assert cfg.fail_on_nonfinite_grad is False
+
+
+def test_train_config_accepts_legacy_model_fields() -> None:
+    cfg = TrainConfig.from_dict({
+        "base_channels": 16,
+        "channel_mults": [1],
+        "attn_resolutions": [8],
+    })
+
+    assert cfg.self_attn_type == "global"
+    assert cfg.cross_attn_resolutions == ()
+    assert cfg.mid_blocks == 1
+    assert cfg.checkpoint_attention is False
