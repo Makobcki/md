@@ -64,15 +64,25 @@ class TrainConfig:
     num_res_blocks: int = 2
     dropout: float = 0.10
     attn_resolutions: Tuple[int, ...] = (32, 16)
+    cross_attn_resolutions: Tuple[int, ...] = ()
     attn_heads: int = 4
     attn_head_dim: int = 32
+    self_attn_type: str = "global"
+    self_attn_window_size: int = 8
+    cross_attn_dim: int = 0
+    mid_blocks: int = 1
     text_dim: int = 256
     text_layers: int = 4
     text_heads: int = 4
     text_max_len: int = 128
+    text_spatial_conditioning: bool = False
     use_text_conditioning: bool = True
     use_scale_shift_norm: bool = True
     grad_checkpointing: bool = False
+    checkpoint_resblocks: bool = False
+    checkpoint_attention: bool = False
+    checkpoint_text_encoder: bool = False
+    zero_init_residual: bool = False
 
     text_vocab_path: str = "diffusion/bpe/vocab.json"
     text_merges_path: str = "diffusion/bpe/merges.txt"
@@ -177,6 +187,14 @@ class TrainConfig:
             raise ValueError("tokenizer_type must be 'bpe'.")
         if self.lr_scheduler not in {"cosine", "linear"}:
             raise ValueError("lr_scheduler must be 'cosine' or 'linear'.")
+        if self.self_attn_type not in {"global", "windowed"}:
+            raise ValueError("self_attn_type must be 'global' or 'windowed'.")
+        if self.self_attn_window_size <= 0:
+            raise ValueError("self_attn_window_size must be positive.")
+        if self.cross_attn_dim < 0:
+            raise ValueError("cross_attn_dim must be non-negative.")
+        if self.mid_blocks <= 0:
+            raise ValueError("mid_blocks must be positive.")
         if self.mode not in {"pixel", "latent"}:
             raise ValueError("mode must be 'pixel' or 'latent'.")
         if self.latent_channels <= 0:
@@ -241,6 +259,8 @@ class TrainConfig:
             kwargs["channel_mults"] = _as_tuple(kwargs["channel_mults"])
         if "attn_resolutions" in kwargs:
             kwargs["attn_resolutions"] = _as_tuple(kwargs["attn_resolutions"])
+        if "cross_attn_resolutions" in kwargs:
+            kwargs["cross_attn_resolutions"] = _as_tuple(kwargs["cross_attn_resolutions"])
         cfg = cls(**kwargs)
         return replace(cfg, extra=extra)
 
@@ -273,14 +293,24 @@ class TrainConfig:
             num_res_blocks=self.num_res_blocks,
             dropout=self.dropout,
             attn_resolutions=self.attn_resolutions,
+            cross_attn_resolutions=self.cross_attn_resolutions,
             attn_heads=self.attn_heads,
             attn_head_dim=self.attn_head_dim,
+            self_attn_type=self.self_attn_type,
+            self_attn_window_size=self.self_attn_window_size,
+            cross_attn_dim=self.cross_attn_dim,
+            mid_blocks=self.mid_blocks,
             text_dim=self.text_dim,
             text_layers=self.text_layers,
             text_heads=self.text_heads,
             text_max_len=self.text_max_len,
+            text_spatial_conditioning=self.text_spatial_conditioning,
             use_scale_shift_norm=self.use_scale_shift_norm,
             grad_checkpointing=self.grad_checkpointing,
+            checkpoint_resblocks=self.checkpoint_resblocks,
+            checkpoint_attention=self.checkpoint_attention,
+            checkpoint_text_encoder=self.checkpoint_text_encoder,
+            zero_init_residual=self.zero_init_residual,
             use_text_conditioning=self.use_text_conditioning,
             self_conditioning=self.self_conditioning,
         )
