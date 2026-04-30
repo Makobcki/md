@@ -317,6 +317,20 @@ def run_training_loop(
             ),
             "step": start_step,
         })
+        model_meta = run_meta.get("model")
+        if isinstance(model_meta, dict):
+            event_bus.emit({
+                "type": "log",
+                "message": (
+                    "model: "
+                    f"params={int(model_meta.get('total_params', 0)):,}, "
+                    f"unet={int(model_meta.get('unet_params', 0)):,}, "
+                    f"text={int(model_meta.get('text_encoder_params', 0)):,}, "
+                    f"latent_res={model_meta.get('latent_resolution')}, "
+                    f"attn={model_meta.get('self_attn_type')}"
+                ),
+                "step": start_step,
+            })
         event_bus.emit({
             "type": "status",
             "status": "start",

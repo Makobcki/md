@@ -73,6 +73,18 @@ def _atomic_write_yaml(path: Path, payload: dict) -> None:
             tmp_path.unlink()
 
 
+def _count_params(module: torch.nn.Module) -> int:
+    return sum(p.numel() for p in module.parameters())
+
+
+def _attention_token_counts(cfg: TrainConfig) -> dict[str, int]:
+    side = int(cfg.image_size)
+    if str(cfg.mode) == "latent":
+        side = side // int(cfg.latent_downsample_factor)
+    resolutions = sorted(set(int(r) for r in cfg.attn_resolutions), reverse=True)
+    return {str(r): r * r for r in resolutions if r > 0 and r <= side}
+
+
 def _validate_resume_compatibility(cfg: TrainConfig, model_cfg: TrainConfig) -> None:
     fields = (
         "mode",
@@ -191,6 +203,10 @@ def run(cfg: TrainConfig) -> None:
         "compile_warmup_steps": cfg.compile_warmup_steps,
         "compile_cudagraphs": cfg.compile_cudagraphs,
         "grad_clip_norm": cfg.grad_clip_norm,
+        "grad_checkpointing": cfg.grad_checkpointing,
+        "checkpoint_resblocks": cfg.checkpoint_resblocks,
+        "checkpoint_attention": cfg.checkpoint_attention,
+        "checkpoint_text_encoder": cfg.checkpoint_text_encoder,
         "fail_on_nonfinite_grad": cfg.fail_on_nonfinite_grad,
         "ema_decay": cfg.ema_decay,
         "ema_decay_fast": cfg.ema_decay_fast,
@@ -473,20 +489,48 @@ def run(cfg: TrainConfig) -> None:
         num_res_blocks=int(model_cfg.num_res_blocks),
         dropout=float(model_cfg.dropout),
         attn_resolutions=tuple(model_cfg.attn_resolutions),
+        cross_attn_resolutions=tuple(model_cfg.cross_attn_resolutions),
         attn_heads=int(model_cfg.attn_heads),
         attn_head_dim=int(model_cfg.attn_head_dim),
+        self_attn_type=str(model_cfg.self_attn_type),
+        self_attn_window_size=int(model_cfg.self_attn_window_size),
+        cross_attn_dim=int(model_cfg.cross_attn_dim),
+        mid_blocks=int(model_cfg.mid_blocks),
         vocab_size=len(tokenizer.vocab) if tokenizer is not None else 0,
         text_dim=int(model_cfg.text_dim),
         text_layers=int(model_cfg.text_layers),
         text_heads=int(model_cfg.text_heads),
         text_max_len=int(model_cfg.text_max_len),
+        text_spatial_conditioning=bool(model_cfg.text_spatial_conditioning),
         use_text_conditioning=use_text_conditioning,
         self_conditioning=self_conditioning,
         use_scale_shift_norm=bool(model_cfg.use_scale_shift_norm),
         grad_checkpointing=bool(cfg.grad_checkpointing),
+        checkpoint_resblocks=bool(cfg.checkpoint_resblocks),
+        checkpoint_attention=bool(cfg.checkpoint_attention),
+        checkpoint_text_encoder=bool(cfg.checkpoint_text_encoder),
+        zero_init_residual=bool(model_cfg.zero_init_residual),
     )
 
     model = UNet(unet_cfg).to(device)
+    text_params = _count_params(model.text_enc) if model.text_enc is not None else 0
+    total_params = _count_params(model)
+    run_meta["model"] = {
+        "total_params": int(total_params),
+        "unet_params": int(total_params - text_params),
+        "text_encoder_params": int(text_params),
+        "latent_resolution": (
+            int(cfg.image_size) // int(cfg.latent_downsample_factor)
+            if mode == "latent"
+            else int(cfg.image_size)
+        ),
+        "attention_token_counts": _attention_token_counts(model_cfg),
+        "self_attn_type": str(model_cfg.self_attn_type),
+        "self_attn_window_size": int(model_cfg.self_attn_window_size),
+        "cross_attn_dim": int(unet_cfg.cross_attn_dim) if int(unet_cfg.cross_attn_dim) > 0 else int(unet_cfg.text_dim),
+        "mid_blocks": int(model_cfg.mid_blocks),
+    }
+    _atomic_write_yaml(out_dir / "run_meta.yaml", run_meta)
     if bool(cfg.channels_last):
         model = model.to(memory_format=torch.channels_last)
 
