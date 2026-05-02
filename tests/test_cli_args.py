@@ -28,9 +28,13 @@ def test_train_config_accepts_legacy_model_fields() -> None:
     })
 
     assert cfg.self_attn_type == "global"
+    assert cfg.attention_placement == "all"
     assert cfg.cross_attn_resolutions == ()
     assert cfg.mid_blocks == 1
     assert cfg.checkpoint_attention is False
+    assert cfg.checkpoint_downsample is False
+    assert cfg.optimizer == "adamw"
+    assert cfg.self_cond_interval == 1
 
 
 def test_train_config_accepts_image_only_alias() -> None:
