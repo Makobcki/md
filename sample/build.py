@@ -12,6 +12,8 @@ from text_enc import BPETokenizer
 from text_enc.build import build_tokenizer_from_dict
 from diffusion.utils import EMA, load_ckpt
 from diffusion.vae import VAEWrapper
+from model.mmdit import MMDiTConfig, MMDiTFlowModel
+from model.text.pretrained import FrozenTextEncoderBundle
 
 
 @dataclass(frozen=True)
@@ -20,9 +22,10 @@ class Built:
     cfg: Dict[str, Any]
     use_text_conditioning: bool
     self_conditioning: bool
-    diffusion: Diffusion
-    model: UNet
+    diffusion: Optional[Diffusion]
+    model: torch.nn.Module
     tokenizer: Optional[BPETokenizer]
+    text_encoder: Optional[FrozenTextEncoderBundle]
     mode: str
     image_channels: int
     h: int
@@ -128,7 +131,8 @@ def build_model(
 
 
 def build_vae_if_needed(cfg: Dict[str, Any], device: torch.device) -> VAEWrapper:
-    vae_pretrained = str(cfg.get("vae_pretrained", ""))
+    vae_section = cfg.get("vae", {}) if isinstance(cfg.get("vae", {}), dict) else {}
+    vae_pretrained = str(cfg.get("vae_pretrained", vae_section.get("pretrained", "")))
     if not vae_pretrained:
         raise RuntimeError("latent mode requires vae_pretrained in checkpoint config.")
 
@@ -138,7 +142,7 @@ def build_vae_if_needed(cfg: Dict[str, Any], device: torch.device) -> VAEWrapper
     return VAEWrapper(
         pretrained=vae_pretrained,
         freeze=True,
-        scaling_factor=float(cfg.get("vae_scaling_factor", 0.18215)),
+        scaling_factor=float(cfg.get("vae_scaling_factor", vae_section.get("scaling_factor", 0.18215))),
         device=device,
         dtype=dtype,
     )
@@ -159,6 +163,40 @@ def resolve_shapes(cfg: Dict[str, Any], mode: str) -> Tuple[int, int, Optional[i
 
 def build_all(ckpt_path: str, device: torch.device) -> Built:
     ck, cfg = load_checkpoint_and_cfg(ckpt_path, device)
+    architecture = str(ck.get("architecture", cfg.get("architecture", "unet_v1")))
+    if architecture == "mmdit_rf":
+        mode = str(cfg.get("mode", "latent"))
+        if mode != "latent":
+            raise RuntimeError("architecture=mmdit_rf requires latent mode.")
+        mmdit_cfg = MMDiTConfig.from_dict(cfg)
+        model = MMDiTFlowModel(mmdit_cfg).to(device)
+        model.load_state_dict(ck["model"], strict=True)
+        if "ema" in ck and isinstance(ck["ema"], dict):
+            ema = EMA(model)
+            ema.shadow = {k: v.to(device) for k, v in ck["ema"].items()}
+            ema.copy_to(model)
+        model.eval()
+        h, w, latent_h, latent_w = resolve_shapes(cfg, mode)
+        vae = build_vae_if_needed(cfg, device)
+        text_encoder = FrozenTextEncoderBundle(cfg, device=device, dtype=torch.bfloat16 if str(cfg.get("amp_dtype", "bf16")) == "bf16" else torch.float16)
+        return Built(
+            ckpt=ck,
+            cfg=cfg,
+            use_text_conditioning=True,
+            self_conditioning=False,
+            diffusion=None,
+            model=model,
+            tokenizer=None,
+            text_encoder=text_encoder,
+            mode=mode,
+            image_channels=int(cfg.get("latent_channels", 4)),
+            h=h,
+            w=w,
+            latent_h=latent_h,
+            latent_w=latent_w,
+            vae=vae,
+        )
+
     use_text_conditioning, self_conditioning = resolve_flags(ck, cfg)
 
     diffusion = build_diffusion(cfg, device)
@@ -195,6 +233,7 @@ def build_all(ckpt_path: str, device: torch.device) -> Built:
         diffusion=diffusion,
         model=model,
         tokenizer=tokenizer,
+        text_encoder=None,
         mode=mode,
         image_channels=image_channels,
         h=h,

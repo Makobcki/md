@@ -1,0 +1,100 @@
+architecture: mmdit_rf
+mode: latent
+image_size: 512
+latent_channels: 4
+latent_downsample_factor: 8
+latent_patch_size: 2
+
+objective: rectified_flow
+prediction_type: flow_velocity
+
+model:
+  hidden_dim: 1024
+  depth: 24
+  num_heads: 16
+  mlp_ratio: 4.0
+  qk_norm: true
+  rms_norm: true
+  swiglu: true
+  adaln_zero: true
+  pos_embed: rope_2d
+  double_stream_blocks: 16
+  single_stream_blocks: 8
+  dropout: 0.0
+  attn_dropout: 0.0
+  gradient_checkpointing: true
+
+text:
+  enabled: true
+  encoders:
+    - name: clip_l
+      model_name: openai/clip-vit-large-patch14
+      max_length: 77
+      trainable: false
+      cache: true
+    - name: t5
+      model_name: google/t5-v1_1-base
+      max_length: 256
+      trainable: false
+      cache: true
+  text_dim: 1024
+  pooled_dim: 1024
+  empty_prompt_cache: true
+
+conditioning:
+  cfg_drop_prob: 0.15
+  token_drop_prob: 0.0
+  caption_drop_prob: 0.0
+  tag_drop_prob: 0.0
+
+img2img:
+  enabled: true
+  condition_mode: token_stream
+  allow_inpainting: true
+  mask_conditioning: true
+
+training:
+  batch_size: 2
+  grad_accum_steps: 32
+  lr: 1.0e-4
+  weight_decay: 0.01
+  optimizer: adamw
+  warmup_steps: 3000
+  max_steps: 300000
+  ema_decay: 0.9999
+  grad_clip_norm: 1.0
+  amp: true
+  amp_dtype: bf16
+  tf32: true
+  compile: false
+
+flow:
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  loss_weighting: none
+  train_t_min: 0.0
+  train_t_max: 1.0
+
+sampling:
+  sampler: flow_heun
+  steps: 28
+  cfg_scale: 4.5
+  shift: 3.0
+
+vae:
+  pretrained: ./vae_sd_mse
+  freeze: true
+  scaling_factor: 0.18215
+
+cache:
+  latent_cache: true
+  text_cache: true
+  sharded: true
+  dtype: bf16
+
+dataset_tasks:
+  txt2img: 1.0
+  img2img: 0.0
+  inpaint: 0.0
+

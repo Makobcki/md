@@ -24,6 +24,7 @@ from data_loader import (
     collate_with_tokenizer,
 )
 from diffusion.core.diffusion import Diffusion, DiffusionConfig
+from diffusion.objectives import RectifiedFlowObjective
 from diffusion.domains.latent import LatentDomain
 from diffusion.domains.pixel import PixelDomain
 from diffusion.perf import PerfConfig, build_model_cost_profile, configure_performance
@@ -31,6 +32,9 @@ from diffusion.perf.triton_compat import patch_triton_cuda_python_include_order
 from diffusion.utils import EMA, build_run_metadata, seed_everything
 from diffusion.vae import VAEWrapper
 from model.unet.unet import UNet, UNetConfig
+from model.mmdit import MMDiTConfig, MMDiTFlowModel
+from model.text.cache import TextCache
+from model.text.conditioning import TextConditioning, TrainBatch
 from text_enc import BPETokenizer
 from text_enc.build import build_tokenizer
 from text_enc.tokenizer import TextConfig
@@ -43,6 +47,7 @@ from train.checkpoint import (
 from train.curriculum import _build_curriculum_weights
 from train.eval import _resolve_eval_prompts
 from train.loop import run_training_loop
+from train.loop_mmdit import run_minimal_mmdit_loop
 from train.sanity import _sanity_overfit
 
 
@@ -112,6 +117,189 @@ def _build_optimizer(cfg: TrainConfig, model: torch.nn.Module, device: torch.dev
             weight_decay=float(cfg.weight_decay),
         )
     raise RuntimeError(f"Unsupported optimizer: {name}")
+
+
+class _MMDiTCachedDataset(torch.utils.data.Dataset):
+    def __init__(self, latent_ds: ImageTextDataset, text_cache: TextCache) -> None:
+        self.latent_ds = latent_ds
+        self.text_cache = text_cache
+        self.entries = latent_ds.entries
+
+    def __len__(self) -> int:
+        return len(self.latent_ds)
+
+    def __getitem__(self, idx: int) -> TrainBatch:
+        raw = self.latent_ds[idx]
+        x0 = raw[0] if isinstance(raw, tuple) else raw
+        key = str(self.entries[idx].get("md5", idx))
+        return TrainBatch(x0=x0, text=self.text_cache.load(key), task="txt2img", metadata={"key": key})
+
+
+def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
+    return TrainBatch(
+        x0=torch.stack([item.x0 for item in batch], dim=0),
+        text=TextConditioning(
+            tokens=torch.stack([item.text.tokens for item in batch], dim=0)
+            if batch[0].text.tokens.dim() == 2
+            else torch.cat([item.text.tokens for item in batch], dim=0),
+            mask=torch.stack([item.text.mask for item in batch], dim=0)
+            if batch[0].text.mask.dim() == 1
+            else torch.cat([item.text.mask for item in batch], dim=0),
+            pooled=torch.stack([item.text.pooled for item in batch], dim=0)
+            if batch[0].text.pooled.dim() == 1
+            else torch.cat([item.text.pooled for item in batch], dim=0),
+            is_uncond=None,
+        ),
+        task="txt2img",
+        metadata={"keys": [item.metadata.get("key") if item.metadata else None for item in batch]},
+    )
+
+
+def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) -> None:
+    if str(cfg.mode) != "latent":
+        raise RuntimeError("architecture=mmdit_rf requires mode=latent.")
+    if not bool(cfg.latent_cache):
+        raise RuntimeError("architecture=mmdit_rf requires latent_cache=true.")
+    if not bool(cfg.text_cache):
+        raise RuntimeError("architecture=mmdit_rf requires text_cache=true; run scripts/prepare_text_cache.py.")
+
+    out_dir = Path(cfg.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    seed_everything(int(cfg.seed), deterministic=bool(cfg.deterministic))
+    cfg_dict = cfg.to_dict()
+    _atomic_write_yaml(out_dir / "config_snapshot.yaml", cfg_dict)
+    run_meta = build_run_metadata(perf_active)
+    run_meta["architecture"] = "mmdit_rf"
+    _atomic_write_yaml(out_dir / "run_meta.yaml", run_meta)
+    _ensure_latent_cache_ready(cfg, out_dir)
+
+    dcfg = DataConfig(
+        root=str(cfg.data_root),
+        image_dir=str(cfg.image_dir),
+        meta_dir=str(cfg.meta_dir),
+        tags_dir=str(cfg.tags_dir),
+        caption_field=str(cfg.caption_field),
+        images_only=False,
+        use_text_conditioning=True,
+        min_tag_count=int(cfg.min_tag_count),
+        require_512=bool(cfg.require_512),
+        val_ratio=float(cfg.val_ratio),
+        seed=int(cfg.seed),
+        cache_dir=str(cfg.cache_dir),
+        failed_list=str(cfg.failed_list),
+    )
+    train_entries, _val_entries = build_or_load_index(dcfg)
+    latent_dtype = torch.bfloat16 if cfg.latent_dtype == "bf16" else torch.float16
+    latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
+    latent_expected_meta = LatentCacheMetadata(
+        vae_pretrained=str(cfg.vae_pretrained),
+        scaling_factor=float(cfg.vae_scaling_factor),
+        latent_shape=(int(cfg.latent_channels), latent_side, latent_side),
+        dtype=str(cfg.latent_dtype),
+    )
+    latent_ds = ImageTextDataset(
+        entries=train_entries,
+        tokenizer=None,
+        cond_drop_prob=1.0,
+        seed=int(cfg.seed),
+        latent_cache_dir=str(Path(cfg.data_root) / cfg.latent_cache_dir),
+        latent_cache_sharded=bool(cfg.latent_cache_sharded),
+        latent_cache_index_path=str(cfg.latent_cache_index),
+        latent_dtype=latent_dtype,
+        return_latents=True,
+        latent_cache_strict=bool(cfg.latent_cache_strict),
+        latent_cache_fallback=False,
+        latent_expected_meta=latent_expected_meta,
+        include_is_latent=False,
+        latent_missing_log_path=out_dir / "latent_missing.txt",
+        latent_shard_cache_size=int(cfg.latent_shard_cache_size),
+    )
+    if len(latent_ds) == 0:
+        raise RuntimeError("latent cache is empty; run scripts/prepare_latents.py first.")
+    text_cache = TextCache(Path(cfg.data_root) / str(cfg.text_cache_dir))
+    ds = _MMDiTCachedDataset(latent_ds, text_cache)
+    dl = DataLoader(
+        ds,
+        batch_size=int(cfg.batch_size),
+        shuffle=True,
+        num_workers=_resolve_num_workers(int(cfg.num_workers)),
+        pin_memory=bool(cfg.pin_memory),
+        drop_last=True,
+        persistent_workers=bool(cfg.persistent_workers) and int(cfg.num_workers) != 0,
+        prefetch_factor=int(cfg.prefetch_factor) if int(cfg.num_workers) != 0 else None,
+        collate_fn=_collate_mmdit,
+    )
+
+    mmdit_cfg = MMDiTConfig(
+        latent_channels=int(cfg.latent_channels),
+        patch_size=int(cfg.latent_patch_size),
+        hidden_dim=int(cfg.hidden_dim),
+        depth=int(cfg.depth),
+        num_heads=int(cfg.num_heads),
+        mlp_ratio=float(cfg.mlp_ratio),
+        qk_norm=bool(cfg.qk_norm),
+        rms_norm=bool(cfg.rms_norm),
+        swiglu=bool(cfg.swiglu),
+        adaln_zero=bool(cfg.adaln_zero),
+        pos_embed=str(cfg.pos_embed),
+        double_stream_blocks=int(cfg.double_stream_blocks),
+        single_stream_blocks=int(cfg.single_stream_blocks),
+        dropout=float(cfg.dropout),
+        attn_dropout=float(cfg.attn_dropout),
+        gradient_checkpointing=bool(cfg.grad_checkpointing),
+        text_dim=int(cfg.text_dim),
+        pooled_dim=int(cfg.pooled_dim),
+    )
+    model = MMDiTFlowModel(mmdit_cfg).to(device)
+    opt = _build_optimizer(cfg, model, device)
+    ema = EMA(model, decay=float(cfg.ema_decay))
+    objective = RectifiedFlowObjective(
+        timestep_sampling=str(cfg.flow_timestep_sampling),
+        logit_mean=float(cfg.flow_logit_mean),
+        logit_std=float(cfg.flow_logit_std),
+        train_t_min=float(cfg.flow_train_t_min),
+        train_t_max=float(cfg.flow_train_t_max),
+        loss_weighting=str(cfg.flow_loss_weighting),
+    )
+    empty_text = text_cache.load_empty()
+    if empty_text.tokens.dim() == 2:
+        empty_text = TextConditioning(
+            tokens=empty_text.tokens.to(device).expand(int(cfg.batch_size), -1, -1).clone(),
+            mask=empty_text.mask.to(device).expand(int(cfg.batch_size), -1).clone(),
+            pooled=empty_text.pooled.to(device).expand(int(cfg.batch_size), -1).clone(),
+            is_uncond=torch.ones(int(cfg.batch_size), device=device, dtype=torch.bool),
+        )
+    losses = run_minimal_mmdit_loop(
+        model=model,
+        dataloader=dl,
+        optimizer=opt,
+        objective=objective,
+        device=device,
+        max_steps=int(cfg.max_steps),
+        grad_accum_steps=int(cfg.grad_accum_steps),
+        ema=ema,
+        amp=bool(cfg.amp),
+        amp_dtype=torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16,
+        empty_text=empty_text,
+        cfg_drop_prob=float(cfg.cond_drop_prob),
+    )
+    ckpt = {
+        "model": model.state_dict(),
+        "ema": ema.shadow,
+        "optimizer": opt.state_dict(),
+        "scheduler": None,
+        "step": int(cfg.max_steps) - 1,
+        "cfg": cfg_dict,
+        "architecture": "mmdit_rf",
+        "objective": "rectified_flow",
+        "vae": {
+            "pretrained": str(cfg.vae_pretrained),
+            "scaling_factor": float(cfg.vae_scaling_factor),
+        },
+        "text_encoders": cfg.extra.get("text", {}).get("encoders", []),
+        "last_loss": losses[-1] if losses else None,
+    }
+    torch.save(ckpt, out_dir / "ckpt_final.pt")
 
 
 def _configure_inductor_for_compile(device: torch.device) -> dict[str, bool | int | None]:
@@ -261,6 +449,10 @@ def run(cfg: TrainConfig) -> None:
     perf_active["triton_python_cuda_include_patch"] = (
         patch_triton_cuda_python_include_order() if bool(cfg.compile) and device.type == "cuda" else False
     )
+
+    if str(cfg.architecture) == "mmdit_rf":
+        _run_mmdit_rf(cfg, device=device, perf_active=perf_active)
+        return
 
     seed_everything(int(cfg.seed), deterministic=bool(cfg.deterministic))
 

@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 from torchvision.utils import save_image
 
+from data_loader.dataset import load_image_tensor
 from diffusion.events import EventBus, StdoutJsonSink
 from diffusion.perf import PerfConfig, configure_performance
 from diffusion.utils.oom import is_torch_oom_error, print_torch_oom
@@ -18,6 +19,8 @@ from samplers import (
     dpm_solver_sample,
     euler_sample,
     heun_sample,
+    sample_flow_euler,
+    sample_flow_heun,
 )
 
 
@@ -42,10 +45,14 @@ def _main_impl() -> None:
     ap.add_argument(
         "--sampler",
         default="ddim",
-        choices=("ddim", "diffusion", "euler", "heun", "dpm_solver"),
+        choices=("ddim", "diffusion", "euler", "heun", "dpm_solver", "flow_euler", "flow_heun"),
     )
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--init-image", default="")
+    ap.add_argument("--strength", type=float, default=1.0)
+    ap.add_argument("--mask", default="")
+    ap.add_argument("--task", default="txt2img", choices=("txt2img", "img2img", "inpaint"))
     args = ap.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -75,6 +82,84 @@ def _main_impl() -> None:
         ),
         device,
     )
+
+    if str(built.cfg.get("architecture", built.ckpt.get("architecture", "unet_v1"))) == "mmdit_rf":
+        if built.text_encoder is None:
+            raise RuntimeError("Frozen text encoder bundle is not initialized for mmdit_rf.")
+        if built.vae is None or built.latent_h is None or built.latent_w is None:
+            raise RuntimeError("mmdit_rf sampling requires latent VAE metadata.")
+        prompt = args.prompt.strip()
+        neg_prompt = args.neg_prompt if args.neg_prompt else args.neg
+        cond = built.text_encoder([prompt])
+        uncond = built.text_encoder([neg_prompt.strip() if neg_prompt.strip() else ""])
+        sampler = str(args.sampler)
+        if sampler == "ddim":
+            sampler = "flow_heun"
+        if sampler not in {"flow_euler", "flow_heun"}:
+            raise RuntimeError("architecture=mmdit_rf supports only flow_euler/flow_heun samplers.")
+
+        source_latent = None
+        mask_latent = None
+        start_t = 1.0
+        if args.init_image:
+            img = load_image_tensor(args.init_image).unsqueeze(0).to(device)
+            source_latent = built.vae.encode(img)
+            start_t = max(0.0, min(float(args.strength), 1.0))
+        if args.mask:
+            from PIL import Image
+            import numpy as np
+
+            with Image.open(args.mask) as im:
+                im = im.convert("L").resize((built.latent_w, built.latent_h))
+                arr = np.asarray(im, dtype="float32") / 255.0
+            mask_latent = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
+
+        samples = []
+        for i, seed in enumerate(seeds):
+            gen = torch.Generator(device=device)
+            gen.manual_seed(seed)
+            shape = (1, built.image_channels, built.latent_h, built.latent_w)
+            noise = torch.randn(shape, device=device, generator=gen)
+            if source_latent is not None:
+                t = torch.tensor(start_t, device=device, dtype=source_latent.dtype).view(1, 1, 1, 1)
+                noise = (1.0 - t) * source_latent + t * noise
+
+            def _progress_cb(step: int, _total: int, image_index: int = i) -> None:
+                event_bus.emit(
+                    {
+                        "type": "metric",
+                        "step": image_index * int(args.steps) + step,
+                        "max_steps": int(args.steps) * max(args.n, 1),
+                        "sampler": sampler,
+                    }
+                )
+
+            kwargs = {
+                "model": built.model,
+                "shape": shape,
+                "text_cond": cond,
+                "uncond": uncond,
+                "steps": int(args.steps),
+                "cfg_scale": float(args.cfg),
+                "shift": float(built.cfg.get("sampling_shift", built.cfg.get("sampling", {}).get("shift", 1.0) if isinstance(built.cfg.get("sampling"), dict) else 1.0)),
+                "noise": noise,
+                "generator": gen,
+                "progress_cb": _progress_cb,
+                "start_t": start_t,
+                "source_latent": source_latent,
+                "mask": mask_latent,
+                "task": str(args.task),
+            }
+            z = sample_flow_euler(**kwargs) if sampler == "flow_euler" else sample_flow_heun(**kwargs)
+            samples.append(built.vae.decode(z))
+
+        x = torch.cat(samples, dim=0)
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        save_image(x, out, nrow=int((args.n) ** 0.5))
+        event_bus.emit({"type": "status", "status": "done", "path": str(out)})
+        print(f"[OK] saved {out}")
+        return
 
     tokenizer = built.tokenizer
     if built.use_text_conditioning:
