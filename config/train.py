@@ -150,13 +150,13 @@ class TrainConfig:
     architecture: str = "unet_v1"
     objective: str = "v_prediction"
 
-    data_root: str = "./data_loader/raw/Danbooru"
-    image_dir: str = "image_512"
-    meta_dir: str = "meta"
-    tags_dir: str = "tags"
+    data_root: str = "./data/dataset/pixso_512"
+    image_dir: str = "images"
+    meta_dir: str = ""
+    tags_dir: str = ""
     caption_field: str = "caption_llava_34b_no_tags_short"
     images_only: bool = False
-    min_tag_count: int = 8
+    min_tag_count: int = 0
     require_512: bool = True
     val_ratio: float = 0.01
     cache_dir: str = ".cache"
@@ -320,7 +320,7 @@ class TrainConfig:
     noise_schedule: str = "linear"
     cosine_s: float = 0.008
 
-    eval_prompts_file: str = "./data_loader/raw/Danbooru/prompts.txt"
+    eval_prompts_file: str = "./data/eval_prompts/core.txt"
     eval_every: int = 500
     eval_seed: int = 42
     eval_sampler: str = "ddim"
