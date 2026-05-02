@@ -1,3 +1,5 @@
+#! /usr/bin/env python
+
 from __future__ import annotations
 
 import argparse
@@ -14,7 +16,9 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--reload", action="store_true")
-    parser.add_argument("--frontend", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--frontend", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument("--frontend-host", default="127.0.0.1")
     parser.add_argument("--frontend-port", type=int, default=5173)
     args = parser.parse_args()

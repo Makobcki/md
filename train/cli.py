@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from config.loader import load_train_config
 from config.train import TrainConfig
+from diffusion.utils.oom import is_torch_oom_error, print_torch_oom
 from train.runner import run
 
 
@@ -18,7 +19,7 @@ def _apply_overrides(cfg: TrainConfig, args: argparse.Namespace) -> TrainConfig:
     return cfg
 
 
-def main() -> None:
+def _main_impl() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="./config/train.yaml")
     ap.add_argument("--resume", default="")
@@ -29,6 +30,16 @@ def main() -> None:
     cfg = load_train_config(args.config)
     cfg = _apply_overrides(cfg, args)
     run(cfg)
+
+
+def main() -> None:
+    try:
+        _main_impl()
+    except Exception as exc:
+        if is_torch_oom_error(exc):
+            print_torch_oom(exc, context="training")
+            raise SystemExit(2) from None
+        raise
 
 
 if __name__ == "__main__":
