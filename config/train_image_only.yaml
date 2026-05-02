@@ -1,7 +1,7 @@
 # Image-only latent diffusion profile.
 # This is the stable quality baseline: no tokenizer, no text encoder, no CFG branch.
 
-data_root: ./data/pixso_512
+data_root: ./data/dataset/pixso_512
 image_dir: images
 meta_dir: ""
 tags_dir: ""

@@ -1,7 +1,7 @@
 # Text-to-image latent diffusion profile.
 # This is the main quality track once the image-only baseline is stable.
 
-data_root: ./data/pixso_512
+data_root: ./data/dataset/pixso_512
 image_dir: images
 meta_dir: meta
 tags_dir: tags
@@ -132,7 +132,7 @@ curriculum_non_solo_weight: 1.0
 self_conditioning: true
 self_cond_prob: 0.5
 
-eval_prompts_file: ./data/pixso_512/prompts.txt
+eval_prompts_file: ./data/dataset/pixso_512/prompts.txt
 eval_every: 1000
 eval_seed: 42
 eval_sampler: euler

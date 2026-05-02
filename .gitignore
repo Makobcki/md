@@ -2,7 +2,8 @@
 .idea/
 webui/frontend/node_modules/
 webui/frontend/dist/
-data/
+data/dataset/
+data/*.py
 runs/
 webui_runs/
 vae_sd_mse/
