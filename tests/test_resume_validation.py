@@ -8,7 +8,13 @@ pytest.importorskip("torch")
 
 from config.train import TrainConfig
 from scripts.prepare_latents import _resolve_prepare_options
-from train.runner import _ensure_latent_cache_ready, _resolve_latent_shard_index_path, _validate_resume_compatibility
+import train.runner as runner
+from train.runner import (
+    _ensure_latent_cache_ready,
+    _load_resume_checkpoint,
+    _resolve_latent_shard_index_path,
+    _validate_resume_compatibility,
+)
 
 
 def test_resume_validation_rejects_mode_mismatch() -> None:
@@ -17,6 +23,21 @@ def test_resume_validation_rejects_mode_mismatch() -> None:
 
     with pytest.raises(RuntimeError, match="resume config mismatch"):
         _validate_resume_compatibility(cfg, ckpt_cfg)
+
+
+def test_resume_checkpoint_loads_on_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_load_ckpt(path: str, device: object) -> dict:
+        seen["path"] = path
+        seen["device"] = device
+        return {"format_version": 2, "model": {}}
+
+    monkeypatch.setattr(runner, "load_ckpt", fake_load_ckpt)
+
+    assert _load_resume_checkpoint("ckpt.pt") == {"format_version": 2, "model": {}}
+    assert seen["path"] == "ckpt.pt"
+    assert str(seen["device"]) == "cpu"
 
 
 def test_missing_sharded_latent_index_reports_prepare_command(tmp_path) -> None:
