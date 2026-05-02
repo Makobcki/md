@@ -36,10 +36,12 @@ def _move_text(text: TextConditioning, device: torch.device) -> TextConditioning
 
 def _move_batch(batch: TrainBatch, device: torch.device) -> TrainBatch:
     return TrainBatch(
-        x0=batch.x0.to(device),
+        x0=batch.x0.to(device=device, dtype=torch.float32),
         text=_move_text(batch.text, device),
-        source_latent=batch.source_latent.to(device) if batch.source_latent is not None else None,
-        mask=batch.mask.to(device) if batch.mask is not None else None,
+        source_latent=batch.source_latent.to(device=device, dtype=torch.float32)
+        if batch.source_latent is not None
+        else None,
+        mask=batch.mask.to(device=device, dtype=torch.float32) if batch.mask is not None else None,
         task=batch.task,
         metadata=batch.metadata,
     )

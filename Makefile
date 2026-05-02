@@ -1,4 +1,4 @@
-.PHONY: test test-mmdit
+.PHONY: test test-mmdit prepare-mmdit-text prepare-mmdit-text-cpu prepare-mmdit-latents smoke-mmdit train-mmdit-smoke train-mmdit-smoke-resume sample-mmdit-smoke
 
 test:
 	PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q
@@ -12,4 +12,42 @@ test-mmdit:
 		tests/test_training_overfit.py \
 		tests/test_text_cache.py \
 		tests/test_checkpoint_compat_mmdit.py \
-		tests/test_train_profiles.py
+		tests/test_train_profiles.py \
+		tests/test_smoke_mmdit.py
+
+prepare-mmdit-text:
+	md-prepare-text-cache \
+		--config config/train_mmdit_rf_smoke.yaml \
+		--device cuda
+
+prepare-mmdit-text-cpu:
+	md-prepare-text-cache \
+		--config config/train_mmdit_rf_smoke.yaml \
+		--device cpu \
+		--batch-size 1
+
+prepare-mmdit-latents:
+	md-prepare-latents \
+		--config config/train_mmdit_rf_smoke.yaml
+
+smoke-mmdit:
+	md-smoke-mmdit-rf \
+		--config config/train_mmdit_rf_smoke.yaml
+
+train-mmdit-smoke:
+	md-train \
+		--config config/train_mmdit_rf_smoke.yaml
+
+train-mmdit-smoke-resume:
+	md-train \
+		--config config/train_mmdit_rf_smoke_resume.yaml
+
+sample-mmdit-smoke:
+	md-sample \
+		--ckpt ./runs/mmdit_smoke/ckpt_final.pt \
+		--prompt "1girl, simple background" \
+		--sampler flow_heun \
+		--steps 2 \
+		--cfg 1 \
+		--seed 42 \
+		--out ./samples/mmdit_smoke.png
