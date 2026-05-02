@@ -50,4 +50,16 @@ def test_train_config_accepts_mmdit_rf_yaml() -> None:
     assert cfg.objective == "rectified_flow"
     assert cfg.prediction_type == "flow_velocity"
     assert cfg.hidden_dim == 1024
+    assert cfg.pos_embed == "sincos_2d"
     assert cfg.eval_sampler == "flow_heun"
+
+
+def test_train_config_accepts_mmdit_tiny_yaml() -> None:
+    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_mmdit_rf_tiny.yaml"))
+
+    assert cfg.architecture == "mmdit_rf"
+    assert cfg.objective == "rectified_flow"
+    assert cfg.hidden_dim == 128
+    assert cfg.depth == 2
+    assert cfg.batch_size == 1
+    assert cfg.save_every == 50

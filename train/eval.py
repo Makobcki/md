@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import torch
-from torchvision.utils import save_image
 
 from diffusion.core.diffusion import Diffusion
 from diffusion.utils import EMA
@@ -19,6 +18,14 @@ from samplers import (
     euler_sample,
     heun_sample,
 )
+
+
+def save_image_grid(x: torch.Tensor, path: str | Path, nrow: int) -> None:
+    try:
+        from torchvision.utils import save_image
+    except Exception as exc:
+        raise RuntimeError("Saving eval images requires a working torchvision install.") from exc
+    save_image(x, path, nrow=nrow)
 
 
 def _load_eval_prompts(path: str, count: int) -> list[str]:
@@ -150,7 +157,7 @@ def _run_eval_sampling(
 
             batch = torch.cat(samples, dim=0)
             out_path = eval_dir / f"prompt_{idx:02d}.png"
-            save_image(batch, out_path, nrow=eval_n)
+            save_image_grid(batch, out_path, nrow=eval_n)
     finally:
         if swapped_ema:
             ema.restore(model)

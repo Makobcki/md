@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import hashlib
 from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
@@ -35,6 +36,7 @@ from model.unet.unet import UNet, UNetConfig
 from model.mmdit import MMDiTConfig, MMDiTFlowModel
 from model.text.cache import TextCache
 from model.text.conditioning import TextConditioning, TrainBatch
+from model.text.pretrained import FrozenTextEncoderBundle
 from text_enc import BPETokenizer
 from text_enc.build import build_tokenizer
 from text_enc.tokenizer import TextConfig
@@ -47,7 +49,8 @@ from train.checkpoint import (
 from train.curriculum import _build_curriculum_weights
 from train.eval import _resolve_eval_prompts
 from train.loop import run_training_loop
-from train.loop_mmdit import run_minimal_mmdit_loop
+from train.loop_mmdit_full import run_mmdit_training_loop
+from train.checkpoint_mmdit import validate_mmdit_checkpoint_compatibility
 from train.sanity import _sanity_overfit
 
 
@@ -119,6 +122,70 @@ def _build_optimizer(cfg: TrainConfig, model: torch.nn.Module, device: torch.dev
     raise RuntimeError(f"Unsupported optimizer: {name}")
 
 
+def _mmdit_entry_text(entry: dict) -> str:
+    caption = str(entry.get("caption", "") or "")
+    if caption:
+        return caption
+    tags = list(entry.get("tags_primary", [])) + list(entry.get("tags_gender", []))
+    return " ".join(str(x) for x in tags)
+
+
+def _mmdit_dataset_hash(entries: list[dict]) -> str:
+    h = hashlib.sha256()
+    for entry in entries:
+        h.update(str(entry.get("md5", "")).encode("utf-8"))
+        h.update(b"\0")
+        h.update(_mmdit_entry_text(entry).encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: list[dict]) -> None:
+    if not cache.index_path.exists():
+        raise RuntimeError(f"Missing text cache index: {cache.index_path}")
+    if not cache.metadata:
+        raise RuntimeError(f"Missing text cache metadata: {cache.metadata_path}")
+
+    meta = cache.metadata
+    if int(meta.get("text_dim", -1)) != int(cfg.text_dim):
+        raise RuntimeError(f"text cache text_dim mismatch: {meta.get('text_dim')} != {cfg.text_dim}")
+    if int(meta.get("pooled_dim", -1)) != int(cfg.pooled_dim):
+        raise RuntimeError(f"text cache pooled_dim mismatch: {meta.get('pooled_dim')} != {cfg.pooled_dim}")
+
+    expected_encoders = cfg.extra.get("text", {}).get("encoders", [])
+    actual_encoders = meta.get("encoders", [])
+    if expected_encoders and actual_encoders:
+        expected = [
+            {
+                "name": str(item.get("name", "")),
+                "model_name": str(item.get("model_name", "")),
+                "max_length": int(item.get("max_length", 0)),
+            }
+            for item in expected_encoders
+        ]
+        actual = [
+            {
+                "name": str(item.get("name", "")),
+                "model_name": str(item.get("model_name", "")),
+                "max_length": int(item.get("max_length", 0)),
+            }
+            for item in actual_encoders
+        ]
+        if expected != actual:
+            raise RuntimeError(f"text cache encoder metadata mismatch: cache={actual!r}, config={expected!r}")
+
+    expected_hash = meta.get("dataset_hash")
+    if isinstance(expected_hash, str) and expected_hash:
+        actual_hash = _mmdit_dataset_hash(entries)
+        if actual_hash != expected_hash:
+            raise RuntimeError(f"text cache dataset_hash mismatch: {expected_hash} != {actual_hash}")
+
+    missing = [str(entry.get("md5", "")) for entry in entries if str(entry.get("md5", "")) not in cache.entries]
+    if missing:
+        examples = ", ".join(missing[:10])
+        raise RuntimeError(f"text cache missing {len(missing)} md5 keys used by dataset. Examples: {examples}")
+
+
 class _MMDiTCachedDataset(torch.utils.data.Dataset):
     def __init__(self, latent_ds: ImageTextDataset, text_cache: TextCache) -> None:
         self.latent_ds = latent_ds
@@ -188,7 +255,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         cache_dir=str(cfg.cache_dir),
         failed_list=str(cfg.failed_list),
     )
-    train_entries, _val_entries = build_or_load_index(dcfg)
+    train_entries, val_entries = build_or_load_index(dcfg)
     latent_dtype = torch.bfloat16 if cfg.latent_dtype == "bf16" else torch.float16
     latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
     latent_expected_meta = LatentCacheMetadata(
@@ -217,6 +284,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
     if len(latent_ds) == 0:
         raise RuntimeError("latent cache is empty; run scripts/prepare_latents.py first.")
     text_cache = TextCache(Path(cfg.data_root) / str(cfg.text_cache_dir))
+    _validate_text_cache_for_mmdit(text_cache, cfg, train_entries + val_entries)
     ds = _MMDiTCachedDataset(latent_ds, text_cache)
     dl = DataLoader(
         ds,
@@ -229,6 +297,37 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         prefetch_factor=int(cfg.prefetch_factor) if int(cfg.num_workers) != 0 else None,
         collate_fn=_collate_mmdit,
     )
+    dl_val = None
+    if val_entries and int(cfg.val_every) > 0 and int(cfg.val_batches) > 0:
+        val_latent_ds = ImageTextDataset(
+            entries=val_entries,
+            tokenizer=None,
+            cond_drop_prob=1.0,
+            seed=int(cfg.seed),
+            latent_cache_dir=str(Path(cfg.data_root) / cfg.latent_cache_dir),
+            latent_cache_sharded=bool(cfg.latent_cache_sharded),
+            latent_cache_index_path=str(cfg.latent_cache_index),
+            latent_dtype=latent_dtype,
+            return_latents=True,
+            latent_cache_strict=bool(cfg.latent_cache_strict),
+            latent_cache_fallback=False,
+            latent_expected_meta=latent_expected_meta,
+            include_is_latent=False,
+            latent_missing_log_path=out_dir / "latent_missing_val.txt",
+            latent_shard_cache_size=int(cfg.latent_shard_cache_size),
+        )
+        if len(val_latent_ds) > 0:
+            dl_val = DataLoader(
+                _MMDiTCachedDataset(val_latent_ds, text_cache),
+                batch_size=int(cfg.batch_size),
+                shuffle=False,
+                num_workers=_resolve_num_workers(int(cfg.num_workers)),
+                pin_memory=bool(cfg.pin_memory),
+                drop_last=False,
+                persistent_workers=bool(cfg.persistent_workers) and int(cfg.num_workers) != 0,
+                prefetch_factor=int(cfg.prefetch_factor) if int(cfg.num_workers) != 0 else None,
+                collate_fn=_collate_mmdit,
+            )
 
     mmdit_cfg = MMDiTConfig(
         latent_channels=int(cfg.latent_channels),
@@ -253,6 +352,8 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
     model = MMDiTFlowModel(mmdit_cfg).to(device)
     opt = _build_optimizer(cfg, model, device)
     ema = EMA(model, decay=float(cfg.ema_decay))
+    use_amp = bool(cfg.amp) and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     objective = RectifiedFlowObjective(
         timestep_sampling=str(cfg.flow_timestep_sampling),
         logit_mean=float(cfg.flow_logit_mean),
@@ -262,44 +363,66 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         loss_weighting=str(cfg.flow_loss_weighting),
     )
     empty_text = text_cache.load_empty()
-    if empty_text.tokens.dim() == 2:
-        empty_text = TextConditioning(
-            tokens=empty_text.tokens.to(device).expand(int(cfg.batch_size), -1, -1).clone(),
-            mask=empty_text.mask.to(device).expand(int(cfg.batch_size), -1).clone(),
-            pooled=empty_text.pooled.to(device).expand(int(cfg.batch_size), -1).clone(),
-            is_uncond=torch.ones(int(cfg.batch_size), device=device, dtype=torch.bool),
+
+    start_step = 0
+    resume_path = ""
+    if str(cfg.resume_ckpt).strip():
+        resume_path = resolve_resume_path(str(cfg.resume_ckpt), out_dir)
+        ck = _load_resume_checkpoint(resume_path)
+        validate_mmdit_checkpoint_compatibility(ck, cfg_dict)
+        model_state = normalize_state_dict_for_model(ck["model"], model, name="model")
+        model.load_state_dict(model_state, strict=True)
+        if "optimizer" in ck and ck["optimizer"] is not None:
+            opt.load_state_dict(ck["optimizer"])
+        elif "opt" in ck and ck["opt"] is not None:
+            opt.load_state_dict(ck["opt"])
+        if "scaler" in ck:
+            scaler.load_state_dict(ck["scaler"])
+        if "ema" in ck and isinstance(ck["ema"], dict):
+            ema_state = normalize_state_dict_for_keys(ck["ema"], ema.shadow.keys(), name="ema")
+            ema.shadow = {k: v.to(device) for k, v in ema_state.items()}
+        start_step = int(ck.get("step", -1)) + 1
+        print(f"[INFO] Resumed mmdit_rf from {resume_path} at step {start_step}", flush=True)
+
+    eval_prompts = None
+    eval_text_encoder = None
+    eval_vae = None
+    if int(cfg.eval_every) > 0:
+        eval_prompts = _resolve_eval_prompts(str(cfg.eval_prompts_file), count=5, use_text_conditioning=True)
+        eval_text_encoder = FrozenTextEncoderBundle(
+            cfg_dict,
+            device=device,
+            dtype=torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16,
         )
-    losses = run_minimal_mmdit_loop(
+        if not str(cfg.vae_pretrained):
+            raise RuntimeError("MMDiT eval sampling requires vae_pretrained.")
+        eval_vae = VAEWrapper(
+            pretrained=str(cfg.vae_pretrained),
+            freeze=True,
+            scaling_factor=float(cfg.vae_scaling_factor),
+            device=device,
+            dtype=latent_dtype,
+        )
+
+    run_mmdit_training_loop(
+        cfg=cfg,
+        cfg_dict=cfg_dict,
         model=model,
         dataloader=dl,
+        val_dataloader=dl_val,
         optimizer=opt,
+        scaler=scaler,
         objective=objective,
         device=device,
-        max_steps=int(cfg.max_steps),
-        grad_accum_steps=int(cfg.grad_accum_steps),
         ema=ema,
-        amp=bool(cfg.amp),
-        amp_dtype=torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16,
+        out_dir=out_dir,
         empty_text=empty_text,
-        cfg_drop_prob=float(cfg.cond_drop_prob),
+        start_step=start_step,
+        text_metadata=text_cache.metadata,
+        eval_prompts=eval_prompts,
+        eval_text_encoder=eval_text_encoder,
+        eval_vae=eval_vae,
     )
-    ckpt = {
-        "model": model.state_dict(),
-        "ema": ema.shadow,
-        "optimizer": opt.state_dict(),
-        "scheduler": None,
-        "step": int(cfg.max_steps) - 1,
-        "cfg": cfg_dict,
-        "architecture": "mmdit_rf",
-        "objective": "rectified_flow",
-        "vae": {
-            "pretrained": str(cfg.vae_pretrained),
-            "scaling_factor": float(cfg.vae_scaling_factor),
-        },
-        "text_encoders": cfg.extra.get("text", {}).get("encoders", []),
-        "last_loss": losses[-1] if losses else None,
-    }
-    torch.save(ckpt, out_dir / "ckpt_final.pt")
 
 
 def _configure_inductor_for_compile(device: torch.device) -> dict[str, bool | int | None]:

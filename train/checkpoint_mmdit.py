@@ -5,11 +5,16 @@ def validate_mmdit_checkpoint_compatibility(ckpt: dict, cfg: dict) -> None:
     ck_cfg = ckpt.get("cfg", {})
     checks = (
         "architecture",
+        "objective",
+        "latent_channels",
+        "latent_patch_size",
         "hidden_dim",
         "depth",
-        "latent_patch_size",
-        "latent_channels",
-        "objective",
+        "num_heads",
+        "double_stream_blocks",
+        "single_stream_blocks",
+        "text_dim",
+        "pooled_dim",
         "vae_scaling_factor",
     )
     mismatches: list[str] = []
@@ -24,4 +29,3 @@ def validate_mmdit_checkpoint_compatibility(ckpt: dict, cfg: dict) -> None:
         mismatches.append("text_encoders differ")
     if mismatches:
         raise RuntimeError("mmdit checkpoint config mismatch: " + "; ".join(mismatches))
-

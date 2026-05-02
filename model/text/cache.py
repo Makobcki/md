@@ -21,7 +21,11 @@ class TextCache:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.index_path = self.root / "index.jsonl"
+        self.metadata_path = self.root / "metadata.json"
         self.entries: dict[str, TextCacheEntry] = {}
+        self.metadata: dict = {}
+        if self.metadata_path.exists():
+            self.metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
         if self.index_path.exists():
             for line in self.index_path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
@@ -65,4 +69,3 @@ class TextCache:
             pooled=payload["pooled"],
             is_uncond=torch.ones(payload["tokens"].shape[0], dtype=torch.bool),
         )
-

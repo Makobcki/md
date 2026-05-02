@@ -86,8 +86,14 @@ def prepare_text_cache(
         entries = entries[:limit]
     out_dir.mkdir(parents=True, exist_ok=True)
     bundle = FrozenTextEncoderBundle(cfg.to_dict(), device=device, dtype=dtype)
+    bundle_meta = bundle.metadata()
     metadata = {
-        "encoders": bundle.metadata()["encoders"],
+        "encoders": [
+            {**encoder, "dtype": str(dtype).replace("torch.", "")}
+            for encoder in bundle_meta["encoders"]
+        ],
+        "text_dim": int(bundle_meta["text_dim"]),
+        "pooled_dim": int(bundle_meta["pooled_dim"]),
         "projection": "not_cached",
         "dataset_hash": _dataset_hash(entries, str(cfg.caption_field)),
         "caption_field": str(cfg.caption_field),
@@ -178,4 +184,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
