@@ -69,6 +69,7 @@ class TrainConfig:
     attn_head_dim: int = 32
     self_attn_type: str = "global"
     self_attn_window_size: int = 8
+    attention_placement: str = "all"
     cross_attn_dim: int = 0
     mid_blocks: int = 1
     text_dim: int = 256
@@ -82,6 +83,7 @@ class TrainConfig:
     checkpoint_resblocks: bool = False
     checkpoint_attention: bool = False
     checkpoint_text_encoder: bool = False
+    checkpoint_downsample: bool = False
     zero_init_residual: bool = False
 
     text_vocab_path: str = "diffusion/bpe/vocab.json"
@@ -98,6 +100,7 @@ class TrainConfig:
     compile: bool = False
     compile_warmup_steps: int = 2
     compile_cudagraphs: bool = True
+    optimizer: str = "adamw"
     grad_clip_norm: float = 1.0
     fail_on_nonfinite_grad: bool = False
     ema_decay: float = 0.999
@@ -146,6 +149,7 @@ class TrainConfig:
 
     self_conditioning: bool = True
     self_cond_prob: float = 0.5
+    self_cond_interval: int = 1
 
     noise_schedule: str = "linear"
     cosine_s: float = 0.008
@@ -187,10 +191,12 @@ class TrainConfig:
             raise ValueError("tokenizer_type must be 'bpe'.")
         if self.lr_scheduler not in {"cosine", "linear"}:
             raise ValueError("lr_scheduler must be 'cosine' or 'linear'.")
-        if self.self_attn_type not in {"global", "windowed"}:
-            raise ValueError("self_attn_type must be 'global' or 'windowed'.")
+        if self.self_attn_type not in {"global", "windowed", "hybrid"}:
+            raise ValueError("self_attn_type must be one of: global, windowed, hybrid.")
         if self.self_attn_window_size <= 0:
             raise ValueError("self_attn_window_size must be positive.")
+        if self.attention_placement not in {"all", "mid_down", "mid_only"}:
+            raise ValueError("attention_placement must be one of: all, mid_down, mid_only.")
         if self.cross_attn_dim < 0:
             raise ValueError("cross_attn_dim must be non-negative.")
         if self.mid_blocks <= 0:
@@ -215,6 +221,10 @@ class TrainConfig:
             raise ValueError("curriculum_solo_weight and curriculum_non_solo_weight must be positive.")
         if self.self_cond_prob < 0 or self.self_cond_prob > 1:
             raise ValueError("self_cond_prob must be in [0, 1].")
+        if self.self_cond_interval <= 0:
+            raise ValueError("self_cond_interval must be positive.")
+        if self.optimizer not in {"adamw", "adamw_8bit"}:
+            raise ValueError("optimizer must be one of: adamw, adamw_8bit.")
         if self.noise_schedule not in {"linear", "cosine"}:
             raise ValueError("noise_schedule must be 'linear' or 'cosine'.")
         if self.cosine_s <= 0:
@@ -300,6 +310,7 @@ class TrainConfig:
             attn_head_dim=self.attn_head_dim,
             self_attn_type=self.self_attn_type,
             self_attn_window_size=self.self_attn_window_size,
+            attention_placement=self.attention_placement,
             cross_attn_dim=self.cross_attn_dim,
             mid_blocks=self.mid_blocks,
             text_dim=self.text_dim,
@@ -312,6 +323,7 @@ class TrainConfig:
             checkpoint_resblocks=self.checkpoint_resblocks,
             checkpoint_attention=self.checkpoint_attention,
             checkpoint_text_encoder=self.checkpoint_text_encoder,
+            checkpoint_downsample=self.checkpoint_downsample,
             zero_init_residual=self.zero_init_residual,
             use_text_conditioning=self.use_text_conditioning,
             self_conditioning=self.self_conditioning,

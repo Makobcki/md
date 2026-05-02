@@ -66,6 +66,7 @@ def _diffusion_loss(
     txt_mask: Optional[torch.Tensor],
     self_conditioning: bool,
     self_cond_prob: float,
+    self_cond_enabled_for_step: bool,
     min_snr_gamma: float,
     amp_enabled: bool,
     amp_dtype: torch.dtype,
@@ -79,18 +80,19 @@ def _diffusion_loss(
     xt = domain.q_sample(x0, t, noise)
     v_tgt = domain.v_target(x0, t, noise)
 
-    stats: dict[str, Optional[float]] = {"x_std": None, "v_std": None}
+    stats: dict[str, Optional[float]] = {"x_std": None, "v_std": None, "self_cond_used": 0.0}
     if capture_stats:
         stats["x_std"] = float(x0.detach().float().std().item())
         stats["v_std"] = float(v_tgt.detach().float().std().item())
 
     with torch.amp.autocast("cuda", enabled=amp_enabled, dtype=amp_dtype):
         self_cond = None
-        if self_conditioning and self_cond_prob > 0:
+        if self_conditioning and self_cond_prob > 0 and self_cond_enabled_for_step:
             if torch.rand((), device=xt.device).item() < self_cond_prob:
                 with torch.no_grad():
                     v_sc = model(xt, t, txt_ids, txt_mask, None)
                     self_cond = diff.v_to_x0(xt, t, v_sc).detach()
+                stats["self_cond_used"] = 1.0
         v_pred = model(xt, t, txt_ids, txt_mask, self_cond)
         _assert_finite("v_pred", v_pred)
         if v_pred.shape != v_tgt.shape:
@@ -139,6 +141,7 @@ def _run_validation_loss(
                 txt_mask=prepared.txt_mask,
                 self_conditioning=False,
                 self_cond_prob=0.0,
+                self_cond_enabled_for_step=False,
                 min_snr_gamma=min_snr_gamma,
                 amp_enabled=use_amp,
                 amp_dtype=amp_dtype,
@@ -209,6 +212,7 @@ def run_training_loop(
     log_every = int(run_cfg.log_every)
     save_every = int(run_cfg.save_every)
     min_snr_gamma = float(run_cfg.min_snr_gamma)
+    self_cond_interval = int(getattr(run_cfg, "self_cond_interval", 1))
     grad_clip = float(run_cfg.grad_clip_norm)
     fail_on_nonfinite_grad = bool(getattr(run_cfg, "fail_on_nonfinite_grad", False))
     base_lr = float(run_cfg.lr)
@@ -309,6 +313,7 @@ def run_training_loop(
                 "runtime flags: "
                 f"compile={bool(run_cfg.compile)}, "
                 f"compile_cudagraphs={compile_cudagraphs}, "
+                f"optimizer={getattr(run_cfg, 'optimizer', 'adamw')}, "
                 f"tf32={perf_active['tf32']}, "
                 f"channels_last={perf_active['channels_last']}, "
                 f"sdp_flash={perf_active['sdp_flash']}, "
@@ -327,10 +332,26 @@ def run_training_loop(
                     f"unet={int(model_meta.get('unet_params', 0)):,}, "
                     f"text={int(model_meta.get('text_encoder_params', 0)):,}, "
                     f"latent_res={model_meta.get('latent_resolution')}, "
-                    f"attn={model_meta.get('self_attn_type')}"
+                    f"attn={model_meta.get('self_attn_type')}, "
+                    f"placement={model_meta.get('attention_placement', 'all')}"
                 ),
                 "step": start_step,
             })
+            cost_profile = model_meta.get("cost_profile")
+            if isinstance(cost_profile, dict):
+                attention = cost_profile.get("attention", {})
+                if isinstance(attention, dict):
+                    event_bus.emit({
+                        "type": "log",
+                        "message": (
+                            "attention cost estimate: "
+                            f"self_blocks={attention.get('self_blocks')}, "
+                            f"cross_blocks={attention.get('cross_blocks')}, "
+                            f"self_flops={int(attention.get('self_estimated_flops', 0)) / 1e9:.2f}G, "
+                            f"cross_flops={int(attention.get('cross_estimated_flops', 0)) / 1e9:.2f}G"
+                        ),
+                        "step": start_step,
+                    })
         event_bus.emit({
             "type": "status",
             "status": "start",
@@ -341,6 +362,9 @@ def run_training_loop(
 
     log_loss_sum = 0.0
     log_loss_count = 0
+    log_self_cond_used = 0
+    log_self_cond_possible = 0
+    log_self_cond_total = 0
     best_loss: Optional[float] = None
     best_step: Optional[int] = None
     best_val_loss: Optional[float] = None
@@ -387,6 +411,7 @@ def run_training_loop(
             txt_mask = prepared.txt_mask
 
             with timing.section("fwd_bwd") as t_fwd:
+                self_cond_enabled_for_step = self_cond_interval <= 1 or step % self_cond_interval == 0
                 raw_loss, batch_stats = _diffusion_loss(
                     model=model,
                     diff=diff,
@@ -396,6 +421,7 @@ def run_training_loop(
                     txt_mask=txt_mask,
                     self_conditioning=self_conditioning,
                     self_cond_prob=self_cond_prob,
+                    self_cond_enabled_for_step=self_cond_enabled_for_step,
                     min_snr_gamma=min_snr_gamma,
                     amp_enabled=bool(run_cfg.amp) and device.type == "cuda",
                     amp_dtype=amp_dtype,
@@ -404,6 +430,11 @@ def run_training_loop(
                 loss = raw_loss / grad_accum
                 if batch_stats["x_std"] is not None:
                     last_batch_stats = batch_stats
+                if self_conditioning and self_cond_prob > 0:
+                    log_self_cond_total += 1
+                    if self_cond_enabled_for_step:
+                        log_self_cond_possible += 1
+                    log_self_cond_used += int(batch_stats["self_cond_used"] or 0)
 
             if not torch.isfinite(loss):
                 dump_path = out_dir / f"nan_dump_{step:07d}.pt"
@@ -561,6 +592,8 @@ def run_training_loop(
                 loss_sum = float(stats[0].item())
                 loss_count = int(stats[1].item())
             loss_mean = loss_sum / max(loss_count, 1)
+            self_cond_rate = log_self_cond_used / max(log_self_cond_total, 1)
+            self_cond_enabled_rate = log_self_cond_possible / max(log_self_cond_total, 1)
 
             if not webui_mode and is_main:
                 pbar.set_postfix({
@@ -584,6 +617,9 @@ def run_training_loop(
                     "v_std": last_batch_stats["v_std"],
                     "ema_decay": float(ema.decay),
                     "cfg_drop_prob": float(effective_cond_drop_prob),
+                    "self_cond_rate": float(self_cond_rate),
+                    "self_cond_enabled_rate": float(self_cond_enabled_rate),
+                    "self_cond_interval": int(self_cond_interval),
                     "img_per_sec": float(img_per_sec),
                     "peak_mem_mb": float(peak_mem),
                     "elapsed_sec": float(total_elapsed),
@@ -625,6 +661,9 @@ def run_training_loop(
             last_log_step = step
             log_loss_sum = 0.0
             log_loss_count = 0
+            log_self_cond_used = 0
+            log_self_cond_possible = 0
+            log_self_cond_total = 0
 
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)

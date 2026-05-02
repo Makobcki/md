@@ -24,17 +24,19 @@ class SelfAttention2d(nn.Module):
         *,
         attention_type: str = "global",
         window_size: int = 8,
+        hybrid_window_threshold: int = 0,
         zero_init: bool = False,
     ):
         super().__init__()
-        if attention_type not in {"global", "windowed"}:
-            raise ValueError("attention_type must be 'global' or 'windowed'.")
+        if attention_type not in {"global", "windowed", "hybrid"}:
+            raise ValueError("attention_type must be one of: global, windowed, hybrid.")
         inner = heads * head_dim
         self.heads = heads
         self.head_dim = head_dim
         self.inner = inner
         self.attention_type = attention_type
         self.window_size = int(window_size)
+        self.hybrid_window_threshold = int(hybrid_window_threshold)
 
         self.norm = nn.GroupNorm(_gn_groups(in_ch), in_ch, eps=1e-6)
         self.to_qkv = nn.Conv2d(in_ch, 3 * inner, kernel_size=1, bias=False)
@@ -111,7 +113,14 @@ class SelfAttention2d(nn.Module):
         k = k.view(b, self.heads, self.head_dim, hw).transpose(2, 3)
         v = v.view(b, self.heads, self.head_dim, hw).transpose(2, 3)
 
-        if self.attention_type == "windowed":
+        attention_type = self.attention_type
+        if attention_type == "hybrid":
+            threshold = self.hybrid_window_threshold
+            if threshold <= 0:
+                threshold = max(h, w)
+            attention_type = "windowed" if max(h, w) >= threshold else "global"
+
+        if attention_type == "windowed":
             out = self._windowed_attention(q, k, v, h, w)
         else:
             out = self._global_attention(q, k, v)

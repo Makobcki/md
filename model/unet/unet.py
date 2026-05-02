@@ -29,6 +29,7 @@ class UNetConfig:
     attn_head_dim: int = 32
     self_attn_type: str = "global"
     self_attn_window_size: int = 8
+    attention_placement: str = "all"
     cross_attn_dim: int = 0
     mid_blocks: int = 1
     vocab_size: int = 50_000
@@ -44,6 +45,7 @@ class UNetConfig:
     checkpoint_resblocks: bool = False
     checkpoint_attention: bool = False
     checkpoint_text_encoder: bool = False
+    checkpoint_downsample: bool = False
     zero_init_residual: bool = False
 
 
@@ -58,6 +60,7 @@ class UNet(nn.Module):
         self.self_conditioning = bool(cfg.self_conditioning)
         self.cross_attn_dim = int(cfg.cross_attn_dim) if int(cfg.cross_attn_dim) > 0 else int(cfg.text_dim)
         self.cross_attn_resolutions = tuple(cfg.cross_attn_resolutions) or tuple(cfg.attn_resolutions)
+        self.hybrid_window_threshold = max(tuple(int(r) for r in cfg.attn_resolutions), default=0)
 
         time_dim = cfg.base_channels * 4
         chs = [cfg.base_channels * m for m in cfg.channel_mults]
@@ -119,6 +122,7 @@ class UNet(nn.Module):
                         cfg.attn_head_dim,
                         attention_type=cfg.self_attn_type,
                         window_size=cfg.self_attn_window_size,
+                        hybrid_window_threshold=self.hybrid_window_threshold,
                         zero_init=cfg.zero_init_residual,
                     )
                 )
@@ -152,6 +156,7 @@ class UNet(nn.Module):
             cfg.attn_head_dim,
             attention_type=cfg.self_attn_type,
             window_size=cfg.self_attn_window_size,
+            hybrid_window_threshold=self.hybrid_window_threshold,
             zero_init=cfg.zero_init_residual,
         )
         self.mid_ca = (
@@ -194,6 +199,7 @@ class UNet(nn.Module):
                     cfg.attn_head_dim,
                     attention_type=cfg.self_attn_type,
                     window_size=cfg.self_attn_window_size,
+                    hybrid_window_threshold=self.hybrid_window_threshold,
                     zero_init=cfg.zero_init_residual,
                 )
             )
@@ -236,6 +242,7 @@ class UNet(nn.Module):
                         cfg.attn_head_dim,
                         attention_type=cfg.self_attn_type,
                         window_size=cfg.self_attn_window_size,
+                        hybrid_window_threshold=self.hybrid_window_threshold,
                         zero_init=cfg.zero_init_residual,
                     )
                 )
@@ -265,13 +272,24 @@ class UNet(nn.Module):
         ca: nn.Module,
         ctx: Optional[torch.Tensor],
         ctx_mask: Optional[torch.Tensor],
+        stage: str,
     ) -> torch.Tensor:
         h, w = x.shape[-2], x.shape[-1]
-        if (h in self.cfg.attn_resolutions) or (w in self.cfg.attn_resolutions):
+        if self._self_attention_enabled(stage) and ((h in self.cfg.attn_resolutions) or (w in self.cfg.attn_resolutions)):
             x = sa(x)
         if (h in self.cross_attn_resolutions) or (w in self.cross_attn_resolutions):
             x = ca(x, ctx, ctx_mask)
         return x
+
+    def _self_attention_enabled(self, stage: str) -> bool:
+        placement = self.cfg.attention_placement
+        if placement == "all":
+            return True
+        if placement == "mid_down":
+            return stage in {"down", "mid"}
+        if placement == "mid_only":
+            return stage == "mid"
+        raise RuntimeError(f"Unsupported attention_placement: {placement}")
 
     def _checkpointed(self, enabled: bool, fn, *args):
         if enabled and self.training:
@@ -283,6 +301,9 @@ class UNet(nn.Module):
 
     def _checkpoint_attention(self) -> bool:
         return bool(self.cfg.grad_checkpointing or self.cfg.checkpoint_attention)
+
+    def _checkpoint_downsample(self) -> bool:
+        return bool(self.cfg.grad_checkpointing or self.cfg.checkpoint_downsample)
 
     def forward(
         self,
@@ -335,20 +356,23 @@ class UNet(nn.Module):
                     self.down_ca[bi],
                     ctx,
                     ctx_mask,
+                    "down",
                 )
                 skips.append(h)
                 bi += 1
             if level != len(self.cfg.channel_mults) - 1:
-                h = self._checkpointed(bool(self.cfg.grad_checkpointing), self.downsamples[dsi], h)
+                h = self._checkpointed(self._checkpoint_downsample(), self.downsamples[dsi], h)
                 dsi += 1
 
         h = self._checkpointed(self._checkpoint_resblocks(), self.mid1, h, te)
-        h = self._checkpointed(self._checkpoint_attention(), self.mid_sa, h)
+        if self._self_attention_enabled("mid"):
+            h = self._checkpointed(self._checkpoint_attention(), self.mid_sa, h)
         h = self._checkpointed(self._checkpoint_attention(), self.mid_ca, h, ctx, ctx_mask)
         h = self._checkpointed(self._checkpoint_resblocks(), self.mid2, h, te)
         for mid_block, mid_sa, mid_ca in zip(self.extra_mid_blocks, self.extra_mid_sa, self.extra_mid_ca):
             h = self._checkpointed(self._checkpoint_resblocks(), mid_block, h, te)
-            h = self._checkpointed(self._checkpoint_attention(), mid_sa, h)
+            if self._self_attention_enabled("mid"):
+                h = self._checkpointed(self._checkpoint_attention(), mid_sa, h)
             h = self._checkpointed(self._checkpoint_attention(), mid_ca, h, ctx, ctx_mask)
 
         ui = 0
@@ -368,10 +392,11 @@ class UNet(nn.Module):
                     self.up_ca[ui],
                     ctx,
                     ctx_mask,
+                    "up",
                 )
                 ui += 1
             if level != 0:
-                h = self._checkpointed(bool(self.cfg.grad_checkpointing), self.upsamples[usi], h)
+                h = self._checkpointed(self._checkpoint_downsample(), self.upsamples[usi], h)
                 usi += 1
 
         h = self.out_conv(self.act(self.out_norm(h)))

@@ -77,3 +77,37 @@ def test_projected_cross_attention_and_spatial_text_conditioning_forward() -> No
     out = model(x, t, ids, mask)
 
     assert out.shape == x.shape
+
+
+def test_attention_placement_can_limit_self_attention_to_mid_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    import model.unet.attention as attention_module
+    from model.unet.unet import UNet, UNetConfig
+
+    calls = {"count": 0}
+
+    def fake_self_attention(self, x):
+        calls["count"] += 1
+        return x
+
+    monkeypatch.setattr(attention_module.SelfAttention2d, "forward", fake_self_attention)
+
+    model = UNet(
+        UNetConfig(
+            image_channels=3,
+            base_channels=8,
+            channel_mults=(1, 2),
+            num_res_blocks=1,
+            dropout=0.0,
+            attn_resolutions=(4,),
+            attn_heads=1,
+            attn_head_dim=8,
+            use_text_conditioning=False,
+            self_conditioning=False,
+            attention_placement="mid_only",
+        )
+    )
+
+    out = model(torch.randn(1, 3, 4, 4), torch.tensor([1], dtype=torch.long), None, None)
+
+    assert out.shape == (1, 3, 4, 4)
+    assert calls["count"] == 1

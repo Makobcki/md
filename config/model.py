@@ -16,6 +16,7 @@ class ModelConfig:
     attn_head_dim: int
     self_attn_type: str
     self_attn_window_size: int
+    attention_placement: str
     cross_attn_dim: int
     mid_blocks: int
     text_dim: int
@@ -28,6 +29,7 @@ class ModelConfig:
     checkpoint_resblocks: bool
     checkpoint_attention: bool
     checkpoint_text_encoder: bool
+    checkpoint_downsample: bool
     zero_init_residual: bool
     use_text_conditioning: bool
     self_conditioning: bool

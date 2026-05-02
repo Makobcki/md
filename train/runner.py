@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
+import subprocess
+import sys
 import tempfile
+from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -22,7 +26,8 @@ from data_loader import (
 from diffusion.core.diffusion import Diffusion, DiffusionConfig
 from diffusion.domains.latent import LatentDomain
 from diffusion.domains.pixel import PixelDomain
-from diffusion.perf import PerfConfig, configure_performance
+from diffusion.perf import PerfConfig, build_model_cost_profile, configure_performance
+from diffusion.perf.triton_compat import patch_triton_cuda_python_include_order
 from diffusion.utils import EMA, build_run_metadata, seed_everything
 from diffusion.vae import VAEWrapper
 from model.unet.unet import UNet, UNetConfig
@@ -36,9 +41,19 @@ from train.checkpoint import (
     resolve_resume_path,
 )
 from train.curriculum import _build_curriculum_weights
-from train.eval import _load_eval_prompts
+from train.eval import _resolve_eval_prompts
 from train.loop import run_training_loop
 from train.sanity import _sanity_overfit
+
+
+_SMALL_GPU_MAX_AUTOTUNE_WARNING = "Not enough SMs to use max_autotune_gemm mode"
+_SMALL_GPU_MAX_AUTOTUNE_MIN_SMS = 68
+_inductor_warning_filter_installed = False
+
+
+class _SmallGpuMaxAutotuneWarningFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage() != _SMALL_GPU_MAX_AUTOTUNE_WARNING
 
 
 def _resolve_num_workers(requested: int) -> int:
@@ -77,6 +92,66 @@ def _count_params(module: torch.nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
 
 
+def _build_optimizer(cfg: TrainConfig, model: torch.nn.Module, device: torch.device) -> torch.optim.Optimizer:
+    name = str(cfg.optimizer)
+    if name == "adamw":
+        return torch.optim.AdamW(
+            model.parameters(),
+            lr=float(cfg.lr),
+            weight_decay=float(cfg.weight_decay),
+            fused=(device.type == "cuda"),
+        )
+    if name == "adamw_8bit":
+        try:
+            import bitsandbytes as bnb
+        except ImportError as exc:
+            raise RuntimeError("optimizer=adamw_8bit requires bitsandbytes to be installed.") from exc
+        return bnb.optim.AdamW8bit(
+            model.parameters(),
+            lr=float(cfg.lr),
+            weight_decay=float(cfg.weight_decay),
+        )
+    raise RuntimeError(f"Unsupported optimizer: {name}")
+
+
+def _configure_inductor_for_compile(device: torch.device) -> dict[str, bool | int | None]:
+    active: dict[str, bool | int | None] = {
+        "compile_small_gpu": False,
+        "compile_max_autotune_disabled": False,
+        "compile_warning_suppressed": False,
+        "compile_gpu_sms": None,
+    }
+    if device.type != "cuda":
+        return active
+
+    try:
+        sm_count = int(torch.cuda.get_device_properties(device).multi_processor_count)
+    except Exception:
+        return active
+
+    active["compile_gpu_sms"] = sm_count
+    if sm_count >= _SMALL_GPU_MAX_AUTOTUNE_MIN_SMS:
+        return active
+
+    active["compile_small_gpu"] = True
+    os.environ["TORCHINDUCTOR_MAX_AUTOTUNE"] = "0"
+    os.environ["TORCHINDUCTOR_MAX_AUTOTUNE_GEMM"] = "0"
+
+    cfg = getattr(getattr(torch, "_inductor", None), "config", None)
+    if cfg is not None:
+        for name in ("max_autotune", "max_autotune_gemm"):
+            if hasattr(cfg, name):
+                setattr(cfg, name, False)
+                active["compile_max_autotune_disabled"] = True
+
+    global _inductor_warning_filter_installed
+    if not _inductor_warning_filter_installed:
+        logging.getLogger("torch._inductor.utils").addFilter(_SmallGpuMaxAutotuneWarningFilter())
+        _inductor_warning_filter_installed = True
+    active["compile_warning_suppressed"] = True
+    return active
+
+
 def _attention_token_counts(cfg: TrainConfig) -> dict[str, int]:
     side = int(cfg.image_size)
     if str(cfg.mode) == "latent":
@@ -102,6 +177,61 @@ def _validate_resume_compatibility(cfg: TrainConfig, model_cfg: TrainConfig) -> 
         raise RuntimeError("resume config mismatch: " + "; ".join(mismatches))
 
 
+def _resolve_latent_cache_dir(cfg: TrainConfig) -> Path:
+    return Path(cfg.data_root) / str(cfg.latent_cache_dir)
+
+
+def _resolve_latent_shard_index_path(cfg: TrainConfig) -> Path:
+    index_path = Path(str(cfg.latent_cache_index))
+    if index_path.is_absolute():
+        return index_path
+    return _resolve_latent_cache_dir(cfg) / index_path
+
+
+def _latent_prepare_command(config_path: Path) -> list[str]:
+    repo_root = Path(__file__).resolve().parents[1]
+    return [
+        sys.executable,
+        "-u",
+        str(repo_root / "scripts" / "prepare_latents.py"),
+        "--config",
+        str(config_path),
+    ]
+
+
+def _ensure_latent_cache_ready(cfg: TrainConfig, out_dir: Path) -> None:
+    if str(cfg.mode) != "latent":
+        return
+    if not bool(cfg.latent_cache):
+        raise RuntimeError("mode=latent requires latent_cache=true (use scripts/prepare_latents.py).")
+    if not bool(cfg.latent_cache_sharded):
+        return
+
+    index_path = _resolve_latent_shard_index_path(cfg)
+    if index_path.exists():
+        return
+
+    config_path = out_dir / "latent_precompute_config.yaml"
+    command = _latent_prepare_command(config_path)
+    command_text = " ".join(command)
+    if not bool(cfg.latent_precompute):
+        raise RuntimeError(
+            "Missing sharded latent cache index: "
+            f"{index_path}\n"
+            f"Run latent preparation first:\n  {command_text}\n"
+            "Or set latent_precompute: true in config/train.yaml to let training prepare it automatically."
+        )
+
+    _atomic_write_yaml(config_path, cfg.to_dict())
+    print(f"[INFO] Missing latent shard index: {index_path}", flush=True)
+    print(f"[INFO] Preparing latents before training: {command_text}", flush=True)
+    result = subprocess.run(command, cwd=str(Path(__file__).resolve().parents[1]))
+    if result.returncode != 0:
+        raise RuntimeError(f"latent precompute failed with exit code {result.returncode}: {command_text}")
+    if not index_path.exists():
+        raise RuntimeError(f"latent precompute finished, but shard index is still missing: {index_path}")
+
+
 def run(cfg: TrainConfig) -> None:
     os.environ.setdefault(
         "PYTORCH_CUDA_ALLOC_CONF",
@@ -123,6 +253,9 @@ def run(cfg: TrainConfig) -> None:
             enable_math_sdp=bool(cfg.enable_math_sdp),
         ),
         device,
+    )
+    perf_active["triton_python_cuda_include_patch"] = (
+        patch_triton_cuda_python_include_order() if bool(cfg.compile) and device.type == "cuda" else False
     )
 
     seed_everything(int(cfg.seed), deterministic=bool(cfg.deterministic))
@@ -202,11 +335,13 @@ def run(cfg: TrainConfig) -> None:
         "compile": cfg.compile,
         "compile_warmup_steps": cfg.compile_warmup_steps,
         "compile_cudagraphs": cfg.compile_cudagraphs,
+        "optimizer": cfg.optimizer,
         "grad_clip_norm": cfg.grad_clip_norm,
         "grad_checkpointing": cfg.grad_checkpointing,
         "checkpoint_resblocks": cfg.checkpoint_resblocks,
         "checkpoint_attention": cfg.checkpoint_attention,
         "checkpoint_text_encoder": cfg.checkpoint_text_encoder,
+        "checkpoint_downsample": cfg.checkpoint_downsample,
         "fail_on_nonfinite_grad": cfg.fail_on_nonfinite_grad,
         "ema_decay": cfg.ema_decay,
         "ema_decay_fast": cfg.ema_decay_fast,
@@ -247,6 +382,7 @@ def run(cfg: TrainConfig) -> None:
         "curriculum_non_solo_weight": cfg.curriculum_non_solo_weight,
         "self_conditioning": self_conditioning,
         "self_cond_prob": cfg.self_cond_prob,
+        "self_cond_interval": cfg.self_cond_interval,
         "noise_schedule": model_cfg.noise_schedule,
         "cosine_s": model_cfg.cosine_s,
         "eval_prompts_file": cfg.eval_prompts_file,
@@ -294,6 +430,7 @@ def run(cfg: TrainConfig) -> None:
     run_meta["use_text_conditioning"] = use_text_conditioning
     run_meta["self_conditioning"] = self_conditioning
     _atomic_write_yaml(out_dir / "run_meta.yaml", run_meta)
+    _ensure_latent_cache_ready(cfg, out_dir)
 
     latent_dtype = torch.bfloat16 if cfg.latent_dtype == "bf16" else torch.float16
     latent_expected_meta: LatentCacheMetadata | None = None
@@ -404,6 +541,7 @@ def run(cfg: TrainConfig) -> None:
     nw = _resolve_num_workers(int(cfg.num_workers))
     if latent_encoder is not None:
         nw = 0
+    collate_fn = partial(collate_with_tokenizer, latent_encoder=latent_encoder)
     curriculum_steps = int(cfg.curriculum_steps)
     curriculum_enabled = bool(cfg.curriculum_enabled) and use_text_conditioning and curriculum_steps > 0
     use_shard_sampler = mode == "latent" and bool(cfg.latent_cache_sharded)
@@ -427,7 +565,7 @@ def run(cfg: TrainConfig) -> None:
             pin_memory=bool(cfg.pin_memory),
             persistent_workers=bool(cfg.persistent_workers) and nw > 0,
             prefetch_factor=int(cfg.prefetch_factor) if nw > 0 else None,
-            collate_fn=lambda batch: collate_with_tokenizer(batch, latent_encoder=latent_encoder),
+            collate_fn=collate_fn,
         )
     else:
         dl_full = DataLoader(
@@ -439,7 +577,7 @@ def run(cfg: TrainConfig) -> None:
             drop_last=True,
             persistent_workers=bool(cfg.persistent_workers) and nw > 0,
             prefetch_factor=int(cfg.prefetch_factor) if nw > 0 else None,
-            collate_fn=lambda batch: collate_with_tokenizer(batch, latent_encoder=latent_encoder),
+            collate_fn=collate_fn,
         )
     dl_curr = None
     if curriculum_enabled:
@@ -462,7 +600,7 @@ def run(cfg: TrainConfig) -> None:
             drop_last=True,
             persistent_workers=bool(cfg.persistent_workers) and nw > 0,
             prefetch_factor=int(cfg.prefetch_factor) if nw > 0 else None,
-            collate_fn=lambda batch: collate_with_tokenizer(batch, latent_encoder=latent_encoder),
+            collate_fn=collate_fn,
         )
     dl_val = None
     if ds_val is not None and len(ds_val) > 0:
@@ -475,7 +613,7 @@ def run(cfg: TrainConfig) -> None:
             drop_last=False,
             persistent_workers=bool(cfg.persistent_workers) and nw > 0,
             prefetch_factor=int(cfg.prefetch_factor) if nw > 0 else None,
-            collate_fn=lambda batch: collate_with_tokenizer(batch, latent_encoder=latent_encoder),
+            collate_fn=collate_fn,
         )
 
     if mode == "latent":
@@ -494,6 +632,7 @@ def run(cfg: TrainConfig) -> None:
         attn_head_dim=int(model_cfg.attn_head_dim),
         self_attn_type=str(model_cfg.self_attn_type),
         self_attn_window_size=int(model_cfg.self_attn_window_size),
+        attention_placement=str(model_cfg.attention_placement),
         cross_attn_dim=int(model_cfg.cross_attn_dim),
         mid_blocks=int(model_cfg.mid_blocks),
         vocab_size=len(tokenizer.vocab) if tokenizer is not None else 0,
@@ -509,12 +648,24 @@ def run(cfg: TrainConfig) -> None:
         checkpoint_resblocks=bool(cfg.checkpoint_resblocks),
         checkpoint_attention=bool(cfg.checkpoint_attention),
         checkpoint_text_encoder=bool(cfg.checkpoint_text_encoder),
+        checkpoint_downsample=bool(cfg.checkpoint_downsample),
         zero_init_residual=bool(model_cfg.zero_init_residual),
     )
 
     model = UNet(unet_cfg).to(device)
     text_params = _count_params(model.text_enc) if model.text_enc is not None else 0
     total_params = _count_params(model)
+    amp_dtype_for_profile = torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16
+    cost_profile = build_model_cost_profile(
+        model=model,
+        cfg=unet_cfg,
+        image_size=int(cfg.image_size),
+        mode=mode,
+        latent_downsample_factor=int(cfg.latent_downsample_factor),
+        batch_size=int(cfg.batch_size),
+        text_tokens=int(model_cfg.text_max_len),
+        dtype=amp_dtype_for_profile,
+    )
     run_meta["model"] = {
         "total_params": int(total_params),
         "unet_params": int(total_params - text_params),
@@ -527,22 +678,20 @@ def run(cfg: TrainConfig) -> None:
         "attention_token_counts": _attention_token_counts(model_cfg),
         "self_attn_type": str(model_cfg.self_attn_type),
         "self_attn_window_size": int(model_cfg.self_attn_window_size),
+        "attention_placement": str(model_cfg.attention_placement),
         "cross_attn_dim": int(unet_cfg.cross_attn_dim) if int(unet_cfg.cross_attn_dim) > 0 else int(unet_cfg.text_dim),
         "mid_blocks": int(model_cfg.mid_blocks),
+        "cost_profile": cost_profile,
     }
     _atomic_write_yaml(out_dir / "run_meta.yaml", run_meta)
     if bool(cfg.channels_last):
         model = model.to(memory_format=torch.channels_last)
 
     if bool(cfg.compile) and hasattr(torch, "compile"):
+        perf_active.update(_configure_inductor_for_compile(device))
         model = torch.compile(model)
 
-    opt = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(cfg.lr),
-        weight_decay=float(cfg.weight_decay),
-        fused=(device.type == "cuda"),
-    )
+    opt = _build_optimizer(cfg, model, device)
 
     use_amp = bool(cfg.amp) and device.type == "cuda"
     amp_dtype = torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16
@@ -608,7 +757,11 @@ def run(cfg: TrainConfig) -> None:
     eval_n = int(cfg.eval_n)
     eval_vae: Optional[VAEWrapper] = None
     if eval_every > 0:
-        eval_prompts = _load_eval_prompts(str(cfg.eval_prompts_file), count=5)
+        eval_prompts = _resolve_eval_prompts(
+            str(cfg.eval_prompts_file),
+            count=5,
+            use_text_conditioning=use_text_conditioning,
+        )
         if mode == "latent":
             if not str(cfg.vae_pretrained):
                 raise RuntimeError("eval in latent mode requires vae_pretrained.")
