@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 from pathlib import Path
 
@@ -29,6 +30,33 @@ def _save_image_grid(x: torch.Tensor, path: str | Path, nrow: int) -> None:
     except Exception as exc:
         raise RuntimeError("Saving sample images requires a working torchvision install.") from exc
     save_image(x, path, nrow=nrow)
+
+
+def _metadata_sidecar_path(image_path: str | Path) -> Path:
+    return Path(image_path).with_suffix(".json")
+
+
+def _write_sample_metadata(path: str | Path, metadata: dict[str, object]) -> Path:
+    sidecar = _metadata_sidecar_path(path)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return sidecar
+
+
+def _sample_metadata(args: argparse.Namespace, built, *, sampler: str, seed: int) -> dict[str, object]:
+    architecture = str(built.ckpt.get("architecture", built.cfg.get("architecture", "unet_v1")))
+    neg_prompt = args.neg_prompt if args.neg_prompt else args.neg
+    return {
+        "ckpt": str(args.ckpt),
+        "architecture": architecture,
+        "prompt": str(args.prompt),
+        "negative_prompt": str(neg_prompt),
+        "sampler": str(sampler),
+        "steps": int(args.steps),
+        "cfg": float(args.cfg),
+        "seed": int(seed),
+        "n": int(args.n),
+    }
 
 
 def _positive_int(value: str) -> int:
@@ -164,8 +192,10 @@ def _main_impl() -> None:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         _save_image_grid(x, out, nrow=int((args.n) ** 0.5))
-        event_bus.emit({"type": "status", "status": "done", "path": str(out)})
+        sidecar = _write_sample_metadata(out, _sample_metadata(args, built, sampler=sampler, seed=base_seed))
+        event_bus.emit({"type": "status", "status": "done", "path": str(out), "metadata": str(sidecar)})
         print(f"[OK] saved {out}")
+        print(f"[OK] saved metadata {sidecar}")
         return
 
     tokenizer = built.tokenizer
@@ -281,8 +311,10 @@ def _main_impl() -> None:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     _save_image_grid(x, out, nrow=int((args.n) ** 0.5))
-    event_bus.emit({"type": "status", "status": "done", "path": str(out)})
+    sidecar = _write_sample_metadata(out, _sample_metadata(args, built, sampler=str(sampler), seed=base_seed))
+    event_bus.emit({"type": "status", "status": "done", "path": str(out), "metadata": str(sidecar)})
     print(f"[OK] saved {out}")
+    print(f"[OK] saved metadata {sidecar}")
 
 
 def main() -> None:
