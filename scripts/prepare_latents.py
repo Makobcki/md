@@ -125,6 +125,7 @@ def _resolve_prepare_options(
     provided_dests: set[str],
 ) -> _LatentPrepareOptions:
     options = _LatentPrepareOptions(
+        limit=int(cfg.dataset_limit) if int(getattr(cfg, "dataset_limit", 0)) > 0 else None,
         latent_dtype=str(cfg.latent_dtype),
         autocast_dtype=str(cfg.latent_dtype),
         shard_size=4096 if bool(cfg.latent_cache_sharded) else 0,

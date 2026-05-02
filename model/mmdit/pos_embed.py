@@ -29,7 +29,12 @@ def get_2d_sincos_pos_embed(
 def add_2d_pos_embed(tokens: torch.Tensor, grid_hw: tuple[int, int], mode: str) -> torch.Tensor:
     if mode == "none":
         return tokens
+    if mode == "rope_2d":
+        raise NotImplementedError(
+            "rope_2d must be applied to q/k inside attention, not added to tokens."
+        )
+    if mode != "sincos_2d":
+        raise ValueError(f"Unsupported positional embedding mode: {mode}")
     h, w = grid_hw
     pos = get_2d_sincos_pos_embed(h, w, tokens.shape[-1], device=tokens.device, dtype=tokens.dtype)
     return tokens + pos.unsqueeze(0)
-

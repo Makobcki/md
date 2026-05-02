@@ -52,6 +52,7 @@ md-train = "train.cli:main"
 md-sample = "sample.cli:main"
 md-prepare-latents = "scripts.prepare_latents:main"
 md-prepare-text-cache = "scripts.prepare_text_cache:main"
+md-smoke-mmdit-rf = "scripts.smoke_mmdit_rf:main"
 
 [tool.setuptools]
 py-modules = ["main"]

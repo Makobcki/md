@@ -9,13 +9,13 @@ objective: rectified_flow
 prediction_type: flow_velocity
 
 data_root: ./data_loader/raw/Danbooru
-out_dir: ./runs/mmdit_tiny
+out_dir: ./runs/mmdit_smoke
 eval_prompts_file: ./data/eval_prompts/mmdit_core.txt
 dataset_limit: 32
 
 model:
-  hidden_dim: 128
-  depth: 2
+  hidden_dim: 64
+  depth: 1
   num_heads: 4
   mlp_ratio: 2.0
   qk_norm: true
@@ -24,7 +24,7 @@ model:
   adaln_zero: true
   pos_embed: sincos_2d
   double_stream_blocks: 1
-  single_stream_blocks: 1
+  single_stream_blocks: 0
   dropout: 0.0
   attn_dropout: 0.0
   gradient_checkpointing: false
@@ -55,12 +55,12 @@ training:
   lr: 1.0e-4
   weight_decay: 0.01
   optimizer: adamw
-  warmup_steps: 10
-  max_steps: 100
-  log_every: 10
-  save_every: 50
-  val_every: 50
-  val_batches: 2
+  warmup_steps: 1
+  max_steps: 10
+  log_every: 1
+  save_every: 5
+  val_every: 0
+  val_batches: 0
   eval_every: 0
   ema_decay: 0.999
   grad_clip_norm: 1.0
@@ -77,8 +77,8 @@ flow:
 
 sampling:
   sampler: flow_heun
-  steps: 8
-  cfg_scale: 3.0
+  steps: 2
+  cfg_scale: 1.0
   shift: 1.0
 
 vae:
@@ -96,3 +96,4 @@ dataset_tasks:
   txt2img: 1.0
   img2img: 0.0
   inpaint: 0.0
+

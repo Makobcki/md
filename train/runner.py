@@ -256,6 +256,9 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         failed_list=str(cfg.failed_list),
     )
     train_entries, val_entries = build_or_load_index(dcfg)
+    if int(cfg.dataset_limit) > 0:
+        train_entries = train_entries[: int(cfg.dataset_limit)]
+        val_entries = []
     latent_dtype = torch.bfloat16 if cfg.latent_dtype == "bf16" else torch.float16
     latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
     latent_expected_meta = LatentCacheMetadata(
@@ -283,9 +286,14 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
     )
     if len(latent_ds) == 0:
         raise RuntimeError("latent cache is empty; run scripts/prepare_latents.py first.")
-    text_cache = TextCache(Path(cfg.data_root) / str(cfg.text_cache_dir))
+    text_cache = TextCache(
+        Path(cfg.data_root) / str(cfg.text_cache_dir),
+        shard_cache_size=int(cfg.text_shard_cache_size),
+    )
     _validate_text_cache_for_mmdit(text_cache, cfg, train_entries + val_entries)
     ds = _MMDiTCachedDataset(latent_ds, text_cache)
+    if len(ds) == 0:
+        raise RuntimeError("MMDiT dataset is empty after latent/text cache filtering.")
     dl = DataLoader(
         ds,
         batch_size=int(cfg.batch_size),
@@ -381,7 +389,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         if "ema" in ck and isinstance(ck["ema"], dict):
             ema_state = normalize_state_dict_for_keys(ck["ema"], ema.shadow.keys(), name="ema")
             ema.shadow = {k: v.to(device) for k, v in ema_state.items()}
-        start_step = int(ck.get("step", -1)) + 1
+        start_step = int(ck.get("step", 0))
         print(f"[INFO] Resumed mmdit_rf from {resume_path} at step {start_step}", flush=True)
 
     eval_prompts = None

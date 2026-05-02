@@ -81,7 +81,12 @@ def prepare_text_cache(
         failed_list=str(cfg.failed_list),
     )
     train_entries, val_entries = build_or_load_index(dcfg)
+    if int(cfg.dataset_limit) > 0:
+        train_entries = train_entries[: int(cfg.dataset_limit)]
+        val_entries = []
     entries = train_entries + val_entries
+    if limit is None and int(cfg.dataset_limit) > 0:
+        limit = int(cfg.dataset_limit)
     if limit is not None:
         entries = entries[:limit]
     out_dir.mkdir(parents=True, exist_ok=True)

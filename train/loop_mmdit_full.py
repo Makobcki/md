@@ -204,6 +204,16 @@ def run_mmdit_training_loop(
     eval_text_encoder: Optional[FrozenTextEncoderBundle] = None,
     eval_vae: Optional[VAEWrapper] = None,
 ) -> None:
+    try:
+        dl_len = len(dataloader)
+    except TypeError:
+        dl_len = None
+    if dl_len == 0:
+        raise RuntimeError(
+            "MMDiT training dataloader is empty. "
+            "Check latent cache, text cache, batch_size, drop_last, and dataset filters."
+        )
+
     max_steps = int(cfg.max_steps)
     grad_accum = max(int(cfg.grad_accum_steps), 1)
     log_every = int(cfg.log_every)
@@ -243,7 +253,9 @@ def run_mmdit_training_loop(
     recent_bins: dict[str, list[float]] = {}
 
     while step < max_steps:
+        saw_batch = False
         for raw in dataloader:
+            saw_batch = True
             if step >= max_steps:
                 break
             lr = _compute_lr(
@@ -367,7 +379,7 @@ def run_mmdit_training_loop(
                         optimizer=optimizer,
                         scaler=scaler,
                         ema=ema,
-                        step=step,
+                        step=next_step,
                         text_metadata=text_metadata,
                     )
                     save_ckpt(str(out_dir / f"ckpt_{next_step:07d}.pt"), ckpt)
@@ -376,6 +388,11 @@ def run_mmdit_training_loop(
 
                 step = next_step
                 pbar.update(1)
+        if not saw_batch:
+            raise RuntimeError(
+                "MMDiT training dataloader produced no batches. "
+                "Check latent cache, text cache, batch_size, drop_last, and dataset filters."
+            )
 
     ckpt = _build_ckpt(
         cfg=cfg,
@@ -384,7 +401,7 @@ def run_mmdit_training_loop(
         optimizer=optimizer,
         scaler=scaler,
         ema=ema,
-        step=max(step - 1, 0),
+        step=step,
         text_metadata=text_metadata,
     )
     save_ckpt(str(out_dir / "ckpt_final.pt"), ckpt)

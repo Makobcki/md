@@ -11,6 +11,7 @@ prediction_type: flow_velocity
 data_root: ./data_loader/raw/Danbooru
 out_dir: ./runs/mmdit_overfit
 eval_prompts_file: ./data/eval_prompts/mmdit_core.txt
+dataset_limit: 8
 
 model:
   hidden_dim: 256

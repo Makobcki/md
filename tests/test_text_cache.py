@@ -73,3 +73,34 @@ def test_text_cache_metadata_validation_catches_missing_key(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="text cache missing"):
         _validate_text_cache_for_mmdit(cache, cfg, [{"md5": "missing", "caption": "x"}])
+
+
+def test_text_cache_reuses_loaded_shard(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "text"
+    (root / "shards").mkdir(parents=True)
+    (root / "index.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"key": "a", "shard": "text_00000.safetensors", "idx": 0}),
+                json.dumps({"key": "b", "shard": "text_00000.safetensors", "idx": 1}),
+            ]
+        )
+        + "\n"
+    )
+    cache = TextCache(root)
+    calls = {"count": 0}
+    payload = {
+        "tokens": torch.randn(2, 3, 4),
+        "mask": torch.ones(2, 3, dtype=torch.uint8),
+        "pooled": torch.randn(2, 4),
+        "is_uncond": torch.zeros(2, dtype=torch.uint8),
+    }
+
+    def fake_load(path):
+        calls["count"] += 1
+        return payload
+
+    monkeypatch.setattr(cache, "_load_safetensors", fake_load)
+    cache.load("a")
+    cache.load("b")
+    assert calls["count"] == 1
