@@ -54,3 +54,15 @@ def test_profiles_map_to_distinct_unet_conditioning_modes() -> None:
     assert text_to_image_model.use_text_conditioning is True
     assert image_only_model.self_conditioning is True
     assert text_to_image_model.self_conditioning is True
+
+
+def test_mmdit_smoke_resume_profile_extends_smoke_run() -> None:
+    smoke = _load_profile("train_mmdit_rf_smoke.yaml")
+    resume = _load_profile("train_mmdit_rf_smoke_resume.yaml")
+
+    assert smoke.architecture == "mmdit_rf"
+    assert resume.architecture == "mmdit_rf"
+    assert resume.out_dir == smoke.out_dir
+    assert resume.resume_ckpt.endswith("ckpt_latest.pt")
+    assert resume.max_steps > smoke.max_steps
+    assert resume.eval_every == 0

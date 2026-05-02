@@ -57,3 +57,41 @@ def test_mmdit_checkpoint_uses_human_step(tmp_path) -> None:
     )
 
     assert ckpt["step"] == 50
+
+
+def test_mmdit_checkpoint_text_encoder_compat_ignores_cache_metadata() -> None:
+    ckpt = {
+        "architecture": "mmdit_rf",
+        "objective": "rectified_flow",
+        "text_encoders": [
+            {
+                "name": "t5",
+                "model_name": "google/t5-v1_1-base",
+                "max_length": 128,
+                "trainable": False,
+                "cache": True,
+                "dtype": "bfloat16",
+            }
+        ],
+    }
+    cfg = {
+        "architecture": "mmdit_rf",
+        "objective": "rectified_flow",
+        "text": {
+            "encoders": [
+                {
+                    "name": "t5",
+                    "model_name": "google/t5-v1_1-base",
+                    "max_length": 128,
+                    "trainable": False,
+                    "cache": True,
+                }
+            ]
+        },
+    }
+
+    validate_mmdit_checkpoint_compatibility(ckpt, cfg)
+
+    cfg["text"]["encoders"][0]["max_length"] = 256
+    with pytest.raises(RuntimeError, match="text_encoders differ"):
+        validate_mmdit_checkpoint_compatibility(ckpt, cfg)

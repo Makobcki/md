@@ -32,7 +32,7 @@ def _batch_text(text: TextConditioning) -> TextConditioning:
     )
 
 
-def _load_first_batch(cfg: TrainConfig) -> tuple[torch.Tensor, TextConditioning]:
+def _load_first_batch(cfg: TrainConfig) -> tuple[torch.Tensor, TextConditioning, dict[str, object]]:
     dcfg = DataConfig(
         root=str(cfg.data_root),
         image_dir=str(cfg.image_dir),
@@ -85,22 +85,41 @@ def _load_first_batch(cfg: TrainConfig) -> tuple[torch.Tensor, TextConditioning]
     x0 = latent_ds[0][0].unsqueeze(0).float()
     key = str(train_entries[0]["md5"])
     text = _batch_text(text_cache.load(key))
-    return x0, TextConditioning(
+    text = TextConditioning(
         tokens=text.tokens.float(),
         mask=text.mask,
         pooled=text.pooled.float(),
         is_uncond=text.is_uncond,
     )
+    diagnostics = {
+        "train_entries": len(train_entries),
+        "val_entries": len(val_entries),
+        "text_cache_entries": len(text_cache.entries),
+        "latent_cache_entries": len(latent_ds),
+        "first_md5": key,
+    }
+    return x0, text, diagnostics
 
 
 def run(config_path: str) -> None:
     cfg = TrainConfig.from_yaml(config_path)
     if cfg.architecture != "mmdit_rf":
         raise RuntimeError("smoke_mmdit_rf requires architecture=mmdit_rf.")
-    _resolve_eval_prompts(str(cfg.eval_prompts_file), 5, use_text_conditioning=True)
+    if int(cfg.eval_every) > 0:
+        _resolve_eval_prompts(str(cfg.eval_prompts_file), 5, use_text_conditioning=True)
 
-    x0, text = _load_first_batch(cfg)
+    x0, text, diagnostics = _load_first_batch(cfg)
     model = MMDiTFlowModel(MMDiTConfig.from_dict(cfg.to_dict()))
+    model_params = sum(p.numel() for p in model.parameters())
+    print(f"[INFO] train entries: {diagnostics['train_entries']}")
+    print(f"[INFO] val entries: {diagnostics['val_entries']}")
+    print(f"[INFO] text cache entries: {diagnostics['text_cache_entries']}")
+    print(f"[INFO] latent cache entries: {diagnostics['latent_cache_entries']}")
+    print(f"[INFO] first md5: {diagnostics['first_md5']}")
+    print(f"[INFO] first latent shape: {tuple(x0.shape)}")
+    print(f"[INFO] text tokens: {tuple(text.tokens.shape)}")
+    print(f"[INFO] text pooled: {tuple(text.pooled.shape)}")
+    print(f"[INFO] model params: {model_params:,}")
     objective = RectifiedFlowObjective(
         timestep_sampling=str(cfg.flow_timestep_sampling),
         logit_mean=float(cfg.flow_logit_mean),
@@ -138,6 +157,7 @@ def run(config_path: str) -> None:
     )
     loaded = load_ckpt(str(ckpt_path), torch.device("cpu"))
     model.load_state_dict(loaded["model"], strict=True)
+    print(f"[INFO] checkpoint path: {ckpt_path}")
 
     gen = torch.Generator().manual_seed(int(cfg.seed))
     sample_flow_heun(
@@ -150,6 +170,7 @@ def run(config_path: str) -> None:
         shift=float(cfg.sampling_shift),
         generator=gen,
     )
+    print(f"[INFO] sampler status: flow_heun {int(cfg.sampling_steps)} steps ok")
     print(f"[OK] MMDiT RF smoke passed: {config_path}")
 
 
