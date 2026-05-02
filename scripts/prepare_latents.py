@@ -119,6 +119,47 @@ def _coerce_prepare_options(options: _LatentPrepareOptions) -> _LatentPrepareOpt
     return coerced
 
 
+def _latent_meta_mismatch_reason(expected: dict[str, Any], actual: dict[str, Any]) -> str | None:
+    comparisons = (
+        ("vae_pretrained", str(expected.get("vae_pretrained", "")), str(actual.get("vae_pretrained", ""))),
+        ("scaling_factor", float(expected.get("scaling_factor", 0.0)), float(actual.get("scaling_factor", 0.0))),
+        ("latent_shape", list(expected.get("latent_shape", [])), list(actual.get("latent_shape", []))),
+        ("dtype", str(expected.get("dtype", "")), str(actual.get("dtype", ""))),
+        ("format_version", int(expected.get("format_version", 0)), int(actual.get("format_version", 0))),
+    )
+    for key, expected_value, actual_value in comparisons:
+        if key == "scaling_factor":
+            if abs(float(expected_value) - float(actual_value)) <= 1e-6:
+                continue
+        elif actual_value == expected_value:
+            continue
+        return f"{key}: {actual_value!r} != {expected_value!r}"
+    return None
+
+
+def _sharded_cache_mismatch_reason(
+    *,
+    index_path: Path,
+    shard_dir: Path,
+    expected_meta: dict[str, Any],
+) -> str | None:
+    if not index_path.exists():
+        return None
+    shards = sorted(shard_dir.glob("shard_*.pt"))
+    if not shards:
+        return "index exists but no shard files were found"
+    try:
+        payload = torch.load(shards[0], map_location="cpu")
+    except Exception as exc:
+        return f"cannot read {shards[0]}: {exc}"
+    if not isinstance(payload, dict) or int(payload.get("format_version", 0)) != 3:
+        return f"invalid shard payload format in {shards[0]}"
+    actual_meta = payload.get("meta_common")
+    if not isinstance(actual_meta, dict):
+        return f"missing shard metadata in {shards[0]}"
+    return _latent_meta_mismatch_reason(expected_meta, actual_meta)
+
+
 def _resolve_prepare_options(
     cfg: TrainConfig,
     args: argparse.Namespace,
@@ -420,6 +461,17 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
         failed_list=str(cfg.failed_list),
     )
     train_entries, _ = build_or_load_index(dcfg)
+    if options.limit is not None:
+        checked_entries = train_entries[: int(options.limit)]
+    else:
+        checked_entries = train_entries
+    if not checked_entries:
+        raise RuntimeError(
+            "No train entries found for latent preparation. "
+            f"Check data_root={cfg.data_root!r}, image_dir={cfg.image_dir!r}, "
+            f"meta_dir={cfg.meta_dir!r}, metadata.jsonl, images_only={cfg.images_only}, "
+            f"and min_tag_count={cfg.min_tag_count}."
+        )
 
     if options.device == "auto":
         device_str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -499,6 +551,23 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
         index_path = Path(str(cfg.latent_cache_index))
         if not index_path.is_absolute():
             index_path = cache_dir / index_path
+        cache_mismatch_reason = None
+        if not options.overwrite:
+            cache_mismatch_reason = _sharded_cache_mismatch_reason(
+                index_path=index_path,
+                shard_dir=shard_dir,
+                expected_meta=meta_common,
+            )
+        if cache_mismatch_reason is not None:
+            event_bus.emit({
+                "type": "status",
+                "status": "rebuild",
+                "reason": f"latent cache metadata mismatch: {cache_mismatch_reason}",
+            })
+            if index_path.exists():
+                index_path.unlink()
+            for shard_path in shard_dir.glob("shard_*.pt"):
+                shard_path.unlink()
         if options.overwrite:
             if index_path.exists():
                 index_path.unlink()
@@ -531,6 +600,12 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
     task_queue: queue.Queue[Optional[_SaveTask]] = queue.Queue(maxsize=int(options.queue_size))
     queue_wait_ms = {"value": 0.0}
 
+    error_examples: list[dict[str, str]] = []
+
+    def _record_error(md5: str, stage: str, message: object) -> None:
+        if len(error_examples) < 5:
+            error_examples.append({"md5": str(md5), "stage": str(stage), "error": str(message)})
+
     def _enqueue_task(task: _SaveTask) -> None:
         start_wait = time.perf_counter()
         task_queue.put(task)
@@ -556,6 +631,7 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
                 save_stats.add_saved(1, elapsed_ms)
             except Exception as exc:
                 save_stats.add_error()
+                _record_error(str(task.md5), "save", exc)
                 with open(failed_path, "a", encoding="utf-8") as f:
                     f.write(f"{task.md5}\tsave\t{exc}\n")
             finally:
@@ -579,6 +655,7 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
                     save_stats.add_saved(len(md5s), elapsed_ms)
             except Exception as exc:
                 save_stats.add_error()
+                _record_error(str(task.md5), "save", exc)
                 with open(failed_path, "a", encoding="utf-8") as f:
                     f.write(f"{task.md5}\tsave\t{exc}\n")
             finally:
@@ -604,6 +681,7 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
             decode_ms += float(item.get("decode_ms") or 0.0)
             if item["error"] is not None:
                 errors += 1
+                _record_error(str(item["md5"]), "load", item["error"])
                 with open(failed_path, "a", encoding="utf-8") as f:
                     f.write(f"{item['md5']}\tload\t{item['error']}\n")
                 continue
@@ -656,6 +734,7 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
                     _enqueue_task(_SaveTask(md5=md5, out_path=Path(path), latent=z_cpu))
                 except Exception as inner:
                     errors += 1
+                    _record_error(str(md5), "encode", inner)
                     with open(failed_path, "a", encoding="utf-8") as f:
                         f.write(f"{md5}\tencode\t{inner}\n")
             continue
@@ -747,6 +826,7 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
         "errors": errors + snapshot["errors"],
         "elapsed_sec": total_time,
         "latent_stats": latent_stats,
+        "error_examples": error_examples,
     })
 
 

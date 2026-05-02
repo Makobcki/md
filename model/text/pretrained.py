@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 import torch
@@ -27,6 +28,31 @@ def _fit_dim(x: torch.Tensor, dim: int) -> torch.Tensor:
     return torch.cat([x, pad], dim=-1)
 
 
+def _from_pretrained_with_local_fallback(factory: Any, model_name: str, **kwargs: Any) -> Any:
+    try:
+        return factory.from_pretrained(model_name, **kwargs)
+    except TypeError:
+        if not kwargs:
+            raise
+        return factory.from_pretrained(model_name)
+    except (OSError, RuntimeError) as exc:
+        try:
+            return factory.from_pretrained(model_name, local_files_only=True, **kwargs)
+        except Exception:
+            raise exc
+
+
+def _resolve_cached_model_path(model_name: str) -> str:
+    if Path(model_name).exists():
+        return model_name
+    try:
+        from huggingface_hub import snapshot_download
+
+        return snapshot_download(model_name, local_files_only=True)
+    except Exception:
+        return model_name
+
+
 class FrozenTextEncoderBundle(nn.Module):
     def __init__(
         self,
@@ -37,7 +63,7 @@ class FrozenTextEncoderBundle(nn.Module):
     ) -> None:
         super().__init__()
         try:
-            from transformers import AutoModel, AutoTokenizer, CLIPTextModel
+            from transformers import AutoModel, AutoTokenizer, CLIPTextModel, T5EncoderModel
         except ImportError as exc:
             raise RuntimeError("FrozenTextEncoderBundle requires transformers to be installed.") from exc
 
@@ -60,9 +86,17 @@ class FrozenTextEncoderBundle(nn.Module):
         self.tokenizers = {}
         self.encoders = nn.ModuleDict()
         for spec in specs:
-            self.tokenizers[spec.name] = AutoTokenizer.from_pretrained(spec.model_name)
-            model_cls = CLIPTextModel if spec.name.startswith("clip") else AutoModel
-            encoder = model_cls.from_pretrained(spec.model_name)
+            model_path = _resolve_cached_model_path(spec.model_name)
+            self.tokenizers[spec.name] = _from_pretrained_with_local_fallback(AutoTokenizer, model_path)
+            model_key = f"{spec.name} {spec.model_name}".lower()
+            if spec.name.startswith("clip"):
+                model_cls = CLIPTextModel
+            elif "t5" in model_key:
+                model_cls = T5EncoderModel
+            else:
+                model_cls = AutoModel
+            model_kwargs = {"use_safetensors": False} if "t5" in model_key else {}
+            encoder = _from_pretrained_with_local_fallback(model_cls, model_path, **model_kwargs)
             encoder.requires_grad_(bool(spec.trainable))
             encoder.eval()
             self.encoders[spec.name] = encoder
@@ -118,4 +152,3 @@ class FrozenTextEncoderBundle(nn.Module):
             "text_dim": self.text_dim,
             "pooled_dim": self.pooled_dim,
         }
-

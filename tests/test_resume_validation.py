@@ -4,10 +4,10 @@ import argparse
 
 import pytest
 
-pytest.importorskip("torch")
+torch = pytest.importorskip("torch")
 
 from config.train import TrainConfig
-from scripts.prepare_latents import _resolve_prepare_options
+from scripts.prepare_latents import _resolve_prepare_options, _sharded_cache_mismatch_reason
 import train.runner as runner
 from train.runner import (
     _ensure_latent_cache_ready,
@@ -106,6 +106,42 @@ def test_prepare_latents_cli_overrides_config_extra() -> None:
 
     assert options.batch_size == 16
     assert options.latent_dtype == "fp16"
+
+
+def test_sharded_cache_metadata_mismatch_reports_dtype(tmp_path) -> None:
+    cache_dir = tmp_path / "latents"
+    shard_dir = cache_dir / "shards"
+    shard_dir.mkdir(parents=True)
+    index_path = cache_dir / "index.jsonl"
+    index_path.write_text('{"md5": "a", "shard": "shard_000000.pt", "idx": 0}\n', encoding="utf-8")
+    torch.save(
+        {
+            "format_version": 3,
+            "meta_common": {
+                "format_version": 3,
+                "vae_pretrained": "./vae_sd_mse",
+                "scaling_factor": 0.18215,
+                "latent_shape": [4, 64, 64],
+                "dtype": "fp16",
+            },
+            "latents": torch.zeros(1, 4, 64, 64),
+        },
+        shard_dir / "shard_000000.pt",
+    )
+
+    reason = _sharded_cache_mismatch_reason(
+        index_path=index_path,
+        shard_dir=shard_dir,
+        expected_meta={
+            "format_version": 3,
+            "vae_pretrained": "./vae_sd_mse",
+            "scaling_factor": 0.18215,
+            "latent_shape": [4, 64, 64],
+            "dtype": "bf16",
+        },
+    )
+
+    assert reason == "dtype: 'fp16' != 'bf16'"
 
 
 def test_prepare_latents_uses_dataset_limit_as_default_limit() -> None:
