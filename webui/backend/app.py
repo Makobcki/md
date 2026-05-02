@@ -32,11 +32,15 @@ class WSManager:
 
     async def connect(self, run_id: str, channel: str, websocket: WebSocket) -> None:
         await websocket.accept()
+        self.add(run_id, channel, websocket)
+
+    def add(self, run_id: str, channel: str, websocket: WebSocket) -> None:
         self.connections.setdefault(run_id, {}).setdefault(channel, []).append(websocket)
 
     def disconnect(self, run_id: str, channel: str, websocket: WebSocket) -> None:
         if run_id in self.connections and channel in self.connections[run_id]:
-            self.connections[run_id][channel].remove(websocket)
+            if websocket in self.connections[run_id][channel]:
+                self.connections[run_id][channel].remove(websocket)
 
     async def broadcast(self, run_id: str, channel: str, message: str) -> None:
         for ws in list(self.connections.get(run_id, {}).get(channel, [])):
@@ -169,7 +173,7 @@ class SampleArgs(BaseModel):
     neg_prompt: str = ""
     cfg: float = Field(default=5.0, ge=0.0, le=30.0)
     sampler: Literal["ddim", "diffusion", "euler", "heun", "dpm_solver"] = "ddim"
-    seed: Optional[int] = None
+    seed: Optional[int] = 42
     device: Literal["auto", "cpu", "cuda"] = "cuda"
 
     @model_validator(mode="after")
@@ -225,7 +229,8 @@ class LatentArgs(BaseModel):
         return self
 
     def to_cli_args(self) -> Dict[str, Any]:
-        data = self.model_dump(by_alias=True, exclude_none=True)
+        data = self.model_dump(by_alias=True, exclude_none=True, exclude_defaults=True)
+        data["config"] = self.config
         if data.get("device") == "auto":
             data.pop("device")
         return data
@@ -234,6 +239,50 @@ class LatentArgs(BaseModel):
 class LatentCacheRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     args: LatentArgs
+
+
+_LATENT_PREPARE_ARG_KEYS = {
+    "overwrite",
+    "limit",
+    "batch-size",
+    "num-workers",
+    "prefetch-factor",
+    "pin-memory",
+    "device",
+    "latent-dtype",
+    "autocast-dtype",
+    "queue-size",
+    "writer-threads",
+    "shard-size",
+    "stats-every-sec",
+    "decode-backend",
+}
+
+
+def _latent_prepare_arg_defaults() -> Dict[str, Any]:
+    cfg_path = config_service.get_config_path(ROOT_DIR)
+    cfg = config_service.parse_config_text(cfg_path.read_text(encoding="utf-8"))
+    defaults: Dict[str, Any] = {
+        "config": str(cfg_path),
+        "latent-dtype": cfg.latent_dtype,
+        "autocast-dtype": cfg.latent_dtype,
+        "shard-size": 4096 if bool(cfg.latent_cache_sharded) else 0,
+    }
+
+    section = cfg.extra.get("prepare_latents", cfg.extra.get("latent_prepare"))
+    if isinstance(section, dict):
+        for key, value in section.items():
+            name = str(key).replace("_", "-")
+            if name in _LATENT_PREPARE_ARG_KEYS:
+                defaults[name] = value
+
+    prefix = "latent_prepare_"
+    for key, value in cfg.extra.items():
+        if key.startswith(prefix):
+            name = key[len(prefix):].replace("_", "-")
+            if name in _LATENT_PREPARE_ARG_KEYS:
+                defaults[name] = value
+    return defaults
 
 
 @app.get("/api/status")
@@ -278,6 +327,27 @@ def _tail_text(path: Path, limit: int) -> str:
     return "\n".join(lines)
 
 
+async def _send_log_backlog(websocket: WebSocket, run_id: str, limit: int) -> None:
+    if limit <= 0:
+        return
+    try:
+        run = job_manager.get_run(run_id)
+    except KeyError:
+        return
+
+    for stream, path_value in (("stdout", run.log_stdout), ("stderr", run.log_stderr)):
+        path = Path(path_value)
+        if not path.exists():
+            continue
+        for line in _tail_text(path, limit).splitlines():
+            await websocket.send_text(json.dumps({
+                "type": "log",
+                "stream": stream,
+                "line": JobManager.format_log_line(line),
+                "backlog": True,
+            }, ensure_ascii=False))
+
+
 @app.get("/api/runs/{run_id}/logs/{stream}")
 def get_run_log(
     run_id: str,
@@ -293,7 +363,8 @@ def get_run_log(
     path = Path(run.log_stdout if stream == "stdout" else run.log_stderr)
     if not path.exists():
         return {"content": ""}
-    return {"content": _tail_text(path, limit)}
+    content = "\n".join(JobManager.format_log_line(line) for line in _tail_text(path, limit).splitlines())
+    return {"content": content}
 
 
 @app.get("/api/runs/{run_id}/metrics")
@@ -408,7 +479,13 @@ def get_sample_args() -> Dict[str, Any]:
 @app.get("/api/latents/args")
 def get_latent_args() -> Dict[str, Any]:
     prep_path = ROOT_DIR / "scripts" / "prepare_latents.py"
-    return {"items": parse_argparse_args(prep_path)}
+    items = parse_argparse_args(prep_path)
+    defaults = _latent_prepare_arg_defaults()
+    for item in items:
+        name = item.get("name")
+        if name in defaults:
+            item["default"] = defaults[name]
+    return {"items": items}
 
 
 @app.get("/api/samples")
@@ -473,11 +550,17 @@ def stop_latent_cache(_: None = Depends(_require_token)) -> Dict[str, Any]:
 
 
 @app.websocket("/ws/logs/{run_id}")
-async def ws_logs(websocket: WebSocket, run_id: str) -> None:
+async def ws_logs(
+    websocket: WebSocket,
+    run_id: str,
+    backlog: int = Query(default=2000, ge=0, le=50000),
+) -> None:
     if not await _require_ws_token(websocket):
         return
-    await ws_manager.connect(run_id, "logs", websocket)
+    await websocket.accept()
     try:
+        await _send_log_backlog(websocket, run_id, backlog)
+        ws_manager.add(run_id, "logs", websocket)
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:

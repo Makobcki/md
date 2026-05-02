@@ -255,6 +255,8 @@ class TrainConfig:
         fields = {f.name for f in cls.__dataclass_fields__.values()}
         kwargs = {k: v for k, v in data.items() if k in fields}
         extra = {k: v for k, v in data.items() if k not in fields}
+        if "images_only" not in kwargs and "image_only" in extra:
+            kwargs["images_only"] = extra["image_only"]
         if "channel_mults" in kwargs:
             kwargs["channel_mults"] = _as_tuple(kwargs["channel_mults"])
         if "attn_resolutions" in kwargs:

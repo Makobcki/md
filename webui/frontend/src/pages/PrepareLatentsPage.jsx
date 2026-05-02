@@ -2,8 +2,31 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api, wsUrl } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 import useLogBuffer from "../hooks/useLogBuffer.js";
+import ArgField from "../components/ArgField.jsx";
+import StatusPill from "../components/StatusPill.jsx";
 
-const statusClass = (status) => `status-pill ${status || ""}`;
+const settingGroups = [
+  {
+    title: "Файловая система / Кэш",
+    names: ["config", "limit", "shard-size", "decode-backend"],
+  },
+  {
+    title: "Производительность",
+    names: [
+      "batch-size",
+      "num-workers",
+      "prefetch-factor",
+      "pin-memory",
+      "queue-size",
+      "writer-threads",
+      "stats-every-sec",
+    ],
+  },
+  {
+    title: "GPU",
+    names: ["device", "latent-dtype", "autocast-dtype"],
+  },
+];
 
 export default function PrepareLatentsPage() {
   const [argSpecs, setArgSpecs] = useState([]);
@@ -13,10 +36,9 @@ export default function PrepareLatentsPage() {
   const [metrics, setMetrics] = useState([]);
   const [command, setCommand] = useState([]);
   const [error, setError] = useState("");
-  const [autoScroll, setAutoScroll] = useState(true);
 
   const logKey = runId ? `latents:logs:${runId}` : "latents:logs:idle";
-  const { lines: logLines, appendLines, clear: clearLogs } = useLogBuffer(logKey, {
+  const { lines: logLines, appendLines, replaceLines, clear: clearLogs } = useLogBuffer(logKey, {
     maxLines: 10000,
   });
 
@@ -44,7 +66,7 @@ export default function PrepareLatentsPage() {
     const poll = async () => {
       const stat = await api.getStatus();
       setStatus(stat);
-      if (stat.active && stat.run.run_type === "latent_cache") {
+      if (stat.active && stat.run?.run_type === "latent_cache") {
         setRunId(stat.run.run_id);
       }
     };
@@ -55,7 +77,33 @@ export default function PrepareLatentsPage() {
 
   useEffect(() => {
     if (!runId) return;
-    const ws = new WebSocket(wsUrl(`/ws/logs/${runId}`));
+    let cancelled = false;
+    const loadLogs = async () => {
+      try {
+        const [stdout, stderr] = await Promise.all([
+          api.getRunLog(runId, "stdout"),
+          api.getRunLog(runId, "stderr"),
+        ]);
+        if (cancelled) return;
+        replaceLines([
+          ...stdout.content.split("\n").filter(Boolean).map((line) => `[stdout] ${line}`),
+          ...stderr.content.split("\n").filter(Boolean).map((line) => `[stderr] ${line}`),
+        ]);
+      } catch (err) {
+        console.warn("failed to load log tail", err);
+      }
+    };
+    loadLogs();
+    const timer = setInterval(loadLogs, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [runId, replaceLines]);
+
+  useEffect(() => {
+    if (!runId) return;
+    const ws = new WebSocket(wsUrl(`/ws/logs/${runId}?backlog=0`));
     ws.onmessage = (event) => {
       const payload = JSON.parse(event.data);
       if (payload.type === "log") {
@@ -116,51 +164,8 @@ export default function PrepareLatentsPage() {
   const lastMetric = metrics[metrics.length - 1];
   const progressMax = lastMetric?.max_steps || 0;
   const progressValue = lastMetric?.processed ?? 0;
-
-  const renderField = (spec) => {
-    if (spec.choices && spec.choices.length > 0) {
-      return (
-        <select
-          value={args[spec.name] || ""}
-          onChange={(event) => handleChange(spec.name, event.target.value)}
-        >
-          {spec.choices.map((choice) => (
-            <option key={choice} value={choice}>
-              {choice}
-            </option>
-          ))}
-        </select>
-      );
-    }
-
-    if (spec.type === "int" || spec.type === "float") {
-      return (
-        <input
-          type="number"
-          value={args[spec.name]}
-          onChange={(event) => handleChange(spec.name, event.target.value)}
-        />
-      );
-    }
-
-    if (spec.type === "bool" || typeof spec.default === "boolean") {
-      return (
-        <input
-          type="checkbox"
-          checked={Boolean(args[spec.name])}
-          onChange={(event) => handleChange(spec.name, event.target.checked)}
-        />
-      );
-    }
-
-    return (
-      <input
-        type="text"
-        value={args[spec.name] ?? ""}
-        onChange={(event) => handleChange(spec.name, event.target.value)}
-      />
-    );
-  };
+  const activeRun = status.active ? status.run : null;
+  const activeRunType = activeRun?.run_type;
 
   const overview = useMemo(() => {
     if (!lastMetric) return [];
@@ -175,6 +180,24 @@ export default function PrepareLatentsPage() {
     ];
   }, [lastMetric]);
 
+  const groupedSpecs = useMemo(() => {
+    const visibleSpecs = argSpecs.filter((spec) => spec.name !== "overwrite");
+    const byName = new Map(visibleSpecs.map((spec) => [spec.name, spec]));
+    const used = new Set();
+    const groups = settingGroups
+      .map((group) => ({
+        ...group,
+        specs: group.names.map((name) => byName.get(name)).filter(Boolean),
+      }))
+      .filter((group) => group.specs.length > 0);
+    groups.forEach((group) => group.specs.forEach((spec) => used.add(spec.name)));
+    const other = visibleSpecs.filter((spec) => !used.has(spec.name));
+    if (other.length > 0) {
+      groups.push({ title: "Прочее", specs: other });
+    }
+    return groups;
+  }, [argSpecs]);
+
   return (
     <div className="page">
       <h1 className="page-title">Prepare Latents</h1>
@@ -183,19 +206,20 @@ export default function PrepareLatentsPage() {
           <div className="card">
             <div className="card-header">
               <h2 className="card-title">Control</h2>
-              <span className={statusClass(status.active ? "running" : "stopped")}>
-                {status.active ? "running" : "stopped"}
-              </span>
+              <StatusPill status={status.active ? "running" : "stopped"} />
             </div>
             {error && <div className="muted">{error}</div>}
-            {status.active && status.run.run_type !== "latent_cache" && (
-              <div className="muted">Другой job уже выполняется: {status.run.run_type}</div>
+            {status.active && !activeRun && (
+              <div className="muted">Job запускается...</div>
+            )}
+            {activeRun && activeRunType !== "latent_cache" && (
+              <div className="muted">Другой job уже выполняется: {activeRunType}</div>
             )}
             <div className="row">
               <button onClick={handleStart} disabled={status.active}>
                 Start
               </button>
-              <button className="secondary" onClick={handleRebuild} disabled={status.active}>
+              <button className="warning" onClick={handleRebuild} disabled={status.active}>
                 Rebuild cache
               </button>
               <button className="danger" onClick={handleStop} disabled={!status.active}>
@@ -207,7 +231,7 @@ export default function PrepareLatentsPage() {
                 <span style={{ width: `${Math.min(100, (progressValue / progressMax) * 100)}%` }} />
               </div>
             ) : null}
-            {command.length > 0 && <div className="muted">Command: {command.join(" ")}</div>}
+            {command.length > 0 && <div className="muted">Latent cache task prepared.</div>}
             <div className="grid">
               {overview.map((item) => (
                 <div key={item.label}>
@@ -218,19 +242,23 @@ export default function PrepareLatentsPage() {
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-header">
-              <h2 className="card-title">Cache Settings</h2>
-              <span className="muted">dataset/.cache</span>
-            </div>
-            <div className="grid">
-              {argSpecs.map((spec) => (
-                <div key={spec.name} className="card soft">
-                  <div className="muted">{spec.flags.join(", ")}</div>
-                  <label>{spec.name}</label>
-                  {renderField(spec)}
-                  <div className="muted">{spec.help}</div>
-                </div>
+          <div className="settings-panel">
+            <div className="settings-groups">
+              {groupedSpecs.map((group) => (
+                <section key={group.title} className="settings-section">
+                  <h3>{group.title}</h3>
+                  <div className="flat-grid">
+                    {group.specs.map((spec) => (
+                      <ArgField
+                        key={spec.name}
+                        spec={spec}
+                        value={args[spec.name]}
+                        onChange={handleChange}
+                        variant="flat"
+                      />
+                    ))}
+                  </div>
+                </section>
               ))}
             </div>
           </div>
@@ -241,20 +269,12 @@ export default function PrepareLatentsPage() {
             <div className="card-header">
               <h2 className="card-title">Live Logs</h2>
               <div className="row">
-                <label className="row">
-                  <input
-                    type="checkbox"
-                    checked={autoScroll}
-                    onChange={(event) => setAutoScroll(event.target.checked)}
-                  />
-                  Auto-scroll
-                </label>
                 <button className="ghost" onClick={clearLogs}>
                   Clear
                 </button>
               </div>
             </div>
-            <LogViewer lines={logLines} autoScroll={autoScroll} />
+            <LogViewer lines={logLines} />
             <div className="muted">Buffer: {logLines.length} / 10k lines</div>
           </div>
         </div>

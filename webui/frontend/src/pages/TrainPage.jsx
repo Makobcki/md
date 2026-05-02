@@ -4,8 +4,7 @@ import LogViewer from "../components/LogViewer.jsx";
 import LineChart from "../components/LineChart.jsx";
 import YamlEditor from "../components/YamlEditor.jsx";
 import useLogBuffer from "../hooks/useLogBuffer.js";
-
-const statusClass = (status) => `status-pill ${status || ""}`;
+import StatusPill from "../components/StatusPill.jsx";
 
 export default function TrainPage() {
   const [config, setConfig] = useState("");
@@ -17,12 +16,11 @@ export default function TrainPage() {
   const [error, setError] = useState("");
   const [checkpoints, setCheckpoints] = useState([]);
   const [resumeCkpt, setResumeCkpt] = useState("");
-  const [autoScroll, setAutoScroll] = useState(true);
   const [saving, setSaving] = useState(false);
 
   const saveTimeoutRef = useRef(null);
   const logKey = runId ? `train:logs:${runId}` : "train:logs:idle";
-  const { lines: logLines, appendLines, clear: clearLogs } = useLogBuffer(logKey, {
+  const { lines: logLines, appendLines, replaceLines, clear: clearLogs } = useLogBuffer(logKey, {
     maxLines: 10000,
   });
 
@@ -37,7 +35,7 @@ export default function TrainPage() {
     const poll = async () => {
       const stat = await api.getStatus();
       setStatus(stat);
-      if (stat.active && stat.run.run_type === "train") {
+      if (stat.active && stat.run?.run_type === "train") {
         setRunId(stat.run.run_id);
       }
     };
@@ -48,7 +46,54 @@ export default function TrainPage() {
 
   useEffect(() => {
     if (!runId) return;
-    const ws = new WebSocket(wsUrl(`/ws/logs/${runId}`));
+    let cancelled = false;
+    const loadLogs = async () => {
+      try {
+        const [stdout, stderr] = await Promise.all([
+          api.getRunLog(runId, "stdout"),
+          api.getRunLog(runId, "stderr"),
+        ]);
+        if (cancelled) return;
+        replaceLines([
+          ...stdout.content.split("\n").filter(Boolean).map((line) => `[stdout] ${line}`),
+          ...stderr.content.split("\n").filter(Boolean).map((line) => `[stderr] ${line}`),
+        ]);
+      } catch (err) {
+        console.warn("failed to load log tail", err);
+      }
+    };
+    loadLogs();
+    const timer = setInterval(loadLogs, 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [runId, replaceLines]);
+
+  useEffect(() => {
+    if (!runId) return;
+    let cancelled = false;
+    const loadMetrics = async () => {
+      try {
+        const data = await api.getRunMetrics(runId);
+        if (!cancelled) {
+          setMetrics(data.items || []);
+        }
+      } catch (err) {
+        console.warn("failed to load metrics", err);
+      }
+    };
+    loadMetrics();
+    const timer = setInterval(loadMetrics, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [runId]);
+
+  useEffect(() => {
+    if (!runId) return;
+    const ws = new WebSocket(wsUrl(`/ws/logs/${runId}?backlog=0`));
     ws.onmessage = (event) => {
       const payload = JSON.parse(event.data);
       if (payload.type === "log") {
@@ -134,6 +179,8 @@ export default function TrainPage() {
   const lastMetric = metrics[metrics.length - 1];
   const progressMax = lastMetric?.max_steps || 0;
   const progressValue = lastMetric?.step ?? 0;
+  const activeRun = status.active ? status.run : null;
+  const activeRunType = activeRun?.run_type;
 
   return (
     <div className="page">
@@ -145,7 +192,9 @@ export default function TrainPage() {
               <h2 className="card-title">Config Editor</h2>
               <span className="muted">{isDirty ? "Unsaved changes" : "Saved"}</span>
             </div>
-            <YamlEditor value={config} onChange={setConfig} onSave={() => handleSave(false)} />
+            <div className="train-config-editor">
+              <YamlEditor value={config} onChange={setConfig} onSave={() => handleSave(false)} />
+            </div>
             <div className="row" style={{ marginTop: "12px" }}>
               <button onClick={() => handleSave(false)} disabled={saving}>
                 Save
@@ -156,16 +205,17 @@ export default function TrainPage() {
         </div>
 
         <div className="page">
-          <div className="card">
+          <div className="card training-control-card">
             <div className="card-header">
               <h2 className="card-title">Training Control</h2>
-              <span className={statusClass(status.active ? "running" : "stopped")}>
-                {status.active ? "running" : "stopped"}
-              </span>
+              <StatusPill status={status.active ? "running" : "stopped"} />
             </div>
             {error && <div className="muted">{error}</div>}
-            {status.active && status.run.run_type !== "train" && (
-              <div className="muted">Другой job уже выполняется: {status.run.run_type}</div>
+            {status.active && !activeRun && (
+              <div className="muted">Job запускается...</div>
+            )}
+            {activeRun && activeRunType !== "train" && (
+              <div className="muted">Другой job уже выполняется: {activeRunType}</div>
             )}
             <div className="row">
               <button onClick={handleStart} disabled={status.active}>
@@ -195,9 +245,9 @@ export default function TrainPage() {
                 ))}
               </select>
             </div>
-            {command.length > 0 && <div className="muted">Command: {command.join(" ")}</div>}
+            {command.length > 0 && <div className="muted">Training command prepared.</div>}
             {lastMetric && (
-              <div className="grid">
+              <div className="grid train-metrics-grid">
                 <div>
                   <div className="muted">elapsed</div>
                   <div>{Math.round(lastMetric.elapsed_sec)}s</div>
@@ -234,20 +284,12 @@ export default function TrainPage() {
             <div className="card-header">
               <h2 className="card-title">Live Logs</h2>
               <div className="row">
-                <label className="row">
-                  <input
-                    type="checkbox"
-                    checked={autoScroll}
-                    onChange={(event) => setAutoScroll(event.target.checked)}
-                  />
-                  Auto-scroll
-                </label>
                 <button className="ghost" onClick={clearLogs}>
                   Clear
                 </button>
               </div>
             </div>
-            <LogViewer lines={logLines} autoScroll={autoScroll} />
+            <LogViewer lines={logLines} />
             <div className="muted">Buffer: {logLines.length} / 10k lines</div>
           </div>
 

@@ -43,7 +43,7 @@ def main() -> None:
         default="ddim",
         choices=("ddim", "diffusion", "euler", "heun", "dpm_solver"),
     )
-    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
