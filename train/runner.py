@@ -187,22 +187,92 @@ def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: 
 
 
 class _MMDiTCachedDataset(torch.utils.data.Dataset):
-    def __init__(self, latent_ds: ImageTextDataset, text_cache: TextCache) -> None:
+    def __init__(
+        self,
+        latent_ds: ImageTextDataset,
+        text_cache: TextCache,
+        *,
+        dataset_tasks: dict[str, float] | None = None,
+    ) -> None:
         self.latent_ds = latent_ds
         self.text_cache = text_cache
         self.entries = latent_ds.entries
+        task_weights = dict(dataset_tasks or {"txt2img": 1.0})
+        self.task_names = [name for name, weight in task_weights.items() if float(weight) > 0]
+        weights = torch.tensor([float(task_weights[name]) for name in self.task_names], dtype=torch.float32)
+        if not self.task_names or float(weights.sum().item()) <= 0:
+            raise RuntimeError("MMDiT dataset_tasks must include at least one positive task weight.")
+        self.task_probs = weights / weights.sum()
 
     def __len__(self) -> int:
         return len(self.latent_ds)
+
+    def _sample_task(self) -> str:
+        if len(self.task_names) == 1:
+            return self.task_names[0]
+        idx = int(torch.multinomial(self.task_probs, 1).item())
+        return self.task_names[idx]
+
+    def _random_mask(self, x0: torch.Tensor) -> torch.Tensor:
+        _, h, w = x0.shape
+        mask = torch.zeros((1, h, w), dtype=x0.dtype, device=x0.device)
+        mh_min = max(h // 8, 1)
+        mw_min = max(w // 8, 1)
+        mh_max = max(h // 2, mh_min)
+        mw_max = max(w // 2, mw_min)
+        mh = int(torch.randint(mh_min, mh_max + 1, ()).item())
+        mw = int(torch.randint(mw_min, mw_max + 1, ()).item())
+        y0 = int(torch.randint(0, max(h - mh + 1, 1), ()).item())
+        x0_pos = int(torch.randint(0, max(w - mw + 1, 1), ()).item())
+        mask[:, y0 : y0 + mh, x0_pos : x0_pos + mw] = 1
+        return mask
 
     def __getitem__(self, idx: int) -> TrainBatch:
         raw = self.latent_ds[idx]
         x0 = raw[0] if isinstance(raw, tuple) else raw
         key = str(self.entries[idx].get("md5", idx))
-        return TrainBatch(x0=x0, text=self.text_cache.load(key), task="txt2img", metadata={"key": key})
+        task = self._sample_task()
+        source_latent = None
+        mask = None
+        if task == "img2img":
+            source_latent = x0.clone()
+        elif task == "inpaint":
+            mask = self._random_mask(x0)
+            source_latent = x0 * (1.0 - mask)
+        elif task != "txt2img":
+            raise RuntimeError(f"Unsupported MMDiT dataset task: {task}")
+        return TrainBatch(
+            x0=x0,
+            text=self.text_cache.load(key),
+            source_latent=source_latent,
+            mask=mask,
+            task=task,
+            metadata={"key": key, "task": task},
+        )
 
 
 def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
+    has_source = any(item.source_latent is not None for item in batch)
+    has_mask = any(item.mask is not None for item in batch)
+    source_latent = None
+    mask = None
+    if has_source:
+        source_latent = torch.stack(
+            [
+                item.source_latent if item.source_latent is not None else torch.zeros_like(item.x0)
+                for item in batch
+            ],
+            dim=0,
+        )
+    if has_mask:
+        mask = torch.stack(
+            [
+                item.mask if item.mask is not None else torch.zeros((1, *item.x0.shape[-2:]), dtype=item.x0.dtype)
+                for item in batch
+            ],
+            dim=0,
+        )
+    tasks = [item.task for item in batch]
     return TrainBatch(
         x0=torch.stack([item.x0 for item in batch], dim=0),
         text=TextConditioning(
@@ -217,8 +287,13 @@ def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
             else torch.cat([item.text.pooled for item in batch], dim=0),
             is_uncond=None,
         ),
-        task="txt2img",
-        metadata={"keys": [item.metadata.get("key") if item.metadata else None for item in batch]},
+        source_latent=source_latent,
+        mask=mask,
+        task=tasks[0] if all(task == tasks[0] for task in tasks) else "mixed",
+        metadata={
+            "keys": [item.metadata.get("key") if item.metadata else None for item in batch],
+            "tasks": tasks,
+        },
     )
 
 
@@ -291,7 +366,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         shard_cache_size=int(cfg.text_shard_cache_size),
     )
     _validate_text_cache_for_mmdit(text_cache, cfg, train_entries + val_entries)
-    ds = _MMDiTCachedDataset(latent_ds, text_cache)
+    ds = _MMDiTCachedDataset(latent_ds, text_cache, dataset_tasks=cfg.dataset_tasks)
     if len(ds) == 0:
         raise RuntimeError("MMDiT dataset is empty after latent/text cache filtering.")
     dl = DataLoader(
@@ -326,7 +401,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         )
         if len(val_latent_ds) > 0:
             dl_val = DataLoader(
-                _MMDiTCachedDataset(val_latent_ds, text_cache),
+                _MMDiTCachedDataset(val_latent_ds, text_cache, dataset_tasks={"txt2img": 1.0}),
                 batch_size=int(cfg.batch_size),
                 shuffle=False,
                 num_workers=_resolve_num_workers(int(cfg.num_workers)),
