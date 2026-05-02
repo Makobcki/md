@@ -62,4 +62,15 @@ def test_train_config_accepts_mmdit_tiny_yaml() -> None:
     assert cfg.hidden_dim == 128
     assert cfg.depth == 2
     assert cfg.batch_size == 1
+    assert cfg.dataset_limit == 32
     assert cfg.save_every == 50
+
+
+def test_train_config_accepts_mmdit_smoke_yaml() -> None:
+    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_mmdit_rf_smoke.yaml"))
+
+    assert cfg.architecture == "mmdit_rf"
+    assert cfg.hidden_dim == 64
+    assert cfg.depth == 1
+    assert cfg.dataset_limit == 32
+    assert cfg.eval_every == 0

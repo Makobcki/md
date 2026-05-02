@@ -16,7 +16,7 @@ class MMDiTConfig:
     rms_norm: bool = True
     swiglu: bool = True
     adaln_zero: bool = True
-    pos_embed: str = "rope_2d"
+    pos_embed: str = "sincos_2d"
     double_stream_blocks: int = 16
     single_stream_blocks: int = 8
     dropout: float = 0.0
@@ -59,7 +59,7 @@ class MMDiTConfig:
             "rms_norm": bool(model.get("rms_norm", True)),
             "swiglu": bool(model.get("swiglu", True)),
             "adaln_zero": bool(model.get("adaln_zero", True)),
-            "pos_embed": str(model.get("pos_embed", "rope_2d")),
+            "pos_embed": str(model.get("pos_embed", "sincos_2d")),
             "double_stream_blocks": int(model.get("double_stream_blocks", 16)),
             "single_stream_blocks": int(model.get("single_stream_blocks", 8)),
             "dropout": float(model.get("dropout", 0.0)),
@@ -70,4 +70,3 @@ class MMDiTConfig:
             "zero_init_final": bool(model.get("zero_init_final", True)),
         }
         return cls(**kwargs)
-

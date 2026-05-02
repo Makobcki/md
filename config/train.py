@@ -137,6 +137,11 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
             flat.setdefault("latent_cache_sharded", cache["sharded"])
         if "dtype" in cache:
             flat.setdefault("latent_dtype", cache["dtype"])
+        if "text_shard_cache_size" in cache and "text_shard_cache_size" not in flat:
+            flat["text_shard_cache_size"] = cache["text_shard_cache_size"]
+    debug = data.get("debug")
+    if isinstance(debug, dict) and "dataset_limit" in debug and "dataset_limit" not in flat:
+        flat["dataset_limit"] = debug["dataset_limit"]
     return flat
 
 
@@ -156,6 +161,7 @@ class TrainConfig:
     val_ratio: float = 0.01
     cache_dir: str = ".cache"
     failed_list: str = "failed/md5.txt"
+    dataset_limit: int = 0
 
     seed: int = 42
     out_dir: str = "./runs/danbooru_512"
@@ -268,7 +274,7 @@ class TrainConfig:
     rms_norm: bool = True
     swiglu: bool = True
     adaln_zero: bool = True
-    pos_embed: str = "rope_2d"
+    pos_embed: str = "sincos_2d"
     double_stream_blocks: int = 16
     single_stream_blocks: int = 8
     attn_dropout: float = 0.0
@@ -276,6 +282,7 @@ class TrainConfig:
     pooled_dim: int = 1024
     text_cache: bool = False
     text_cache_dir: str = ".cache/text"
+    text_shard_cache_size: int = 2
 
     flow_timestep_sampling: str = "logit_normal"
     flow_logit_mean: float = 0.0
@@ -343,6 +350,8 @@ class TrainConfig:
             raise ValueError("decay_steps must be non-negative.")
         if self.batch_size <= 0 or self.grad_accum_steps <= 0:
             raise ValueError("batch_size and grad_accum_steps must be positive.")
+        if self.dataset_limit < 0:
+            raise ValueError("dataset_limit must be non-negative.")
         if self.val_every < 0:
             raise ValueError("val_every must be non-negative.")
         if self.val_batches < 0:
@@ -415,6 +424,8 @@ class TrainConfig:
             raise ValueError("ema_decay_slow must be in (0, 1].")
         if self.ema_switch_step < 0:
             raise ValueError("ema_switch_step must be non-negative.")
+        if self.text_shard_cache_size <= 0:
+            raise ValueError("text_shard_cache_size must be positive.")
 
     @classmethod
     def from_yaml(cls, path: str) -> "TrainConfig":
