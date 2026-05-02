@@ -4,11 +4,12 @@ import argparse
 import json
 import os
 import queue
+import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -18,6 +19,7 @@ from tqdm import tqdm
 from config.train import TrainConfig
 from data_loader import DataConfig, build_or_load_index, latent_cache_path, load_image_tensor
 from diffusion.events import EventBus, JsonlFileSink, StdoutJsonSink
+from diffusion.utils.oom import is_torch_oom_error, print_torch_oom
 from diffusion.utils import build_run_metadata
 from diffusion.vae import VAEWrapper
 
@@ -28,6 +30,117 @@ def _latent_dtype(name: str) -> torch.dtype:
     if name == "fp16":
         return torch.float16
     raise ValueError("latent_dtype must be 'fp16' or 'bf16'.")
+
+
+@dataclass(frozen=True)
+class _LatentPrepareOptions:
+    overwrite: bool = False
+    limit: Optional[int] = None
+    batch_size: int = 16
+    num_workers: int = 4
+    prefetch_factor: int = 2
+    pin_memory: bool = True
+    device: str = "auto"
+    latent_dtype: str = "fp16"
+    autocast_dtype: str = "fp16"
+    queue_size: int = 64
+    writer_threads: int = 1
+    shard_size: int = 4096
+    stats_every_sec: float = 5.0
+    decode_backend: str = "auto"
+
+
+def _provided_cli_dests(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
+    option_dests: dict[str, str] = {}
+    for action in parser._actions:
+        for option in action.option_strings:
+            option_dests[option] = action.dest
+
+    provided: set[str] = set()
+    for token in argv:
+        if token == "--":
+            break
+        if not token.startswith("--"):
+            continue
+        option = token.split("=", 1)[0]
+        dest = option_dests.get(option)
+        if dest is not None:
+            provided.add(dest)
+    return provided
+
+
+def _latent_prepare_config_values(cfg: TrainConfig) -> dict[str, Any]:
+    valid = {field.name for field in fields(_LatentPrepareOptions)}
+    values: dict[str, Any] = {}
+
+    section = cfg.extra.get("prepare_latents", cfg.extra.get("latent_prepare"))
+    if section is not None:
+        if not isinstance(section, dict):
+            raise RuntimeError("prepare_latents/latent_prepare config section must be a mapping.")
+        values.update({str(k).replace("-", "_"): v for k, v in section.items()})
+
+    prefix = "latent_prepare_"
+    for key, value in cfg.extra.items():
+        if key.startswith(prefix):
+            values[key[len(prefix):].replace("-", "_")] = value
+
+    unknown = sorted(set(values) - valid)
+    if unknown:
+        raise RuntimeError("Unknown latent_prepare config option(s): " + ", ".join(unknown))
+    return values
+
+
+def _coerce_prepare_options(options: _LatentPrepareOptions) -> _LatentPrepareOptions:
+    limit = None if options.limit in (None, "") else int(options.limit)
+    coerced = _LatentPrepareOptions(
+        overwrite=bool(options.overwrite),
+        limit=limit,
+        batch_size=int(options.batch_size),
+        num_workers=int(options.num_workers),
+        prefetch_factor=int(options.prefetch_factor),
+        pin_memory=bool(options.pin_memory),
+        device=str(options.device),
+        latent_dtype=str(options.latent_dtype),
+        autocast_dtype=str(options.autocast_dtype),
+        queue_size=int(options.queue_size),
+        writer_threads=int(options.writer_threads),
+        shard_size=int(options.shard_size),
+        stats_every_sec=float(options.stats_every_sec),
+        decode_backend=str(options.decode_backend),
+    )
+    if coerced.device not in {"auto", "cpu", "cuda"}:
+        raise RuntimeError("latent_prepare_device must be one of: auto, cpu, cuda.")
+    if coerced.latent_dtype not in {"fp16", "bf16"}:
+        raise RuntimeError("latent_prepare_latent_dtype must be 'fp16' or 'bf16'.")
+    if coerced.autocast_dtype not in {"fp16", "bf16"}:
+        raise RuntimeError("latent_prepare_autocast_dtype must be 'fp16' or 'bf16'.")
+    if coerced.decode_backend not in {"auto", "pil", "torchvision"}:
+        raise RuntimeError("latent_prepare_decode_backend must be one of: auto, pil, torchvision.")
+    return coerced
+
+
+def _resolve_prepare_options(
+    cfg: TrainConfig,
+    args: argparse.Namespace,
+    provided_dests: set[str],
+) -> _LatentPrepareOptions:
+    options = _LatentPrepareOptions(
+        latent_dtype=str(cfg.latent_dtype),
+        autocast_dtype=str(cfg.latent_dtype),
+        shard_size=4096 if bool(cfg.latent_cache_sharded) else 0,
+    )
+    config_values = _latent_prepare_config_values(cfg)
+    if config_values:
+        options = replace(options, **config_values)
+
+    cli_values = {
+        key: getattr(args, key)
+        for key in provided_dests
+        if key != "config" and hasattr(args, key)
+    }
+    if cli_values:
+        options = replace(options, **cli_values)
+    return _coerce_prepare_options(options)
 
 
 def _init_latent_stats() -> dict:
@@ -249,10 +362,10 @@ class _ShardWriter:
         self.tmp_index_path.replace(self.index_path)
 
 
-def main() -> None:
+def _main_impl(argv: Optional[list[str]] = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="./config/train.yaml")
-    ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--num-workers", type=int, default=4)
@@ -266,9 +379,12 @@ def main() -> None:
     ap.add_argument("--shard-size", type=int, default=4096)
     ap.add_argument("--stats-every-sec", type=float, default=5.0)
     ap.add_argument("--decode-backend", default="auto", choices=("auto", "pil", "torchvision"))
-    args = ap.parse_args()
+    argv = argv if argv is not None else sys.argv[1:]
+    provided_dests = _provided_cli_dests(ap, argv)
+    args = ap.parse_args(argv)
 
     cfg = TrainConfig.from_yaml(args.config)
+    options = _resolve_prepare_options(cfg, args, provided_dests)
     if cfg.mode != "latent":
         raise RuntimeError("prepare_latents requires mode=latent in config.")
     if not cfg.vae_pretrained:
@@ -304,13 +420,13 @@ def main() -> None:
     )
     train_entries, _ = build_or_load_index(dcfg)
 
-    if args.device == "auto":
+    if options.device == "auto":
         device_str = "cuda" if torch.cuda.is_available() else "cpu"
     else:
-        device_str = args.device
+        device_str = options.device
     device = torch.device(device_str)
-    dtype = _latent_dtype(args.latent_dtype or cfg.latent_dtype)
-    autocast_dtype = _latent_dtype(args.autocast_dtype or cfg.latent_dtype)
+    dtype = _latent_dtype(options.latent_dtype)
+    autocast_dtype = _latent_dtype(options.autocast_dtype)
     vae = VAEWrapper(
         pretrained=str(cfg.vae_pretrained),
         freeze=True,
@@ -321,28 +437,28 @@ def main() -> None:
 
     dataset = _LatentPrepDataset(
         train_entries,
-        limit=args.limit,
-        decode_backend=str(args.decode_backend),
+        limit=options.limit,
+        decode_backend=str(options.decode_backend),
     )
     dl = DataLoader(
         dataset,
-        batch_size=int(args.batch_size),
-        num_workers=int(args.num_workers),
-        pin_memory=bool(args.pin_memory),
-        prefetch_factor=int(args.prefetch_factor) if int(args.num_workers) > 0 else None,
+        batch_size=int(options.batch_size),
+        num_workers=int(options.num_workers),
+        pin_memory=bool(options.pin_memory),
+        prefetch_factor=int(options.prefetch_factor) if int(options.num_workers) > 0 else None,
         shuffle=False,
         collate_fn=_collate_items,
     )
 
-    if args.queue_size <= 0:
+    if options.queue_size <= 0:
         raise RuntimeError("--queue-size must be positive.")
-    if args.writer_threads <= 0:
+    if options.writer_threads <= 0:
         raise RuntimeError("--writer-threads must be positive.")
-    if args.shard_size < 0:
+    if options.shard_size < 0:
         raise RuntimeError("--shard-size must be >= 0.")
-    if args.stats_every_sec <= 0:
+    if options.stats_every_sec <= 0:
         raise RuntimeError("--stats-every-sec must be positive.")
-    if args.shard_size > 0 and args.writer_threads != 1:
+    if options.shard_size > 0 and options.writer_threads != 1:
         raise RuntimeError("Sharded mode requires --writer-threads=1.")
 
     total = len(dataset)
@@ -369,7 +485,7 @@ def main() -> None:
         "latent_shape": [int(cfg.latent_channels),
                          int(cfg.image_size) // int(cfg.latent_downsample_factor),
                          int(cfg.image_size) // int(cfg.latent_downsample_factor)],
-        "dtype": str(cfg.latent_dtype),
+        "dtype": str(options.latent_dtype),
         "layout": "contiguous",
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "code_version": code_version,
@@ -377,15 +493,17 @@ def main() -> None:
 
     shard_writer: Optional[_ShardWriter] = None
     existing_md5s: set[str] = set()
-    if args.shard_size > 0:
+    if options.shard_size > 0:
         shard_dir.mkdir(parents=True, exist_ok=True)
-        index_path = cache_dir / "index.jsonl"
-        if args.overwrite:
+        index_path = Path(str(cfg.latent_cache_index))
+        if not index_path.is_absolute():
+            index_path = cache_dir / index_path
+        if options.overwrite:
             if index_path.exists():
                 index_path.unlink()
             for shard_path in shard_dir.glob("shard_*.pt"):
                 shard_path.unlink()
-        if index_path.exists() and not args.overwrite:
+        if index_path.exists() and not options.overwrite:
             for line in index_path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
@@ -403,13 +521,13 @@ def main() -> None:
                 start_shard_id = len(existing_shards)
         shard_writer = _ShardWriter(
             shard_dir=shard_dir,
-            shard_size=int(args.shard_size),
+            shard_size=int(options.shard_size),
             index_path=index_path,
             meta_common=meta_common,
             start_shard_id=start_shard_id,
         )
 
-    task_queue: queue.Queue[Optional[_SaveTask]] = queue.Queue(maxsize=int(args.queue_size))
+    task_queue: queue.Queue[Optional[_SaveTask]] = queue.Queue(maxsize=int(options.queue_size))
     queue_wait_ms = {"value": 0.0}
 
     def _enqueue_task(task: _SaveTask) -> None:
@@ -425,7 +543,14 @@ def main() -> None:
                 break
             try:
                 start_save = time.perf_counter()
-                _save_latent_cpu(task.latent, task.out_path, cfg, dtype, code_version)
+                _save_latent_cpu(
+                    task.latent,
+                    task.out_path,
+                    cfg,
+                    dtype,
+                    str(options.latent_dtype),
+                    code_version,
+                )
                 elapsed_ms = (time.perf_counter() - start_save) * 1000.0
                 save_stats.add_saved(1, elapsed_ms)
             except Exception as exc:
@@ -459,8 +584,8 @@ def main() -> None:
                 task_queue.task_done()
 
     writer_threads = []
-    for _ in range(int(args.writer_threads)):
-        target = _writer_loop_sharded if args.shard_size > 0 else _writer_loop
+    for _ in range(int(options.writer_threads)):
+        target = _writer_loop_sharded if options.shard_size > 0 else _writer_loop
         thread = threading.Thread(target=target, daemon=True)
         thread.start()
         writer_threads.append(thread)
@@ -482,14 +607,14 @@ def main() -> None:
                     f.write(f"{item['md5']}\tload\t{item['error']}\n")
                 continue
             md5 = item["md5"]
-            if args.shard_size > 0:
-                if md5 in existing_md5s and not args.overwrite:
+            if options.shard_size > 0:
+                if md5 in existing_md5s and not options.overwrite:
                     skipped += 1
                     continue
                 out_path = cache_dir
             else:
                 out_path = latent_cache_path(cache_dir, md5)
-                if out_path.exists() and not args.overwrite:
+                if out_path.exists() and not options.overwrite:
                     skipped += 1
                     continue
             batch_items.append((md5, out_path, item["x"]))
@@ -513,7 +638,7 @@ def main() -> None:
             encode_ms = (time.perf_counter() - encode_start) * 1000.0
             _update_latent_stats(stats, z_batch)
         except RuntimeError as e:
-            if "out of memory" in str(e).lower():
+            if is_torch_oom_error(e):
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 raise RuntimeError("OOM during VAE encode; reduce --batch-size or use fewer workers.") from e
@@ -552,7 +677,7 @@ def main() -> None:
         timing["items"] += len(batch_items)
 
         now = time.perf_counter()
-        if now - last_log >= float(args.stats_every_sec):
+        if now - last_log >= float(options.stats_every_sec):
             snapshot = save_stats.snapshot()
             save_delta_ms = snapshot["save_ms"] - last_save_snapshot["save_ms"]
             save_delta_items = snapshot["save_items"] - last_save_snapshot["save_items"]
@@ -629,6 +754,7 @@ def _save_latent_cpu(
     out_path: Path,
     cfg: TrainConfig,
     dtype: torch.dtype,
+    dtype_name: str,
     code_version: Optional[str],
 ) -> None:
     _validate_latent_tensor(z, cfg)
@@ -639,7 +765,7 @@ def _save_latent_cpu(
         "vae_pretrained": str(cfg.vae_pretrained),
         "scaling_factor": float(cfg.vae_scaling_factor),
         "latent_shape": list(z.shape),
-        "dtype": str(cfg.latent_dtype),
+        "dtype": dtype_name,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "code_version": code_version,
     }
@@ -663,6 +789,16 @@ def _validate_latent_tensor(z: torch.Tensor, cfg: TrainConfig) -> None:
     w = int(cfg.image_size) // int(cfg.latent_downsample_factor)
     if z.shape[-2:] != (h, w):
         raise RuntimeError(f"latent spatial mismatch: {tuple(z.shape[-2:])} != {(h, w)}")
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    try:
+        _main_impl(argv)
+    except Exception as exc:
+        if is_torch_oom_error(exc):
+            print_torch_oom(exc, context="latent preparation")
+            raise SystemExit(2) from None
+        raise
 
 
 if __name__ == "__main__":

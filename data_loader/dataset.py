@@ -183,7 +183,7 @@ class ImageTextDataset(Dataset):
         if self.latent_shard_cache_size <= 0:
             raise ValueError("latent_shard_cache_size must be positive.")
 
-        if self.tokenizer is not None:
+        if self.tokenizer is not None and self.cond_drop_prob > 0:
             empty_ids, empty_mask = self.tokenizer.encode("")
             self._empty_ids = empty_ids
             self._empty_mask = empty_mask
