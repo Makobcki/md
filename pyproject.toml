@@ -75,7 +75,6 @@ include = [
     "sample*",
     "samplers*",
     "scripts*",
-    "text_enc*",
     "tg_bot*",
     "train*",
     "webui*",

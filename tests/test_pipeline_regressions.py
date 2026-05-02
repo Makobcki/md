@@ -119,19 +119,12 @@ def test_frozen_text_encoder_bundle_uses_t5_encoder_model(monkeypatch) -> None:
     ]
 
 
-def test_makefile_exposes_mmdit_check_targets() -> None:
-    makefile = Path("Makefile").read_text(encoding="utf-8")
-
-    assert "check-mmdit-smoke-resume:" in makefile
-    assert "check-mmdit-overfit:" in makefile
-
-
 def test_mmdit_smoke_config_indexes_metadata_jsonl(tmp_path: Path) -> None:
     from dataclasses import replace
 
     from config.train import TrainConfig
 
-    cfg = TrainConfig.from_yaml("config/train_mmdit_rf_smoke.yaml")
+    cfg = TrainConfig.from_yaml("config/train_smoke.yaml")
     root = tmp_path / "pixso_512"
     image_dir = root / cfg.image_dir
     image_dir.mkdir(parents=True)
@@ -167,7 +160,7 @@ def test_mmdit_smoke_config_indexes_metadata_jsonl(tmp_path: Path) -> None:
     assert Path(train_entries[0]["img"]).name == "sample-001.png"
 
 
-def test_diffusion_package_exports_legacy_config() -> None:
-    from diffusion import DiffusionConfig
+def test_diffusion_package_no_longer_exports_legacy_config() -> None:
+    import diffusion
 
-    assert DiffusionConfig.__name__ == "DiffusionConfig"
+    assert not hasattr(diffusion, "DiffusionConfig")

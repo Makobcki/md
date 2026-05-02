@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from config.train import TrainConfig
 
 
@@ -12,100 +14,30 @@ def _load_profile(name: str) -> TrainConfig:
     return TrainConfig.from_yaml(str(ROOT / "config" / name))
 
 
-def test_image_only_profile_is_unconditional_latent_baseline() -> None:
-    cfg = _load_profile("train_image_only.yaml")
-
-    assert cfg.mode == "latent"
-    assert cfg.latent_cache is True
-    assert cfg.latent_cache_sharded is True
-    assert cfg.images_only is True
-    assert cfg.use_text_conditioning is False
-    assert cfg.eval_prompts_file == ""
-    assert cfg.eval_cfg == 1.0
-    assert cfg.noise_schedule == "cosine"
-    assert cfg.prediction_type == "v"
-    assert cfg.self_conditioning is True
-
-
-def test_text_to_image_profile_enables_text_conditioning() -> None:
-    cfg = _load_profile("train_text_to_image.yaml")
-
-    assert cfg.mode == "latent"
-    assert cfg.latent_cache is True
-    assert cfg.latent_cache_sharded is True
-    assert cfg.images_only is False
-    assert cfg.use_text_conditioning is True
-    assert cfg.meta_dir == "meta"
-    assert cfg.tags_dir == "tags"
-    assert cfg.min_tag_count >= 1
-    assert cfg.eval_prompts_file
-    assert cfg.eval_cfg > 1.0
-    assert 0.10 <= cfg.cond_drop_prob <= 0.20
-
-
-def test_profiles_map_to_distinct_unet_conditioning_modes() -> None:
-    image_only = _load_profile("train_image_only.yaml")
-    text_to_image = _load_profile("train_text_to_image.yaml")
-
-    image_only_model = image_only.to_model_config()
-    text_to_image_model = text_to_image.to_model_config()
-
-    assert image_only_model.use_text_conditioning is False
-    assert text_to_image_model.use_text_conditioning is True
-    assert image_only_model.self_conditioning is True
-    assert text_to_image_model.self_conditioning is True
-
-
-def test_mmdit_profiles_use_tracked_eval_prompts_and_dataset_root() -> None:
-    default_cfg = TrainConfig()
-    smoke_cfg = _load_profile("train_mmdit_rf_smoke.yaml")
-
-    assert default_cfg.data_root == smoke_cfg.data_root
-    assert default_cfg.image_dir == smoke_cfg.image_dir
-    assert default_cfg.eval_prompts_file == "./data/eval_prompts/core.txt"
-
-    for name in (
-        "train_mmdit_rf.yaml",
-        "train_mmdit_rf_dev.yaml",
-        "train_mmdit_rf_tiny.yaml",
-        "train_mmdit_rf_smoke.yaml",
-        "train_mmdit_rf_smoke_resume.yaml",
-        "train_mmdit_rf_overfit.yaml",
-        "train_mmdit_rf_overfit_resume.yaml",
-    ):
-        cfg = _load_profile(name)
-        assert cfg.data_root == smoke_cfg.data_root
-        assert cfg.image_dir == smoke_cfg.image_dir
-        assert cfg.meta_dir == smoke_cfg.meta_dir
-        assert cfg.tags_dir == smoke_cfg.tags_dir
-        if name != "train_mmdit_rf.yaml":
-            assert cfg.eval_prompts_file.startswith("./data/eval_prompts/")
-
-
-
-def test_mmdit_smoke_resume_profile_extends_smoke_run() -> None:
-    smoke = _load_profile("train_mmdit_rf_smoke.yaml")
-    resume = _load_profile("train_mmdit_rf_smoke_resume.yaml")
-
-    assert smoke.architecture == "mmdit_rf"
-    assert resume.architecture == "mmdit_rf"
-    assert resume.out_dir == smoke.out_dir
-    assert resume.resume_ckpt.endswith("ckpt_latest.pt")
-    assert resume.max_steps > smoke.max_steps
-    assert resume.eval_every == 0
-
-
-def test_mmdit_overfit_profile_is_next_control_stage() -> None:
-    cfg = _load_profile("train_mmdit_rf_overfit.yaml")
-    resume = _load_profile("train_mmdit_rf_overfit_resume.yaml")
+def test_main_profile_is_mmdit_rectified_flow() -> None:
+    cfg = _load_profile("train.yaml")
 
     assert cfg.architecture == "mmdit_rf"
     assert cfg.objective == "rectified_flow"
-    assert cfg.out_dir.endswith("mmdit_overfit")
-    assert cfg.dataset_limit == 8
-    assert cfg.max_steps == cfg.sanity_overfit_steps
-    assert cfg.eval_every == 0
-    assert cfg.sampling_sampler == "flow_heun"
-    assert resume.out_dir == cfg.out_dir
-    assert resume.resume_ckpt.endswith("ckpt_latest.pt")
-    assert resume.max_steps > cfg.max_steps
+    assert cfg.prediction_type == "flow_velocity"
+    assert cfg.mode == "latent"
+    assert cfg.eval_sampler == "flow_heun"
+    assert cfg.latent_cache is True
+    assert cfg.text_cache is True
+    assert cfg.cache_auto_prepare is True
+    assert cfg.cache_rebuild_if_stale is False
+
+
+def test_legacy_architecture_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Only architecture=mmdit_rf is supported"):
+        TrainConfig.from_dict({"architecture": "unet" + "_v1"})
+
+
+def test_supported_profiles_use_mmdit_rf() -> None:
+    for name in ("train.yaml", "train_dev.yaml", "train_overfit.yaml", "train_smoke.yaml"):
+        cfg = _load_profile(name)
+        assert cfg.architecture == "mmdit_rf"
+        assert cfg.objective == "rectified_flow"
+        assert cfg.mode == "latent"
+        assert cfg.sampling_sampler in {"flow_euler", "flow_heun"}
+        assert cfg.eval_sampler in {"flow_euler", "flow_heun"}

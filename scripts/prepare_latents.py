@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, fields, replace
@@ -13,6 +14,7 @@ from typing import Any, Optional
 
 import numpy as np
 import torch
+import yaml
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -117,6 +119,17 @@ def _coerce_prepare_options(options: _LatentPrepareOptions) -> _LatentPrepareOpt
     if coerced.decode_backend not in {"auto", "pil", "torchvision"}:
         raise RuntimeError("latent_prepare_decode_backend must be one of: auto, pil, torchvision.")
     return coerced
+
+
+def prepare_latent_cache_for_config(cfg: TrainConfig, *, overwrite: bool | None = None) -> None:
+    """Callable API used by training auto-cache preparation."""
+    with tempfile.TemporaryDirectory(prefix="md-latent-config-") as tmp_dir:
+        config_path = Path(tmp_dir) / "train.yaml"
+        config_path.write_text(yaml.safe_dump(cfg.to_dict(), sort_keys=False), encoding="utf-8")
+        argv = ["--config", str(config_path)]
+        if overwrite is not None:
+            argv.append("--overwrite" if overwrite else "--no-overwrite")
+        _main_impl(argv)
 
 
 def _latent_meta_mismatch_reason(expected: dict[str, Any], actual: dict[str, Any]) -> str | None:

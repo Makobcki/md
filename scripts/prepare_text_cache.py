@@ -26,6 +26,8 @@ def _dtype(name: str) -> torch.dtype:
 
 
 def _resolve_prepare_dtype(args_dtype: str | None, cfg_dtype: str, device: torch.device) -> torch.dtype:
+    if args_dtype == "auto":
+        args_dtype = None
     if device.type == "cpu" and args_dtype is None:
         return torch.float32
     return _dtype(str(args_dtype or cfg_dtype))
@@ -178,18 +180,18 @@ def prepare_text_cache(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config/train_mmdit_rf.yaml")
+    parser.add_argument("--config", default="config/train.yaml")
     parser.add_argument("--out", default="")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--shard-size", type=int, default=1024)
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--dtype", choices=("fp32", "bf16", "fp16"), default=None)
+    parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
+    parser.add_argument("--dtype", choices=("auto", "fp32", "bf16", "fp16"), default=None)
     args = parser.parse_args()
 
     cfg = TrainConfig.from_yaml(args.config)
     out = Path(args.out) if args.out else Path(cfg.data_root) / str(cfg.text_cache_dir)
-    device = torch.device(args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device))
     prepare_text_cache(
         cfg=cfg,
         out_dir=out,

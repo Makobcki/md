@@ -1,158 +1,98 @@
-# diffusion-проект
+# MMDiT Rectified Flow image model
 
-Проект для обучения и сэмплинга изображений с условием по тексту (BPE-токенайзер),
+This repository trains and samples a latent MMDiT rectified-flow image model. The legacy U-Net, BPE, DDPM, DDIM, and DPM paths are no longer part of the supported workflow.
 
-## Установка
-
-### Python окружение
+## Install
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[ml,web,dev]"
+python -m pip install -e .
 ```
 
-Если используете `uv`:
+Install the project dependencies required by your environment, including PyTorch, torchvision, safetensors, and the text encoder/VAE dependencies used by the configured checkpoints.
 
-```bash
-uv sync --extra ml --extra web --extra dev
+## Dataset layout
+
+The default profiles expect:
+
+```text
+data/dataset/pixso_512/
+  images/
+  metadata.jsonl or per-image metadata files
+  .cache/
+    text/
+    latents/
 ```
 
-Frontend зависимости устанавливаются отдельно:
+`config/train.yaml` is the main full training profile. Smaller profiles are available for smoke, overfit, and development runs.
+
+## Training
 
 ```bash
-cd webui/frontend
-npm install
+python -m train.cli --config config/train.yaml
 ```
 
-## Обучение
+Training does the full setup:
 
-### Запуск
+- builds or loads the dataset index
+- prepares the text cache when missing
+- prepares the latent cache when missing
+- fails clearly on stale or incompatible caches unless `cache.rebuild_if_stale: true`
+- trains MMDiT RF
+- saves checkpoints, config snapshots, metrics, and eval outputs
+
+Useful profiles:
 
 ```bash
-md-train --config config/train.yaml
+python -m train.cli --config config/train_smoke.yaml
+python -m train.cli --config config/train_overfit.yaml
+python -m train.cli --config config/train_dev.yaml
+python -m train.cli --config config/train.yaml
 ```
 
-### Профили развития модели
-
-`config/train.yaml` можно использовать как локальный рабочий профиль. Для
-сравнимых запусков качества зафиксированы отдельные профили:
-
-- `config/train_image_only.yaml` — latent image-only baseline без tokenizer/text encoder.
-- `config/train_text_to_image.yaml` — основной text-to-image профиль с captions/tags, CFG dropout и eval prompt-ами.
-
-Дорожная карта по развитию модели находится в `docs/model_development_plan.md`.
-
-### Возобновление
+Dry run:
 
 ```bash
-md-train --config config/train.yaml --resume ./runs/.../ckpt_stop_0000500.pt
+python -m train.cli --config config/train.yaml --dry-run
 ```
 
-### Важные параметры
-
-- `config/train.yaml` — основной конфиг.
-- `log_every` — период логирования. **Loss в логах и WebUI — среднее за последние `log_every` шагов.**
-- `compile` — включает `torch.compile` (если доступен).
-- `resume_ckpt` — путь к чекпоинту для резюма (CLI-флаг `--resume` переопределяет, поддерживает `latest` и номер шага).
-- `ckpt_keep_last` — сколько последних чекпоинтов `ckpt_*.pt` хранить (CLI-флаг `--ckpt-keep-last` переопределяет).
-
-### Выходные файлы
-
-В `out_dir` (из `config/train.yaml`) создаются:
-
-- `config_snapshot.yaml` — снимок конфига запуска.
-- `run_meta.yaml` — информация об окружении.
-- `metrics/events.jsonl` — события и метрики.
-- `ckpt_*.pt`, `ckpt_stop_*.pt`, `ckpt_final.pt` — чекпоинты.
-
-### Совместимость чекпоинтов и `torch.compile`
-
-Чекпоинты, сохранённые в режиме `torch.compile`, совместимы с запуском без компиляции и наоборот.
-Если структура модели не совпадает, загрузка завершится с понятной ошибкой о несоответствии ключей.
-
-## Сэмплинг
-
-### Запуск
+## Sampling
 
 ```bash
-md-sample \
+python -m sample.cli \
   --ckpt ./runs/.../ckpt_final.pt \
-  --out ./samples/grid.png \
-  --n 4 \
-  --steps 50 \
-  --prompt "1girl" \
-  --cfg 5 \
-  --sampler heun \
-  --seed 42
+  --prompt "1girl, blue hair, white dress" \
+  --sampler flow_heun \
+  --steps 28 \
+  --cfg 4.5 \
+  --seed 42 \
+  --out ./samples/out.png
 ```
 
-### Важные параметры
+Supported samplers are `flow_euler` and `flow_heun`.
 
-- `--steps N` означает **ровно N итераций** внешнего цикла для всех самплеров.
-- `--sampler`: `ddim`, `ddpm`, `euler`, `heun`, `dpm_solver`.
-- `--cfg` — classifier-free guidance (1.0 = без усиления).
-- `--seed` — фиксирует детерминированность.
-- `--out` — путь к выходному изображению; директория создаётся автоматически.
-
-## WebUI
-
-### Запуск backend
+## Tests
 
 ```bash
-md-webui --host 127.0.0.1 --port 8000
+python -m pytest -q
 ```
 
-### Запуск frontend
+## Optional Cache Tools
+
+Normally `train` prepares caches automatically. These scripts remain available for manual precomputation and debugging:
 
 ```bash
-cd webui/frontend
-npm run dev
+python -m scripts.prepare_text_cache --config config/train.yaml
+python -m scripts.prepare_latents --config config/train.yaml
 ```
 
-### Логи и метрики WebUI
+## Production Checklist
 
-Для каждого запуска создаётся директория:
-
-```
-webui_runs/<run_id>/
-  logs/
-    train.log
-    train.err.log
-    sample.log
-    sample.err.log
-  metrics/
-    train_metrics.jsonl
-    events.jsonl
-  samples/
-```
-
-Метрика `loss` в UI отображается как среднее значение за последний интервал `log_every`.
-
-## Профилирование и телеметрия
-
-### Встроенные тайминги
-
-В `scripts/train.py` в `metric`-событиях публикуются агрегированные тайминги секций (CPU и GPU):
-`data_fetch`, `fwd_bwd`, `opt_step`, `step_total`.
-Используйте `metrics/events.jsonl` для анализа.
-
-### CPU профилирование (cProfile)
+Run stages in order:
 
 ```bash
-python -m cProfile -o /tmp/train.prof -m train.cli --config config/train.yaml
-python -m pstats /tmp/train.prof
+python -m train.cli --config config/train_overfit.yaml
+python -m train.cli --config config/train_dev.yaml
+python -m train.cli --config config/train.yaml
 ```
 
-### py-spy (если установлена)
-
-```bash
-py-spy record -o /tmp/train.svg -- md-train --config config/train.yaml
-```
-
-## Примечания и troubleshooting
-
-- **torch.compile**: при первом запуске возможна длительная компиляция и больший расход памяти.
-- **Недостаток VRAM**: уменьшите `batch_size`, увеличьте `grad_accum_steps`, включите `amp`.
-- **Сэмплинг в 0 шагов**: CLI ожидает `--steps >= 1`, иначе шаги не выполняются.
-- **Чекпоинт не грузится**: проверьте, что архитектура (из `config_snapshot.yaml`) соответствует текущему конфигу.
+Move from overfit to dev when loss falls sharply. Move from dev to full when there are no NaN/Inf failures, resume works, sampling creates images, and VRAM remains stable.

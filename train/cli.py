@@ -6,7 +6,7 @@ from dataclasses import replace
 from config.loader import load_train_config
 from config.train import TrainConfig
 from diffusion.utils.oom import is_torch_oom_error, print_torch_oom
-from train.runner import run
+from train.runner import dry_run, run
 
 
 def _apply_overrides(cfg: TrainConfig, args: argparse.Namespace) -> TrainConfig:
@@ -25,11 +25,15 @@ def _main_impl() -> None:
     ap.add_argument("--resume", default="")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--ckpt-keep-last", type=int, default=None)
+    ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     cfg = load_train_config(args.config)
     cfg = _apply_overrides(cfg, args)
-    run(cfg)
+    if args.dry_run:
+        dry_run(cfg)
+    else:
+        run(cfg)
 
 
 def main() -> None:
