@@ -1,45 +1,59 @@
 # =============================================================================
 # Train config
 # =============================================================================
-# Конфиг намеренно остается плоским: TrainConfig читает параметры по именам
-# верхнего уровня. Секции ниже нужны только для навигации и не меняют поведение.
+# Схема должна оставаться плоской: TrainConfig читает параметры по именам
+# верхнего уровня. Не заменяй секции вложенными YAML-объектами.
+#
+# Целевой профиль этого файла:
+# - одна современная NVIDIA RTX GPU с 16 GB VRAM;
+# - обучение в latent mode на 512x512;
+# - заранее подготовленный sharded latent cache;
+# - AMP bf16, TF32, Flash SDP, channels_last.
+#
+# Рекомендуемые batch-профили для одной NVIDIA GPU:
+# - 8 GB VRAM:  batch_size: 8,  grad_accum_steps: 8,  grad_checkpointing: true
+# - 12 GB VRAM: batch_size: 16, grad_accum_steps: 4,  grad_checkpointing: true
+# - 16 GB VRAM: batch_size: 32, grad_accum_steps: 2,  grad_checkpointing: false
+# Все три профиля дают effective batch 64 при world_size=1.
 
 
 # -----------------------------------------------------------------------------
 # Данные и индекс датасета
 # -----------------------------------------------------------------------------
-# Корневая папка датасета. Все относительные пути ниже считаются от нее.
-data_root: ./data/raw/anime
+# Корневая папка датасета. image_dir, meta_dir, tags_dir и latent_cache_dir
+# указываются относительно этой директории.
+data_root: ./data/pixso_512
 
-# Подпапка с изображениями 512x512.
-image_dir: image_512
+# Подпапка с подготовленными изображениями 512x512.
+image_dir: images
 
 # Подпапка с JSON/метаданными изображений.
-meta_dir: meta
+meta_dir: ""
 
-# Подпапка с тегами, если они хранятся отдельно от meta.
-tags_dir: tags
+# Подпапка с файлами тегов.
+tags_dir: ""
 
-# Поле в meta-файле, из которого берется текстовый caption.
+# Поле в meta-файле, из которого берется основной текстовый caption.
 caption_field: caption_llava_34b_no_tags_short
 
-# true: использовать только изображения без текстового conditioning.
-# false: обучать с caption/tag conditioning, если use_text_conditioning=true.
-images_only: false
+# false для обучения text-conditioned модели. true включает image-only режим.
+images_only: true
 
-# Минимальное число тегов для попадания примера в индекс.
-min_tag_count: 8
+# Минимальное число тегов для включения примера в индекс.
+# Рекомендуемое значение для anime/tagged dataset: 8.
+min_tag_count: 0
 
-# true: отбрасывать изображения, которые не соответствуют ожидаемому 512px пайплайну.
+# true оставляет в датасете только примеры, совместимые с 512px пайплайном.
 require_512: true
 
 # Доля датасета для validation split.
+# Рекомендуемое значение для больших датасетов: 0.01.
 val_ratio: 0.01
 
 # Папка для кэша индекса и промежуточных файлов.
 cache_dir: .cache
 
-# Список md5/примеров, которые нужно пропускать при индексации.
+# Список md5/примеров, которые индексатор обязан пропустить.
 failed_list: failed/md5.txt
 
 
@@ -49,67 +63,78 @@ failed_list: failed/md5.txt
 # Общий seed для split датасета, sampler-ов и eval.
 seed: 42
 
-# Директория, куда пишутся чекпоинты, логи, snapshots конфига и eval outputs.
+# Директория для чекпоинтов, логов, snapshots конфига и eval outputs.
 out_dir: ./runs/anime
 
 
 # -----------------------------------------------------------------------------
-# DataLoader и эффективный batch
+# DataLoader и effective batch
 # -----------------------------------------------------------------------------
-# Batch на один optimizer step до grad accumulation.
-batch_size: 32
+# Batch на один forward/backward pass.
+# Рекомендации для latent 512x512: 8 GB -> 8, 12 GB -> 16, 16 GB -> 32.
+batch_size: 4
 
-# Число накопленных micro-batches перед optimizer.step().
-# Эффективный batch = batch_size * grad_accum_steps * world_size.
-grad_accum_steps: 2
+# Число micro-batch-ей перед optimizer.step().
+# Рекомендации: 8 GB -> 8, 12 GB -> 4, 16 GB -> 2.
+# Формула: effective_batch = batch_size * grad_accum_steps * world_size.
+grad_accum_steps: 16
 
 # Количество worker-процессов DataLoader.
+# Рекомендация для локального NVMe/SSD: 4. Для HDD: 2.
 num_workers: 4
 
-# Сколько batch-ей каждый worker готовит заранее.
+# Число заранее подготовленных batch-ей на worker.
+# Рекомендация для NVIDIA 8-16 GB: 4.
 prefetch_factor: 4
 
-# true: закреплять CPU memory для более быстрой передачи на GPU.
+# true закрепляет CPU memory и ускоряет передачу batch-ей на GPU.
 pin_memory: true
 
-# true: не пересоздавать worker-ы между эпохами.
+# true сохраняет worker-процессы DataLoader между эпохами.
 persistent_workers: true
 
 
 # -----------------------------------------------------------------------------
-# Оптимизация, расписание learning rate и частота сервисных действий
+# Оптимизация, learning rate schedule и частоты действий
 # -----------------------------------------------------------------------------
-# Базовый learning rate для optimizer.
-lr: 1.5e-4
+# Базовый learning rate.
+# Рекомендация для effective batch 64: 1.5e-4.
+# Рекомендация для effective batch 32: 1.0e-4.
+lr: 1.0e-4
 
-# Scheduler: cosine или linear.
+# Scheduler learning rate. Для длительного diffusion training cosine.
 lr_scheduler: cosine
 
-# Количество warmup steps перед основным расписанием LR.
+# Warmup перед основным LR schedule.
+# Рекомендация для 200k steps: 3000.
 warmup_steps: 3000
 
-# Минимальный LR как доля от lr в конце cosine/linear schedule.
+# Минимальный LR как доля от lr в конце schedule.
+# Рекомендация для cosine: 0.05.
 min_lr_ratio: 0.05
 
-# 0: decay растянут на max_steps. >0: отдельная длина decay phase.
+# 0 означает decay на всю длину max_steps.
+# Положительное значение задает отдельную длину decay phase в steps.
 decay_steps: 0
 
-# L2-регуляризация весов optimizer-а.
+# L2-регуляризация optimizer-а.
+# Рекомендация для AdamW diffusion training: 1.0e-4.
 weight_decay: 1.0e-4
 
 # Максимальное число training steps.
-max_steps: 200001
+max_steps: 80000
 
-# Период логирования train metrics.
+# Период логирования train metrics в steps.
 log_every: 10
 
-# Период сохранения чекпоинтов.
+# Период сохранения чекпоинтов в steps.
 save_every: 2000
 
-# Период validation pass. 0 отключает validation.
+# Период validation pass в steps. 0 полностью отключает validation.
 val_every: 1000
 
-# Сколько validation batch-ей прогонять за один validation pass.
+# Число validation batch-ей за один validation pass.
+# Рекомендация для NVIDIA 8-16 GB: 8.
 val_batches: 8
 
 
@@ -117,24 +142,27 @@ val_batches: 8
 # Diffusion process
 # -----------------------------------------------------------------------------
 # Число дискретных diffusion timesteps.
+# Стандартное значение для DDPM-style training: 1000.
 timesteps: 1000
 
-# Начальное значение beta для linear schedule.
+# Начальное beta для linear schedule.
 beta_start: 1.0e-4
 
-# Конечное значение beta для linear schedule.
+# Конечное beta для linear schedule.
 beta_end: 2.0e-2
 
-# Min-SNR weighting gamma. Уменьшает доминирование слишком шумных timestep-ов.
+# Gamma для Min-SNR weighting.
+# Рекомендация для v-prediction diffusion training: 5.0.
 min_snr_gamma: 5.0
 
-# Тип предсказания модели. Код сейчас поддерживает только v-prediction.
+# Тип предсказания модели. Поддерживается только v.
 prediction_type: v
 
-# Noise schedule: linear или cosine.
+# Noise schedule.
 noise_schedule: cosine
 
 # Параметр s для cosine noise schedule.
+# Стандартное значение из improved DDPM: 0.008.
 cosine_s: 0.008
 
 
@@ -142,40 +170,53 @@ cosine_s: 0.008
 # UNet architecture
 # -----------------------------------------------------------------------------
 # Базовое число каналов UNet.
-base_channels: 128
+# Рекомендации для latent 512x512:
+# - 8 GB VRAM: 96
+# - 12 GB VRAM: 112
+# - 16 GB VRAM: 128
+base_channels: 192
 
 # Множители каналов по уровням down/up path.
-channel_mults: [1, 2, 3, 4]
+# Рекомендация для 8-16 GB VRAM: [1, 2, 3, 4].
+channel_mults: [1, 2, 4, 4]
 
 # Число ResNet-блоков на каждом уровне.
+# Рекомендации: 8 GB -> 2, 12 GB -> 2, 16 GB -> 3.
 num_res_blocks: 3
 
 # Dropout внутри residual blocks.
+# Рекомендация для больших anime dataset-ов: 0.10.
 dropout: 0.10
 
 # Разрешения feature map, на которых включается self-attention.
+# Рекомендация для latent 64x64: [32, 16].
 attn_resolutions: [32, 16]
 
 # Разрешения feature map для cross-attention.
-# Пустой список означает fallback к attn_resolutions внутри UNet.
+# [] заставляет UNet использовать те же разрешения, что и attn_resolutions.
 cross_attn_resolutions: []
 
 # Количество attention heads.
-attn_heads: 8
+# Рекомендация: 8 GB -> 4, 12 GB -> 6, 16 GB -> 8.
+attn_heads: 6
 
 # Размерность одной attention head.
+# Рекомендация для всех профилей 8-16 GB: 32.
 attn_head_dim: 32
 
-# Тип self-attention: global или windowed.
+# Тип self-attention. global дает максимальное качество.
+# Для 8 GB windowed.
 self_attn_type: global
 
-# Размер окна для windowed self-attention. Игнорируется при self_attn_type=global.
+# Размер окна для windowed self-attention.
+# Значение используется только при self_attn_type: windowed.
 self_attn_window_size: 8
 
 # Размерность внешнего cross-attention context. 0 отключает внешний context.
 cross_attn_dim: 0
 
 # Количество middle blocks в bottleneck UNet.
+# Рекомендация для 8-16 GB VRAM: 1.
 mid_blocks: 1
 
 
@@ -183,22 +224,28 @@ mid_blocks: 1
 # Текстовое conditioning и tokenizer
 # -----------------------------------------------------------------------------
 # Размерность скрытых состояний text encoder.
+# Рекомендация для 8-16 GB VRAM: 256.
 text_dim: 256
 
 # Число слоев text encoder.
+# Рекомендация для 8-16 GB VRAM: 4.
 text_layers: 4
 
 # Количество attention heads в text encoder.
+# Рекомендация для text_dim 256: 4.
 text_heads: 4
 
 # Максимальная длина token sequence после токенизации.
+# Рекомендация для коротких caption-ов и тегов: 128.
 text_max_len: 128
 
-# true: использовать spatial text conditioning, если модельный код это поддерживает.
+# false использует компактное pooled/sequence conditioning.
+# true включает spatial conditioning и повышает расход VRAM.
 text_spatial_conditioning: false
 
-# false: полностью отключает текстовое conditioning; cond_drop_prob станет 1.0.
-use_text_conditioning: true
+# true обучает text-conditioned модель.
+# false отключает text conditioning и принудительно дает cond_drop_prob=1.0.
+use_text_conditioning: false
 
 # Путь к BPE vocabulary.
 text_vocab_path: diffusion/bpe/vocab.json
@@ -206,29 +253,33 @@ text_vocab_path: diffusion/bpe/vocab.json
 # Путь к BPE merges.
 text_merges_path: diffusion/bpe/merges.txt
 
-# Тип tokenizer. Сейчас валидируется только bpe.
+# Тип tokenizer. Поддерживается: bpe.
 tokenizer_type: bpe
 
-# true: использовать FiLM/scale-shift normalization в residual blocks.
+# true включает FiLM/scale-shift normalization в residual blocks.
 use_scale_shift_norm: true
 
 
 # -----------------------------------------------------------------------------
 # Checkpointing внутри модели
 # -----------------------------------------------------------------------------
-# Глобальный флаг gradient checkpointing для экономии VRAM ценой скорости.
-grad_checkpointing: false
+# Gradient checkpointing снижает VRAM и увеличивает время step.
+# Рекомендации: 8 GB -> true, 12 GB -> true, 16 GB -> false.
+grad_checkpointing: true
 
-# Checkpoint только ResNet-блоков.
+# true применяет checkpointing к ResNet-блокам.
+# Для 8-12 GB true.
 checkpoint_resblocks: false
 
-# Checkpoint attention-блоков.
+# true применяет checkpointing к attention-блокам.
+# Для 8-12 GB true.
 checkpoint_attention: false
 
-# Checkpoint text encoder.
+# true применяет checkpointing к text encoder.
+# Для 8 GB true; для 12-16 GB false.
 checkpoint_text_encoder: false
 
-# true: инициализировать часть residual path нулями для более мягкого старта.
+# false оставляет стандартную инициализацию residual path.
 zero_init_residual: false
 
 
@@ -236,165 +287,187 @@ zero_init_residual: false
 # Dropout conditioning
 # -----------------------------------------------------------------------------
 # Вероятность полностью убрать conditioning для classifier-free guidance training.
+# Рекомендация для CFG sampling: 0.10-0.20.
 cond_drop_prob: 0.15
 
 # Вероятность дропнуть отдельные токены текста.
+# Рекомендация для стабильного базового обучения: 0.0.
 token_drop_prob: 0.0
 
 # Вероятность дропнуть теги.
+# Рекомендация для стабильного базового обучения: 0.0.
 tag_drop_prob: 0.0
 
 # Вероятность дропнуть caption.
+# Рекомендация для стабильного базового обучения: 0.0.
 caption_drop_prob: 0.0
 
 
 # -----------------------------------------------------------------------------
 # Mixed precision, torch.compile, EMA и стабильность обучения
 # -----------------------------------------------------------------------------
-# true: включить autocast mixed precision.
+# true включает autocast mixed precision.
 amp: true
 
-# Тип AMP: fp16 или bf16.
+# Тип AMP.
+# для RTX 30/40/50: bf16. Для RTX 20 fp16.
 amp_dtype: bf16
 
-# true: включить torch.compile для модели.
+# torch.compile.
+# для отладки и частых перезапусков: false.
+# для длинного стабильного запуска на RTX 40/50: true.
 compile: false
 
-# Сколько steps прогреть до/после compile перед основной работой.
+# Число warmup steps для compile-режима.
+# Рекомендация при compile: true -> 10.
 compile_warmup_steps: 10
 
-# true: разрешить cudagraphs при compile, если backend это поддерживает.
+# true включает CUDA graphs внутри compile-режима.
+# Используй true только вместе с compile: true.
 compile_cudagraphs: true
 
-# Максимальная норма градиента. 0 или null обычно означает без clipping,
-# но текущий код ожидает числовое значение.
+# Максимальная L2-норма градиента.
+# Рекомендация для diffusion training: 1.0.
 grad_clip_norm: 1.0
 
-# true: падать при non-finite gradients; false: пропускать/логировать по логике loop.
+# false пропускает non-finite update по логике training loop.
+# true останавливает запуск на первом non-finite gradient.
 fail_on_nonfinite_grad: false
 
 # Основной EMA decay для весов модели.
 ema_decay: 0.999
 
-# Быстрый EMA decay до переключения.
+# EMA decay до ema_switch_step.
 ema_decay_fast: 0.999
 
-# Медленный EMA decay после ema_switch_step.
+# EMA decay после ema_switch_step.
 ema_decay_slow: 0.99995
 
-# Step, после которого используется slow EMA decay.
+# Step переключения с fast EMA на slow EMA.
 ema_switch_step: 20000
 
-# Путь к чекпоинту для resume. Пустая строка означает старт с нуля.
+# Путь к чекпоинту для resume. Пустая строка запускает обучение с нуля.
 resume_ckpt: ""
 
-# true: предпочитать deterministic kernels, когда это возможно.
+# false разрешает быстрые недетерминированные CUDA kernels.
+# Для 8-16 GB training false.
 deterministic: false
 
 
 # -----------------------------------------------------------------------------
 # CUDA/cuDNN performance flags
 # -----------------------------------------------------------------------------
-# Разрешить TF32 на Ampere+ GPU для ускорения matmul/convolution.
+# true разрешает TF32 на Ampere/Ada/Blackwell GPU и ускоряет matmul/convolution.
 tf32: true
 
-# true: cuDNN подбирает быстрые kernels под фиксированные размеры input.
+# true включает cuDNN autotune для фиксированного размера 512x512.
 cudnn_benchmark: true
 
-# true: использовать channels_last memory format для ускорения convolution.
+# true использует channels_last memory format для ускорения convolution.
 channels_last: true
 
-# Разрешить Flash SDP attention backend.
+# true разрешает Flash SDP attention backend.
 enable_flash_sdp: true
 
-# Разрешить memory-efficient SDP attention backend.
+# true разрешает memory-efficient SDP attention backend.
 enable_mem_efficient_sdp: true
 
-# Разрешить math SDP backend. Обычно выключен, чтобы не падать в медленный fallback.
+# false запрещает медленный math SDP fallback.
 enable_math_sdp: false
 
 
 # -----------------------------------------------------------------------------
 # Latent mode и VAE
 # -----------------------------------------------------------------------------
-# pixel: обучаться на изображениях. latent: обучаться на VAE latents.
+# latent обучает UNet на VAE latents и является обязательным профилем для 8-16 GB.
+# pixel требует существенно больше VRAM и не входит в 8 GB.
 mode: latent
 
-# Число каналов latent tensor-а.
+# Число каналов latent tensor-а для SD-style VAE.
 latent_channels: 4
 
 # Во сколько раз latent меньше исходного изображения по H/W.
+# Для 512x512 итоговый latent имеет размер 64x64.
 latent_downsample_factor: 8
 
-# true: читать latents из подготовленного cache.
+# true читает latents из подготовленного cache.
 latent_cache: true
 
-# Папка cache latents. В train runner путь резолвится относительно data_root.
+# Папка cache latents относительно data_root.
 latent_cache_dir: .cache/latents
 
-# true: latents лежат в shard-файлах с index.jsonl.
+# true использует shard-файлы и index.jsonl.
+# Рекомендация для больших датасетов: true.
 latent_cache_sharded: true
 
-# Имя или путь index файла для sharded latent cache.
+# Имя index файла для sharded latent cache.
 latent_cache_index: index.jsonl
 
-# dtype сохраненных latents: fp16 или bf16.
+# dtype сохраненных latents.
+# Рекомендация для минимального размера cache и NVIDIA 8-16 GB: fp16.
 latent_dtype: fp16
 
-# true: пытаться precompute latents во время запуска, если такая ветка включена.
+# false запрещает precompute latents внутри train run.
+# Latents готовятся отдельной командой scripts/prepare_latents.py.
 latent_precompute: false
 
-# true: при отсутствии latent считать его через VAE на лету.
+# false запрещает считать отсутствующие latents через VAE во время train run.
+# Для стабильной скорости и контролируемого VRAM false.
 latent_cache_fallback: false
 
-# true: падать, если latent отсутствует или cache поврежден.
+# true останавливает запуск при отсутствующем или поврежденном latent.
 latent_cache_strict: true
 
-# Размер LRU/cache для открытых latent shard-ов.
-latent_shard_cache_size: 3
+# Число открытых latent shard-ов в cache.
+# Рекомендации: 8 GB -> 2, 12 GB -> 3, 16 GB -> 3.
+latent_shard_cache_size: 2
 
-# Путь к pretrained VAE для latent mode/fallback/eval decode.
+# Путь к pretrained VAE для latent decode/eval.
 vae_pretrained: "./vae_sd_mse"
 
-# true: не обучать VAE, использовать только encoder/decoder.
+# true замораживает VAE. Для latent training на 8-16 GB true.
 vae_freeze: true
 
-# Масштаб latents, совместимый с SD-style VAE.
+# Масштаб latents для SD-style VAE.
 vae_scaling_factor: 0.18215
 
 
 # -----------------------------------------------------------------------------
 # Чекпоинты и sanity checks
 # -----------------------------------------------------------------------------
-# Сколько последних чекпоинтов держать. 0 может отключить pruning.
+# Количество последних чекпоинтов, которые остаются на диске.
+# 5 дает быстрый rollback без чрезмерного расхода места.
 ckpt_keep_last: 5
 
-# >0: включить короткий overfit sanity run на малом числе примеров.
+# 0 отключает overfit sanity run.
+# Положительное значение запускает sanity overfit на sanity_overfit_images.
 sanity_overfit_steps: 0
 
-# Сколько изображений использовать для sanity overfit.
+# Число изображений для sanity overfit.
 sanity_overfit_images: 2
 
-# Максимальный loss, ожидаемый после sanity overfit.
+# Максимальный loss после sanity overfit.
 sanity_overfit_max_loss: 0.1
 
 
 # -----------------------------------------------------------------------------
 # Curriculum learning
 # -----------------------------------------------------------------------------
-# true: стартовать с упрощенной подвыборки и весов curriculum.
+# false отключает curriculum.
+# Для sharded latent cache false: training loop отключает curriculum
+# при shard sampler, поэтому явное false делает поведение конфигурации прямым.
 curriculum_enabled: false
 
-# Длительность curriculum phase в steps.
+# Длительность curriculum phase в steps при curriculum_enabled: true.
 curriculum_steps: 20000
 
-# true: на curriculum phase требовать тег/признак one_person.
+# true требует тег/признак one_person во время curriculum phase.
 curriculum_require_one_person: true
 
-# true: повышать приоритет solo-примеров.
+# true повышает вес solo-примеров во время curriculum phase.
 curriculum_prefer_solo: true
 
-# true: исключать multi-person примеры во время curriculum.
+# true исключает multi-person примеры во время curriculum phase.
 curriculum_exclude_multi: true
 
 # Вес solo-примеров при curriculum sampling.
@@ -407,10 +480,12 @@ curriculum_non_solo_weight: 1.0
 # -----------------------------------------------------------------------------
 # Self-conditioning
 # -----------------------------------------------------------------------------
-# true: включить self-conditioning в UNet.
+# true включает self-conditioning в UNet.
+# Рекомендация для качества при latent training: true.
 self_conditioning: true
 
 # Вероятность применить self-conditioning на training step.
+# Рекомендация: 0.5.
 self_cond_prob: 0.5
 
 
@@ -418,22 +493,27 @@ self_cond_prob: 0.5
 # Периодический eval / sample generation
 # -----------------------------------------------------------------------------
 # Файл с prompt-ами для генерации eval samples.
-eval_prompts_file: ./data/raw/anime/prompts.txt
+eval_prompts_file: ""
 
-# Период eval generation в training steps. 0 отключает eval generation.
-eval_every: 1000
+# Период eval generation в training steps.
+# Рекомендация для 8-16 GB: 1000. 0 полностью отключает eval generation.
+eval_every: 0
 
 # Seed для eval sampler-а.
 eval_seed: 42
 
-# Sampler для eval: ddim, diffusion, euler, heun или dpm_solver.
+# Sampler для eval.
+# Рекомендация для скорости и качества: euler.
 eval_sampler: euler
 
 # Число sampler steps при eval generation.
+# Рекомендации: 8 GB -> 30, 12 GB -> 45, 16 GB -> 60.
 eval_steps: 60
 
 # CFG scale для eval generation.
+# Рекомендация для anime text-conditioned модели: 5.0.
 eval_cfg: 5.0
 
 # Сколько изображений генерировать на prompt.
+# Рекомендации: 8 GB -> 1, 12 GB -> 1, 16 GB -> 1.
 eval_n: 1

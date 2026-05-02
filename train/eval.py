@@ -32,6 +32,12 @@ def _load_eval_prompts(path: str, count: int) -> list[str]:
     return prompts[:count]
 
 
+def _resolve_eval_prompts(path: str, count: int, *, use_text_conditioning: bool) -> list[str]:
+    if not use_text_conditioning:
+        return [""] * count
+    return _load_eval_prompts(path, count=count)
+
+
 def _select_sampler(name: str) -> Callable[..., torch.Tensor]:
     if name == "ddim":
         return ddim_sample

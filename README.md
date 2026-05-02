@@ -33,6 +33,16 @@ npm install
 md-train --config config/train.yaml
 ```
 
+### Профили развития модели
+
+`config/train.yaml` можно использовать как локальный рабочий профиль. Для
+сравнимых запусков качества зафиксированы отдельные профили:
+
+- `config/train_image_only.yaml` — latent image-only baseline без tokenizer/text encoder.
+- `config/train_text_to_image.yaml` — основной text-to-image профиль с captions/tags, CFG dropout и eval prompt-ами.
+
+Дорожная карта по развитию модели находится в `docs/model_development_plan.md`.
+
 ### Возобновление
 
 ```bash
