@@ -100,7 +100,7 @@ persistent_workers: true
 # Базовый learning rate.
 # Рекомендация для effective batch 64: 1.5e-4.
 # Рекомендация для effective batch 32: 1.0e-4.
-lr: 1.0e-4
+lr: 1.5e-4
 
 # Scheduler learning rate. Для длительного diffusion training cosine.
 lr_scheduler: cosine

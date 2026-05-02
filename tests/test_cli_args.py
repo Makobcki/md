@@ -41,3 +41,13 @@ def test_train_config_accepts_image_only_alias() -> None:
     cfg = TrainConfig.from_dict({"image_only": True})
 
     assert cfg.images_only is True
+
+
+def test_train_config_accepts_mmdit_rf_yaml() -> None:
+    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_mmdit_rf.yaml"))
+
+    assert cfg.architecture == "mmdit_rf"
+    assert cfg.objective == "rectified_flow"
+    assert cfg.prediction_type == "flow_velocity"
+    assert cfg.hidden_dim == 1024
+    assert cfg.eval_sampler == "flow_heun"

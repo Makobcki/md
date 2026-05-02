@@ -10,9 +10,12 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "accelerate>=1.13.0",
+    "einops",
     "numpy>=1.26",
     "pillow",
     "pyyaml>=6.0.1",
+    "safetensors",
+    "transformers",
     "tqdm",
     "websockets>=16.0",
 ]
@@ -48,6 +51,7 @@ md-webui = "main:main"
 md-train = "train.cli:main"
 md-sample = "sample.cli:main"
 md-prepare-latents = "scripts.prepare_latents:main"
+md-prepare-text-cache = "scripts.prepare_text_cache:main"
 
 [tool.setuptools]
 py-modules = ["main"]

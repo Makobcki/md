@@ -17,8 +17,125 @@ def _as_tuple(value: Iterable[int] | Iterable[float]) -> Tuple:
     return tuple(value)
 
 
+def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
+    flat = dict(data)
+    training = data.get("training")
+    if isinstance(training, dict):
+        for key in (
+            "batch_size",
+            "grad_accum_steps",
+            "lr",
+            "weight_decay",
+            "optimizer",
+            "warmup_steps",
+            "max_steps",
+            "ema_decay",
+            "grad_clip_norm",
+            "amp",
+            "amp_dtype",
+            "tf32",
+            "compile",
+        ):
+            if key in training and key not in flat:
+                flat[key] = training[key]
+    model = data.get("model")
+    if isinstance(model, dict):
+        for key in (
+            "hidden_dim",
+            "depth",
+            "num_heads",
+            "mlp_ratio",
+            "qk_norm",
+            "rms_norm",
+            "swiglu",
+            "adaln_zero",
+            "pos_embed",
+            "double_stream_blocks",
+            "single_stream_blocks",
+            "dropout",
+            "attn_dropout",
+            "gradient_checkpointing",
+        ):
+            if key in model and key not in flat:
+                flat[key] = model[key]
+        if "gradient_checkpointing" in model and "grad_checkpointing" not in flat:
+            flat["grad_checkpointing"] = model["gradient_checkpointing"]
+    text = data.get("text")
+    if isinstance(text, dict):
+        for key in ("text_dim", "pooled_dim"):
+            if key in text and key not in flat:
+                flat[key] = text[key]
+        if "cache" in text and "text_cache" not in flat:
+            flat["text_cache"] = text["cache"]
+    conditioning = data.get("conditioning")
+    if isinstance(conditioning, dict):
+        mapping = {
+            "cfg_drop_prob": "cond_drop_prob",
+            "token_drop_prob": "token_drop_prob",
+            "caption_drop_prob": "caption_drop_prob",
+            "tag_drop_prob": "tag_drop_prob",
+        }
+        for src, dst in mapping.items():
+            if src in conditioning and dst not in flat:
+                flat[dst] = conditioning[src]
+    flow = data.get("flow")
+    if isinstance(flow, dict):
+        mapping = {
+            "timestep_sampling": "flow_timestep_sampling",
+            "logit_mean": "flow_logit_mean",
+            "logit_std": "flow_logit_std",
+            "loss_weighting": "flow_loss_weighting",
+            "train_t_min": "flow_train_t_min",
+            "train_t_max": "flow_train_t_max",
+        }
+        for src, dst in mapping.items():
+            if src in flow and dst not in flat:
+                flat[dst] = flow[src]
+    sampling = data.get("sampling")
+    if isinstance(sampling, dict):
+        mapping = {
+            "sampler": "sampling_sampler",
+            "steps": "sampling_steps",
+            "cfg_scale": "sampling_cfg_scale",
+            "shift": "sampling_shift",
+        }
+        for src, dst in mapping.items():
+            if src in sampling and dst not in flat:
+                flat[dst] = sampling[src]
+        if "sampler" in sampling and "eval_sampler" not in flat:
+            flat["eval_sampler"] = sampling["sampler"]
+        if "steps" in sampling and "eval_steps" not in flat:
+            flat["eval_steps"] = sampling["steps"]
+        if "cfg_scale" in sampling and "eval_cfg" not in flat:
+            flat["eval_cfg"] = sampling["cfg_scale"]
+    vae = data.get("vae")
+    if isinstance(vae, dict):
+        mapping = {
+            "pretrained": "vae_pretrained",
+            "freeze": "vae_freeze",
+            "scaling_factor": "vae_scaling_factor",
+        }
+        for src, dst in mapping.items():
+            if src in vae and dst not in flat:
+                flat[dst] = vae[src]
+    cache = data.get("cache")
+    if isinstance(cache, dict):
+        if "latent_cache" in cache and "latent_cache" not in flat:
+            flat["latent_cache"] = cache["latent_cache"]
+        if "text_cache" in cache and "text_cache" not in flat:
+            flat["text_cache"] = cache["text_cache"]
+        if "sharded" in cache:
+            flat.setdefault("latent_cache_sharded", cache["sharded"])
+        if "dtype" in cache:
+            flat.setdefault("latent_dtype", cache["dtype"])
+    return flat
+
+
 @dataclass(frozen=True)
 class TrainConfig:
+    architecture: str = "unet_v1"
+    objective: str = "v_prediction"
+
     data_root: str = "./data_loader/raw/Danbooru"
     image_dir: str = "image_512"
     meta_dir: str = "meta"
@@ -120,6 +237,7 @@ class TrainConfig:
     mode: str = "pixel"
     latent_channels: int = 4
     latent_downsample_factor: int = 8
+    latent_patch_size: int = 2
     latent_cache: bool = False
     latent_cache_dir: str = ".cache/latents"
     latent_cache_sharded: bool = False
@@ -132,6 +250,35 @@ class TrainConfig:
     vae_pretrained: str = ""
     vae_freeze: bool = True
     vae_scaling_factor: float = 0.18215
+
+    hidden_dim: int = 1024
+    depth: int = 24
+    num_heads: int = 16
+    mlp_ratio: float = 4.0
+    qk_norm: bool = True
+    rms_norm: bool = True
+    swiglu: bool = True
+    adaln_zero: bool = True
+    pos_embed: str = "rope_2d"
+    double_stream_blocks: int = 16
+    single_stream_blocks: int = 8
+    attn_dropout: float = 0.0
+
+    pooled_dim: int = 1024
+    text_cache: bool = False
+    text_cache_dir: str = ".cache/text"
+
+    flow_timestep_sampling: str = "logit_normal"
+    flow_logit_mean: float = 0.0
+    flow_logit_std: float = 1.0
+    flow_loss_weighting: str = "none"
+    flow_train_t_min: float = 0.0
+    flow_train_t_max: float = 1.0
+
+    sampling_sampler: str = "flow_heun"
+    sampling_steps: int = 28
+    sampling_cfg_scale: float = 4.5
+    sampling_shift: float = 3.0
 
     ckpt_keep_last: int = 5
 
@@ -167,8 +314,14 @@ class TrainConfig:
     extra: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        if self.prediction_type != "v":
-            raise ValueError("Only v-prediction is supported.")
+        if self.architecture not in {"unet_v1", "mmdit_rf"}:
+            raise ValueError("architecture must be one of: unet_v1, mmdit_rf.")
+        if self.objective not in {"v_prediction", "rectified_flow"}:
+            raise ValueError("objective must be one of: v_prediction, rectified_flow.")
+        if self.architecture == "unet_v1" and self.prediction_type != "v":
+            raise ValueError("Only v-prediction is supported for architecture=unet_v1.")
+        if self.architecture == "mmdit_rf" and self.objective != "rectified_flow":
+            raise ValueError("architecture=mmdit_rf requires objective=rectified_flow.")
         if self.text_max_len <= 0:
             raise ValueError("text_max_len must be positive.")
         if self.timesteps <= 0:
@@ -187,7 +340,7 @@ class TrainConfig:
             raise ValueError("val_batches must be non-negative.")
         if self.amp_dtype not in {"fp16", "bf16"}:
             raise ValueError("amp_dtype must be 'fp16' or 'bf16'.")
-        if self.tokenizer_type != "bpe":
+        if self.tokenizer_type != "bpe" and self.architecture == "unet_v1":
             raise ValueError("tokenizer_type must be 'bpe'.")
         if self.lr_scheduler not in {"cosine", "linear"}:
             raise ValueError("lr_scheduler must be 'cosine' or 'linear'.")
@@ -237,8 +390,8 @@ class TrainConfig:
             raise ValueError("eval_cfg must be non-negative.")
         if self.eval_n <= 0:
             raise ValueError("eval_n must be positive.")
-        if self.eval_sampler not in {"ddim", "diffusion", "euler", "heun", "dpm_solver"}:
-            raise ValueError("eval_sampler must be one of: ddim, diffusion, euler, heun, dpm_solver.")
+        if self.eval_sampler not in {"ddim", "diffusion", "euler", "heun", "dpm_solver", "flow_euler", "flow_heun"}:
+            raise ValueError("eval_sampler must be one of: ddim, diffusion, euler, heun, dpm_solver, flow_euler, flow_heun.")
         if not (0.0 <= self.cond_drop_prob <= 1.0):
             raise ValueError("cond_drop_prob must be in [0, 1].")
         if not (0.0 <= self.token_drop_prob <= 1.0):
@@ -262,6 +415,7 @@ class TrainConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TrainConfig":
+        data = _flatten_nested_config(data)
         fields = {f.name for f in cls.__dataclass_fields__.values()}
         kwargs = {k: v for k, v in data.items() if k in fields}
         extra = {k: v for k, v in data.items() if k not in fields}
