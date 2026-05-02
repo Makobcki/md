@@ -188,6 +188,10 @@ def _resolve_latent_shard_index_path(cfg: TrainConfig) -> Path:
     return _resolve_latent_cache_dir(cfg) / index_path
 
 
+def _load_resume_checkpoint(path: str) -> dict:
+    return load_ckpt(path, torch.device("cpu"))
+
+
 def _latent_prepare_command(config_path: Path) -> list[str]:
     repo_root = Path(__file__).resolve().parents[1]
     return [
@@ -266,7 +270,7 @@ def run(cfg: TrainConfig) -> None:
     model_cfg = cfg
     if resume:
         resume_path = resolve_resume_path(resume, out_dir)
-        ck = load_ckpt(resume_path, device)
+        ck = _load_resume_checkpoint(resume_path)
         if "cfg" in ck and isinstance(ck["cfg"], dict):
             model_cfg = TrainConfig.from_dict(ck["cfg"])
         _validate_resume_compatibility(cfg, model_cfg)
@@ -732,21 +736,31 @@ def run(cfg: TrainConfig) -> None:
     start_step = 0
     if resume:
         if ck is None:
-            ck = load_ckpt(resume, device)
+            ck = _load_resume_checkpoint(resume_path)
         model_state = normalize_state_dict_for_model(ck["model"], model, name="model")
         model.load_state_dict(model_state, strict=True)
+        del model_state
+        ck.pop("model", None)
         if "opt" in ck:
             opt.load_state_dict(ck["opt"])
         elif "optimizer" in ck:
             opt.load_state_dict(ck["optimizer"])
+        ck.pop("opt", None)
+        ck.pop("optimizer", None)
         if "scaler" in ck:
             scaler.load_state_dict(ck["scaler"])
+            ck.pop("scaler", None)
         if "ema" in ck:
             ema_state = normalize_state_dict_for_keys(ck["ema"], ema.shadow.keys(), name="ema")
             ema.shadow = {k: v.to(device) for k, v in ema_state.items()}
+            del ema_state
+            ck.pop("ema", None)
         for group in opt.param_groups:
             group["lr"] = float(cfg.lr)
         start_step = int(ck.get("step", 0)) + 1
+        ck = None
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     eval_every = int(cfg.eval_every)
     eval_prompts: list[str] | None = None
