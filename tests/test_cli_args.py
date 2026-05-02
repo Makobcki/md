@@ -31,3 +31,9 @@ def test_train_config_accepts_legacy_model_fields() -> None:
     assert cfg.cross_attn_resolutions == ()
     assert cfg.mid_blocks == 1
     assert cfg.checkpoint_attention is False
+
+
+def test_train_config_accepts_image_only_alias() -> None:
+    cfg = TrainConfig.from_dict({"image_only": True})
+
+    assert cfg.images_only is True

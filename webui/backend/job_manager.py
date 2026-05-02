@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from config.train import TrainConfig
+from diffusion.events import format_event_line
 from .services import config_service
 from .services.atomic import atomic_write_json, atomic_write_text
 
@@ -89,6 +90,21 @@ class JobManager:
     def _write_notes(self, run_dir: Path, notes: Dict[str, Any]) -> None:
         notes_path = run_dir / "notes.json"
         atomic_write_json(notes_path, notes)
+
+    @staticmethod
+    def _parse_event_line(line: str) -> dict | None:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        return obj if isinstance(obj, dict) else None
+
+    @classmethod
+    def format_log_line(cls, line: str) -> str:
+        event = cls._parse_event_line(line)
+        if event is None or not event.get("type"):
+            return line
+        return format_event_line(event)
 
     def _read_train_config(self) -> Dict[str, Any]:
         cfg_path = config_service.get_config_path(self.repo_root)
@@ -174,25 +190,23 @@ class JobManager:
         def _reader(stream, stream_name: str) -> None:
             for line in iter(stream.readline, ""):
                 line = line.rstrip("\n")
+                event = self._parse_event_line(line)
+                log_line = format_event_line(event) if event is not None and event.get("type") else line
                 if stream_name == "stdout":
-                    stdout_f.write(line + "\n")
+                    stdout_f.write(log_line + "\n")
                     stdout_f.flush()
                 else:
-                    stderr_f.write(line + "\n")
+                    stderr_f.write(log_line + "\n")
                     stderr_f.flush()
 
                 self.ws_manager.send_from_thread(run.run_id, "logs", json.dumps({
                     "type": "log",
                     "stream": stream_name,
-                    "line": line,
+                    "line": log_line,
                 }, ensure_ascii=False))
 
-                if stream_name == "stdout":
-                    try:
-                        obj = json.loads(line)
-                    except json.JSONDecodeError:
-                        obj = None
-                    if isinstance(obj, dict) and obj.get("type") == "metric":
+                if stream_name == "stdout" and event is not None:
+                    if event.get("type") == "metric":
                         self.ws_manager.send_from_thread(run.run_id, "metrics", line)
 
         stdout_thread = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)

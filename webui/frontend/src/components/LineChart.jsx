@@ -1,6 +1,6 @@
 import React from "react";
 
-export default function LineChart({ data, height = 180 }) {
+export default function LineChart({ data, height = 140 }) {
   const cleaned = data
     .filter((d) => Number.isFinite(d.step) && Number.isFinite(d.loss))
     .sort((a, b) => a.step - b.step);
