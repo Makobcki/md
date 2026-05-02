@@ -5,7 +5,6 @@ import random
 from pathlib import Path
 
 import torch
-from torchvision.utils import save_image
 
 from data_loader.dataset import load_image_tensor
 from diffusion.events import EventBus, StdoutJsonSink
@@ -22,6 +21,14 @@ from samplers import (
     sample_flow_euler,
     sample_flow_heun,
 )
+
+
+def _save_image_grid(x: torch.Tensor, path: str | Path, nrow: int) -> None:
+    try:
+        from torchvision.utils import save_image
+    except Exception as exc:
+        raise RuntimeError("Saving sample images requires a working torchvision install.") from exc
+    save_image(x, path, nrow=nrow)
 
 
 def _positive_int(value: str) -> int:
@@ -156,7 +163,7 @@ def _main_impl() -> None:
         x = torch.cat(samples, dim=0)
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
-        save_image(x, out, nrow=int((args.n) ** 0.5))
+        _save_image_grid(x, out, nrow=int((args.n) ** 0.5))
         event_bus.emit({"type": "status", "status": "done", "path": str(out)})
         print(f"[OK] saved {out}")
         return
@@ -273,7 +280,7 @@ def _main_impl() -> None:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    save_image(x, out, nrow=int((args.n) ** 0.5))
+    _save_image_grid(x, out, nrow=int((args.n) ** 0.5))
     event_bus.emit({"type": "status", "status": "done", "path": str(out)})
     print(f"[OK] saved {out}")
 

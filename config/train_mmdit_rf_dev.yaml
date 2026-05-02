@@ -8,25 +8,31 @@ latent_patch_size: 2
 objective: rectified_flow
 prediction_type: flow_velocity
 
+data_root: ./data_loader/raw/Danbooru
+out_dir: ./runs/mmdit_dev
+eval_prompts_file: ./data/eval_prompts/mmdit_core.txt
+
 model:
-  hidden_dim: 1024
-  depth: 24
-  num_heads: 16
+  hidden_dim: 512
+  depth: 8
+  num_heads: 8
   mlp_ratio: 4.0
   qk_norm: true
   rms_norm: true
   swiglu: true
   adaln_zero: true
-  # TODO: implement true rope_2d in JointAttention. Current implementation is additive 2D sin/cos.
   pos_embed: sincos_2d
-  double_stream_blocks: 16
-  single_stream_blocks: 8
+  double_stream_blocks: 6
+  single_stream_blocks: 2
   dropout: 0.0
   attn_dropout: 0.0
   gradient_checkpointing: true
 
 text:
   enabled: true
+  text_dim: 1024
+  pooled_dim: 1024
+  empty_prompt_cache: true
   encoders:
     - name: clip_l
       model_name: openai/clip-vit-large-patch14
@@ -35,33 +41,26 @@ text:
       cache: true
     - name: t5
       model_name: google/t5-v1_1-base
-      max_length: 256
+      max_length: 128
       trainable: false
       cache: true
-  text_dim: 1024
-  pooled_dim: 1024
-  empty_prompt_cache: true
 
 conditioning:
   cfg_drop_prob: 0.15
-  token_drop_prob: 0.0
-  caption_drop_prob: 0.0
-  tag_drop_prob: 0.0
-
-img2img:
-  enabled: true
-  condition_mode: token_stream
-  allow_inpainting: true
-  mask_conditioning: true
 
 training:
-  batch_size: 2
-  grad_accum_steps: 32
+  batch_size: 1
+  grad_accum_steps: 16
   lr: 1.0e-4
   weight_decay: 0.01
   optimizer: adamw
-  warmup_steps: 3000
-  max_steps: 300000
+  warmup_steps: 500
+  max_steps: 20000
+  log_every: 50
+  save_every: 1000
+  val_every: 500
+  val_batches: 4
+  eval_every: 500
   ema_decay: 0.9999
   grad_clip_norm: 1.0
   amp: true
@@ -79,9 +78,9 @@ flow:
 
 sampling:
   sampler: flow_heun
-  steps: 28
-  cfg_scale: 4.5
-  shift: 3.0
+  steps: 20
+  cfg_scale: 4.0
+  shift: 1.0
 
 vae:
   pretrained: ./vae_sd_mse
