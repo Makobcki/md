@@ -2,7 +2,7 @@ const DEFAULT_API_BASE =
   window.location.port === "5173" ? "http://127.0.0.1:8000" : window.location.origin;
 const API_BASE = (import.meta?.env?.VITE_API_BASE || DEFAULT_API_BASE).replace(/\/+$/, "");
 export const API_ORIGIN = new URL(API_BASE).origin;
-const AUTH_TOKEN = import.meta?.env?.VITE_AUTH_TOKEN || window.localStorage?.getItem("WEBUI_AUTH_TOKEN") || "";
+export const AUTH_TOKEN = import.meta?.env?.VITE_AUTH_TOKEN || window.localStorage?.getItem("WEBUI_AUTH_TOKEN") || "";
 
 export async function fetchJson(path, options = {}) {
   const headers = {
@@ -52,5 +52,9 @@ export const api = {
 export function wsUrl(path) {
   const url = new URL(API_BASE);
   const protocol = url.protocol === "https:" ? "wss" : "ws";
-  return `${protocol}://${url.host}${path}`;
+  const ws = new URL(path, `${protocol}://${url.host}`);
+  if (AUTH_TOKEN) {
+    ws.searchParams.set("token", AUTH_TOKEN);
+  }
+  return ws.toString();
 }

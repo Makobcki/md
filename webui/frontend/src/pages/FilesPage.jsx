@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
+import StatusPill from "../components/StatusPill.jsx";
+import { formatDate, formatRunType, parseRunDate } from "../utils/formatters.js";
 
 const parseLogLine = (line) => {
   const trimmed = line.trim();
@@ -23,10 +25,8 @@ export default function FilesPage() {
   const [selectedRunId, setSelectedRunId] = useState("");
   const [stdout, setStdout] = useState([]);
   const [stderr, setStderr] = useState([]);
-  const [stream, setStream] = useState("stdout");
   const [level, setLevel] = useState("all");
   const [query, setQuery] = useState("");
-  const [autoScroll, setAutoScroll] = useState(true);
   const [timeStart, setTimeStart] = useState("");
   const [timeEnd, setTimeEnd] = useState("");
   const [error, setError] = useState("");
@@ -56,8 +56,8 @@ export default function FilesPage() {
           api.getRunLog(selectedRunId, "stdout"),
           api.getRunLog(selectedRunId, "stderr"),
         ]);
-        setStdout(outLog.content.split("\n").filter(Boolean));
-        setStderr(errLog.content.split("\n").filter(Boolean));
+        setStdout(outLog.content.split("\n").filter(Boolean).map((line) => `[stdout] ${line}`));
+        setStderr(errLog.content.split("\n").filter(Boolean).map((line) => `[stderr] ${line}`));
       } catch (err) {
         setError(err.message);
       }
@@ -66,7 +66,7 @@ export default function FilesPage() {
   }, [selectedRunId]);
 
   const filteredLines = useMemo(() => {
-    const source = stream === "stderr" ? stderr : stdout;
+    const source = [...stdout, ...stderr];
     const parsed = source.map(parseLogLine);
     return parsed
       .filter((item) => (level === "all" ? true : item.level === level))
@@ -81,11 +81,11 @@ export default function FilesPage() {
         return true;
       })
       .map((item) => item.raw);
-  }, [stdout, stderr, stream, level, query, timeStart, timeEnd]);
+  }, [stdout, stderr, level, query, timeStart, timeEnd]);
 
   return (
     <div className="page">
-      <h1 className="page-title">Files / Logs</h1>
+      <h1 className="page-title">Logs</h1>
       {error && <div className="muted">{error}</div>}
       <div className="split">
         <div className="card">
@@ -108,13 +108,16 @@ export default function FilesPage() {
                   <tr
                     key={run.run_id}
                     onClick={() => setSelectedRunId(run.run_id)}
-                    style={{ cursor: "pointer", background: run.run_id === selectedRunId ? "#0b1224" : "transparent" }}
+                    className={run.run_id === selectedRunId ? "selected" : ""}
+                    style={{ cursor: "pointer" }}
                   >
                     <td>
-                      <span className={`status-pill ${run.status}`}>{run.status}</span>
+                      <StatusPill status={run.status} />
                     </td>
-                    <td>{run.run_type}</td>
-                    <td className="muted">{run.created_at}</td>
+                    <td>{formatRunType(run.run_type)}</td>
+                    <td className="muted" title={run.created_at}>
+                      {formatDate(parseRunDate(run))}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -133,13 +136,6 @@ export default function FilesPage() {
               )}
             </div>
             <div className="log-controls">
-              <label className="row">
-                Stream
-                <select value={stream} onChange={(event) => setStream(event.target.value)}>
-                  <option value="stdout">stdout</option>
-                  <option value="stderr">stderr</option>
-                </select>
-              </label>
               <label className="row">
                 Level
                 <select value={level} onChange={(event) => setLevel(event.target.value)}>
@@ -169,16 +165,8 @@ export default function FilesPage() {
                   onChange={(event) => setTimeEnd(event.target.value)}
                 />
               </label>
-              <label className="row">
-                <input
-                  type="checkbox"
-                  checked={autoScroll}
-                  onChange={(event) => setAutoScroll(event.target.checked)}
-                />
-                Auto-scroll
-              </label>
             </div>
-            <LogViewer lines={filteredLines} autoScroll={autoScroll} />
+            <LogViewer lines={filteredLines} />
             <div className="muted">Showing {filteredLines.length} lines</div>
           </div>
         </div>
