@@ -4,15 +4,13 @@ import random
 import json
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 from torch.utils.data import Dataset
 
 import numpy as np
 from PIL import Image
-
-from diffusion.text import BPETokenizer
 
 from .types import LatentCacheMetadata, LatentShardLocation
 
@@ -126,7 +124,7 @@ class ImageTextDataset(Dataset):
     def __init__(
         self,
         entries: List[dict],
-        tokenizer: Optional[BPETokenizer],
+        tokenizer: Optional[Any],
         cond_drop_prob: float,
         token_drop_prob: float = 0.0,
         tag_drop_prob: float = 0.0,

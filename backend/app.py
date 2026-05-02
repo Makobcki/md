@@ -172,7 +172,7 @@ class SampleArgs(BaseModel):
     neg: str = ""
     neg_prompt: str = ""
     cfg: float = Field(default=5.0, ge=0.0, le=30.0)
-    sampler: Literal["ddim", "diffusion", "euler", "heun", "dpm_solver"] = "ddim"
+    sampler: Literal["flow_euler", "flow_heun"] = "flow_heun"
     seed: Optional[int] = 42
     device: Literal["auto", "cpu", "cuda"] = "cuda"
 

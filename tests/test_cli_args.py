@@ -20,7 +20,7 @@ def test_train_yaml_defaults_disable_compile_and_nonfinite_grad_fail() -> None:
     assert cfg.fail_on_nonfinite_grad is False
 
 
-def test_train_config_accepts_legacy_model_fields() -> None:
+def test_train_config_accepts_compat_model_fields() -> None:
     cfg = TrainConfig.from_dict({
         "base_channels": 16,
         "channel_mults": [1],
@@ -43,8 +43,8 @@ def test_train_config_accepts_image_only_alias() -> None:
     assert cfg.images_only is True
 
 
-def test_train_config_accepts_mmdit_rf_yaml() -> None:
-    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_mmdit_rf.yaml"))
+def test_train_config_accepts_main_yaml() -> None:
+    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train.yaml"))
 
     assert cfg.architecture == "mmdit_rf"
     assert cfg.objective == "rectified_flow"
@@ -54,25 +54,24 @@ def test_train_config_accepts_mmdit_rf_yaml() -> None:
     assert cfg.eval_sampler == "flow_heun"
 
 
-def test_train_config_accepts_mmdit_tiny_yaml() -> None:
-    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_mmdit_rf_tiny.yaml"))
+def test_train_config_accepts_dev_yaml() -> None:
+    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_dev.yaml"))
 
     assert cfg.architecture == "mmdit_rf"
     assert cfg.objective == "rectified_flow"
-    assert cfg.hidden_dim == 128
-    assert cfg.depth == 2
+    assert cfg.hidden_dim == 512
+    assert cfg.depth == 8
     assert cfg.batch_size == 1
-    assert cfg.dataset_limit == 32
-    assert cfg.save_every == 50
+    assert cfg.save_every == 1000
 
 
 def test_train_config_accepts_mmdit_smoke_yaml() -> None:
-    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_mmdit_rf_smoke.yaml"))
+    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_smoke.yaml"))
 
     assert cfg.architecture == "mmdit_rf"
     assert cfg.hidden_dim == 64
     assert cfg.depth == 1
-    assert cfg.dataset_limit == 32
+    assert cfg.dataset_limit == 1
     assert cfg.eval_every == 0
 
 

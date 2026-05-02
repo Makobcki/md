@@ -10,19 +10,10 @@ from config.train import TrainConfig
 from scripts.prepare_latents import _resolve_prepare_options, _sharded_cache_mismatch_reason
 import train.runner as runner
 from train.runner import (
-    _ensure_latent_cache_ready,
+    _ensure_latent_cache_ready_for_mmdit,
     _load_resume_checkpoint,
     _resolve_latent_shard_index_path,
-    _validate_resume_compatibility,
 )
-
-
-def test_resume_validation_rejects_mode_mismatch() -> None:
-    cfg = TrainConfig(mode="latent", latent_cache=True)
-    ckpt_cfg = TrainConfig(mode="pixel")
-
-    with pytest.raises(RuntimeError, match="resume config mismatch"):
-        _validate_resume_compatibility(cfg, ckpt_cfg)
 
 
 def test_resume_checkpoint_loads_on_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -40,22 +31,23 @@ def test_resume_checkpoint_loads_on_cpu(monkeypatch: pytest.MonkeyPatch) -> None
     assert str(seen["device"]) == "cpu"
 
 
-def test_missing_sharded_latent_index_reports_prepare_command(tmp_path) -> None:
+def test_missing_sharded_latent_index_reports_auto_prepare_setting(tmp_path) -> None:
     cfg = TrainConfig(
         data_root=str(tmp_path / "data"),
         mode="latent",
         latent_cache=True,
         latent_cache_sharded=True,
         latent_cache_index="index.jsonl",
-        latent_precompute=False,
+        vae_pretrained="./vae_sd_mse",
+        cache_auto_prepare=False,
     )
 
     with pytest.raises(RuntimeError) as exc:
-        _ensure_latent_cache_ready(cfg, tmp_path / "out")
+        _ensure_latent_cache_ready_for_mmdit(cfg, [{"md5": "a"}], torch.device("cpu"))
 
     message = str(exc.value)
-    assert "Missing sharded latent cache index" in message
-    assert "scripts/prepare_latents.py" in message
+    assert "Latent cache is missing" in message
+    assert "cache.auto_prepare=true" in message
 
 
 def test_latent_shard_index_path_honors_configured_name(tmp_path) -> None:

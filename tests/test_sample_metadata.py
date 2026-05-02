@@ -24,14 +24,16 @@ def test_sample_cli_writes_metadata_next_to_image() -> None:
     source = _sample_cli_source()
 
     assert 'Path(image_path).with_suffix(".json")' in source
-    assert '"architecture": architecture' in source
+    assert '"architecture": "mmdit_rf"' in source
+    assert '"objective": "rectified_flow"' in source
     assert '"prompt": str(args.prompt)' in source
     assert '"sampler": str(sampler)' in source
     assert '"steps": int(args.steps)' in source
     assert '"cfg": float(args.cfg)' in source
     assert '"seed": int(seed)' in source
     assert '"n": int(args.n)' in source
-    assert source.count("_write_sample_metadata(out, _sample_metadata") == 2
+    assert '"task": str(args.task)' in source
+    assert source.count("_write_sample_metadata(out, _sample_metadata") == 1
 
 
 def test_sample_metadata_helpers_write_json(tmp_path: Path) -> None:
@@ -58,6 +60,7 @@ def test_sample_metadata_helpers_write_json(tmp_path: Path) -> None:
         steps=2,
         cfg=1,
         n=1,
+        task="txt2img",
     )
     built = Namespace(ckpt={"architecture": "mmdit_rf"}, cfg={})
     metadata = namespace["_sample_metadata"](args, built, sampler="flow_heun", seed=42)
@@ -67,4 +70,6 @@ def test_sample_metadata_helpers_write_json(tmp_path: Path) -> None:
     payload = written.read_text(encoding="utf-8")
     assert payload.startswith("{\n")
     assert '"architecture": "mmdit_rf"' in payload
+    assert '"objective": "rectified_flow"' in payload
     assert '"sampler": "flow_heun"' in payload
+    assert '"task": "txt2img"' in payload

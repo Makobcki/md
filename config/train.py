@@ -133,6 +133,10 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
             flat["latent_cache"] = cache["latent_cache"]
         if "text_cache" in cache and "text_cache" not in flat:
             flat["text_cache"] = cache["text_cache"]
+        if "auto_prepare" in cache and "cache_auto_prepare" not in flat:
+            flat["cache_auto_prepare"] = cache["auto_prepare"]
+        if "rebuild_if_stale" in cache and "cache_rebuild_if_stale" not in flat:
+            flat["cache_rebuild_if_stale"] = cache["rebuild_if_stale"]
         if "sharded" in cache:
             flat.setdefault("latent_cache_sharded", cache["sharded"])
         if "dtype" in cache:
@@ -147,8 +151,8 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    architecture: str = "unet_v1"
-    objective: str = "v_prediction"
+    architecture: str = "mmdit_rf"
+    objective: str = "rectified_flow"
 
     data_root: str = "./data/dataset/pixso_512"
     image_dir: str = "images"
@@ -192,7 +196,7 @@ class TrainConfig:
     beta_start: float = 1.0e-4
     beta_end: float = 2.0e-2
     min_snr_gamma: float = 5.0
-    prediction_type: str = "v"
+    prediction_type: str = "flow_velocity"
 
     base_channels: int = 64
     channel_mults: Tuple[int, ...] = (1, 2, 3, 4)
@@ -217,7 +221,6 @@ class TrainConfig:
     grad_checkpointing: bool = False
     checkpoint_resblocks: bool = False
     checkpoint_attention: bool = False
-    checkpoint_text_encoder: bool = False
     checkpoint_downsample: bool = False
     zero_init_residual: bool = False
 
@@ -252,11 +255,11 @@ class TrainConfig:
     enable_mem_efficient_sdp: bool = True
     enable_math_sdp: bool = False
 
-    mode: str = "pixel"
+    mode: str = "latent"
     latent_channels: int = 4
     latent_downsample_factor: int = 8
     latent_patch_size: int = 2
-    latent_cache: bool = False
+    latent_cache: bool = True
     latent_cache_dir: str = ".cache/latents"
     latent_cache_sharded: bool = False
     latent_cache_index: str = "index.jsonl"
@@ -283,9 +286,11 @@ class TrainConfig:
     attn_dropout: float = 0.0
 
     pooled_dim: int = 1024
-    text_cache: bool = False
+    text_cache: bool = True
     text_cache_dir: str = ".cache/text"
     text_shard_cache_size: int = 2
+    cache_auto_prepare: bool = True
+    cache_rebuild_if_stale: bool = False
 
     flow_timestep_sampling: str = "logit_normal"
     flow_logit_mean: float = 0.0
@@ -323,7 +328,7 @@ class TrainConfig:
     eval_prompts_file: str = "./data/eval_prompts/core.txt"
     eval_every: int = 500
     eval_seed: int = 42
-    eval_sampler: str = "ddim"
+    eval_sampler: str = "flow_heun"
     eval_steps: int = 30
     eval_cfg: float = 5.0
     eval_n: int = 1
@@ -333,14 +338,12 @@ class TrainConfig:
     extra: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        if self.architecture not in {"unet_v1", "mmdit_rf"}:
-            raise ValueError("architecture must be one of: unet_v1, mmdit_rf.")
-        if self.objective not in {"v_prediction", "rectified_flow"}:
-            raise ValueError("objective must be one of: v_prediction, rectified_flow.")
-        if self.architecture == "unet_v1" and self.prediction_type != "v":
-            raise ValueError("Only v-prediction is supported for architecture=unet_v1.")
-        if self.architecture == "mmdit_rf" and self.objective != "rectified_flow":
-            raise ValueError("architecture=mmdit_rf requires objective=rectified_flow.")
+        if self.architecture != "mmdit_rf":
+            raise ValueError("Only architecture=mmdit_rf is supported.")
+        if self.objective != "rectified_flow":
+            raise ValueError("Only objective=rectified_flow is supported.")
+        if self.prediction_type != "flow_velocity":
+            raise ValueError("Only prediction_type=flow_velocity is supported.")
         if self.text_max_len <= 0:
             raise ValueError("text_max_len must be positive.")
         if self.timesteps <= 0:
@@ -369,8 +372,6 @@ class TrainConfig:
             raise ValueError("val_batches must be non-negative.")
         if self.amp_dtype not in {"fp16", "bf16"}:
             raise ValueError("amp_dtype must be 'fp16' or 'bf16'.")
-        if self.tokenizer_type != "bpe" and self.architecture == "unet_v1":
-            raise ValueError("tokenizer_type must be 'bpe'.")
         if self.lr_scheduler not in {"cosine", "linear"}:
             raise ValueError("lr_scheduler must be 'cosine' or 'linear'.")
         if self.self_attn_type not in {"global", "windowed", "hybrid"}:
@@ -383,8 +384,8 @@ class TrainConfig:
             raise ValueError("cross_attn_dim must be non-negative.")
         if self.mid_blocks <= 0:
             raise ValueError("mid_blocks must be positive.")
-        if self.mode not in {"pixel", "latent"}:
-            raise ValueError("mode must be 'pixel' or 'latent'.")
+        if self.mode != "latent":
+            raise ValueError("Only mode=latent is supported.")
         if self.latent_channels <= 0:
             raise ValueError("latent_channels must be positive.")
         if self.latent_downsample_factor <= 0:
@@ -419,8 +420,8 @@ class TrainConfig:
             raise ValueError("eval_cfg must be non-negative.")
         if self.eval_n <= 0:
             raise ValueError("eval_n must be positive.")
-        if self.eval_sampler not in {"ddim", "diffusion", "euler", "heun", "dpm_solver", "flow_euler", "flow_heun"}:
-            raise ValueError("eval_sampler must be one of: ddim, diffusion, euler, heun, dpm_solver, flow_euler, flow_heun.")
+        if self.eval_sampler not in {"flow_euler", "flow_heun"}:
+            raise ValueError("eval_sampler must be one of: flow_euler, flow_heun.")
         if not (0.0 <= self.cond_drop_prob <= 1.0):
             raise ValueError("cond_drop_prob must be in [0, 1].")
         if not (0.0 <= self.token_drop_prob <= 1.0):
@@ -507,7 +508,6 @@ class TrainConfig:
             grad_checkpointing=self.grad_checkpointing,
             checkpoint_resblocks=self.checkpoint_resblocks,
             checkpoint_attention=self.checkpoint_attention,
-            checkpoint_text_encoder=self.checkpoint_text_encoder,
             checkpoint_downsample=self.checkpoint_downsample,
             zero_init_residual=self.zero_init_residual,
             use_text_conditioning=self.use_text_conditioning,

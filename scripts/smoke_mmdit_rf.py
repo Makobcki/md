@@ -295,7 +295,7 @@ def run(config_path: str, *, synthetic: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config/train_mmdit_rf_smoke.yaml")
+    parser.add_argument("--config", default="config/train_smoke.yaml")
     parser.add_argument(
         "--synthetic",
         action="store_true",
