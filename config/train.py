@@ -162,6 +162,9 @@ class TrainConfig:
     cache_dir: str = ".cache"
     failed_list: str = "failed/md5.txt"
     dataset_limit: int = 0
+    dataset_tasks: Dict[str, float] = field(
+        default_factory=lambda: {"txt2img": 1.0, "img2img": 0.0, "inpaint": 0.0}
+    )
 
     seed: int = 42
     out_dir: str = "./runs/danbooru_512"
@@ -352,6 +355,14 @@ class TrainConfig:
             raise ValueError("batch_size and grad_accum_steps must be positive.")
         if self.dataset_limit < 0:
             raise ValueError("dataset_limit must be non-negative.")
+        allowed_tasks = {"txt2img", "img2img", "inpaint"}
+        unknown_tasks = sorted(set(self.dataset_tasks) - allowed_tasks)
+        if unknown_tasks:
+            raise ValueError("dataset_tasks contains unsupported task(s): " + ", ".join(unknown_tasks))
+        if any(float(v) < 0 for v in self.dataset_tasks.values()):
+            raise ValueError("dataset_tasks weights must be non-negative.")
+        if sum(float(v) for v in self.dataset_tasks.values()) <= 0:
+            raise ValueError("dataset_tasks must have at least one positive weight.")
         if self.val_every < 0:
             raise ValueError("val_every must be non-negative.")
         if self.val_batches < 0:
