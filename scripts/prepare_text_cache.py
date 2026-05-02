@@ -25,6 +25,12 @@ def _dtype(name: str) -> torch.dtype:
     raise ValueError("dtype must be bf16, fp16, or fp32.")
 
 
+def _resolve_prepare_dtype(args_dtype: str | None, cfg_dtype: str, device: torch.device) -> torch.dtype:
+    if device.type == "cpu" and args_dtype is None:
+        return torch.float32
+    return _dtype(str(args_dtype or cfg_dtype))
+
+
 def _entry_text(entry: dict[str, Any], caption_field: str) -> str:
     caption = str(entry.get("caption", "") or entry.get(caption_field, "") or "")
     if caption:
@@ -89,6 +95,13 @@ def prepare_text_cache(
         limit = int(cfg.dataset_limit)
     if limit is not None:
         entries = entries[:limit]
+    if not entries:
+        raise RuntimeError(
+            "No dataset entries found for text cache. "
+            f"Check data_root={cfg.data_root!r}, image_dir={cfg.image_dir!r}, "
+            f"meta_dir={cfg.meta_dir!r}, metadata.jsonl, caption_field={cfg.caption_field!r}, "
+            f"and min_tag_count={cfg.min_tag_count}."
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     bundle = FrozenTextEncoderBundle(cfg.to_dict(), device=device, dtype=dtype)
     bundle_meta = bundle.metadata()
@@ -171,6 +184,7 @@ def main() -> None:
     parser.add_argument("--shard-size", type=int, default=1024)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--dtype", choices=("fp32", "bf16", "fp16"), default=None)
     args = parser.parse_args()
 
     cfg = TrainConfig.from_yaml(args.config)
@@ -183,7 +197,7 @@ def main() -> None:
         shard_size=int(args.shard_size),
         limit=args.limit,
         device=device,
-        dtype=_dtype(str(cfg.latent_dtype)),
+        dtype=_resolve_prepare_dtype(args.dtype, str(cfg.latent_dtype), device),
     )
 
 

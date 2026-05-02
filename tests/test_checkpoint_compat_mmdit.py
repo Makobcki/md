@@ -6,7 +6,6 @@ torch = pytest.importorskip("torch")
 
 from config.train import TrainConfig
 from diffusion.utils import EMA
-from model.mmdit import MMDiTConfig, MMDiTFlowModel
 from train.checkpoint_mmdit import validate_mmdit_checkpoint_compatibility
 from train.loop_mmdit_full import _build_ckpt
 
@@ -33,17 +32,7 @@ def test_mmdit_checkpoint_uses_human_step(tmp_path) -> None:
             "pooled_dim": 16,
         }
     )
-    model = MMDiTFlowModel(
-        MMDiTConfig(
-            hidden_dim=32,
-            depth=1,
-            num_heads=4,
-            double_stream_blocks=1,
-            single_stream_blocks=0,
-            text_dim=16,
-            pooled_dim=16,
-        )
-    )
+    model = torch.nn.Linear(1, 1)
     opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
     ckpt = _build_ckpt(
         cfg=cfg,

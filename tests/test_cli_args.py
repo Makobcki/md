@@ -74,3 +74,13 @@ def test_train_config_accepts_mmdit_smoke_yaml() -> None:
     assert cfg.depth == 1
     assert cfg.dataset_limit == 32
     assert cfg.eval_every == 0
+
+
+def test_prepare_text_cache_cpu_defaults_to_fp32() -> None:
+    import torch
+
+    from scripts.prepare_text_cache import _resolve_prepare_dtype
+
+    assert _resolve_prepare_dtype(None, "bf16", torch.device("cpu")) is torch.float32
+    assert _resolve_prepare_dtype("bf16", "fp32", torch.device("cpu")) is torch.bfloat16
+    assert _resolve_prepare_dtype(None, "bf16", torch.device("cuda")) is torch.bfloat16
