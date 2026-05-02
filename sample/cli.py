@@ -9,6 +9,7 @@ from torchvision.utils import save_image
 
 from diffusion.events import EventBus, StdoutJsonSink
 from diffusion.perf import PerfConfig, configure_performance
+from diffusion.utils.oom import is_torch_oom_error, print_torch_oom
 
 from .build import build_all
 from samplers import (
@@ -28,11 +29,11 @@ def _positive_int(value: str) -> int:
 
 
 @torch.no_grad()
-def main() -> None:
+def _main_impl() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--n", type=int, default=8)
+    ap.add_argument("--n", type=_positive_int, default=8)
     ap.add_argument("--steps", type=_positive_int, default=30)
     ap.add_argument("--prompt", default="")
     ap.add_argument("--neg", default="", help="Deprecated; use --neg_prompt")
@@ -43,7 +44,7 @@ def main() -> None:
         default="ddim",
         choices=("ddim", "diffusion", "euler", "heun", "dpm_solver"),
     )
-    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
 
@@ -190,6 +191,16 @@ def main() -> None:
     save_image(x, out, nrow=int((args.n) ** 0.5))
     event_bus.emit({"type": "status", "status": "done", "path": str(out)})
     print(f"[OK] saved {out}")
+
+
+def main() -> None:
+    try:
+        _main_impl()
+    except Exception as exc:
+        if is_torch_oom_error(exc):
+            print_torch_oom(exc, context="sampling")
+            raise SystemExit(2) from None
+        raise
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from .ckpt import (
     save_ckpt,
     strip_state_dict_prefixes,
 )
-from .events import EventBus, JsonlFileSink, StdoutJsonSink
+from .events import EventBus, JsonlFileSink, StdoutJsonSink, format_event_line
 
 __all__ = [
     "CKPT_FORMAT_VERSION",
@@ -24,4 +24,5 @@ __all__ = [
     "EventBus",
     "JsonlFileSink",
     "StdoutJsonSink",
+    "format_event_line",
 ]

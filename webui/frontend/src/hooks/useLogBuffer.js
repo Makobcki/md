@@ -11,9 +11,26 @@ function safeParse(value) {
   }
 }
 
+function safeStorageGet(key) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch (err) {
+    console.warn("failed to read log buffer", err);
+    return null;
+  }
+}
+
+function safeStorageSet(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch (err) {
+    console.warn("failed to persist log buffer", err);
+  }
+}
+
 function loadLines(storageKey) {
   if (typeof window === "undefined" || !storageKey) return [];
-  const stored = safeParse(window.localStorage.getItem(`${storageKey}:${STORAGE_VERSION}`));
+  const stored = safeParse(safeStorageGet(`${storageKey}:${STORAGE_VERSION}`));
   if (!stored || !Array.isArray(stored.lines)) return [];
   return stored.lines.filter((line) => typeof line === "string");
 }
@@ -31,7 +48,7 @@ export default function useLogBuffer(storageKey, { maxLines = 10000 } = {}) {
 
   useEffect(() => {
     if (typeof window === "undefined" || !storageKey) return;
-    window.localStorage.setItem(
+    safeStorageSet(
       `${storageKey}:${STORAGE_VERSION}`,
       JSON.stringify({ lines })
     );
@@ -50,7 +67,16 @@ export default function useLogBuffer(storageKey, { maxLines = 10000 } = {}) {
     [maxLines]
   );
 
+  const replaceLines = useCallback(
+    (next) => {
+      const incoming = Array.isArray(next) ? next : [next];
+      const filtered = incoming.filter((line) => typeof line === "string");
+      setLines(filtered.length <= maxLines ? filtered : filtered.slice(-maxLines));
+    },
+    [maxLines]
+  );
+
   const clear = useCallback(() => setLines([]), []);
 
-  return { lines, appendLines, clear };
+  return { lines, appendLines, replaceLines, clear };
 }

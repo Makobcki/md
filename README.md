@@ -9,18 +9,16 @@
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[ml,web,dev]"
 ```
 
-### WebUI (backend + frontend)
-
-Backend зависимости:
+Если используете `uv`:
 
 ```bash
-pip install -r requirements-web.txt
+uv sync --extra ml --extra web --extra dev
 ```
 
-Frontend зависимости:
+Frontend зависимости устанавливаются отдельно:
 
 ```bash
 cd webui/frontend
@@ -32,13 +30,23 @@ npm install
 ### Запуск
 
 ```bash
-python scripts/train.py --config config/train.yaml
+md-train --config config/train.yaml
 ```
+
+### Профили развития модели
+
+`config/train.yaml` можно использовать как локальный рабочий профиль. Для
+сравнимых запусков качества зафиксированы отдельные профили:
+
+- `config/train_image_only.yaml` — latent image-only baseline без tokenizer/text encoder.
+- `config/train_text_to_image.yaml` — основной text-to-image профиль с captions/tags, CFG dropout и eval prompt-ами.
+
+Дорожная карта по развитию модели находится в `docs/model_development_plan.md`.
 
 ### Возобновление
 
 ```bash
-python scripts/train.py --config config/train.yaml --resume ./runs/.../ckpt_stop_0000500.pt
+md-train --config config/train.yaml --resume ./runs/.../ckpt_stop_0000500.pt
 ```
 
 ### Важные параметры
@@ -68,7 +76,7 @@ python scripts/train.py --config config/train.yaml --resume ./runs/.../ckpt_stop
 ### Запуск
 
 ```bash
-python scripts/sample.py \
+md-sample \
   --ckpt ./runs/.../ckpt_final.pt \
   --out ./samples/grid.png \
   --n 4 \
@@ -92,7 +100,7 @@ python scripts/sample.py \
 ### Запуск backend
 
 ```bash
-python main.py --host 127.0.0.1 --port 8000
+md-webui --host 127.0.0.1 --port 8000
 ```
 
 ### Запуск frontend
@@ -132,14 +140,14 @@ webui_runs/<run_id>/
 ### CPU профилирование (cProfile)
 
 ```bash
-python -m cProfile -o /tmp/train.prof scripts/train.py --config config/train.yaml
+python -m cProfile -o /tmp/train.prof -m train.cli --config config/train.yaml
 python -m pstats /tmp/train.prof
 ```
 
 ### py-spy (если установлена)
 
 ```bash
-py-spy record -o /tmp/train.svg -- python scripts/train.py --config config/train.yaml
+py-spy record -o /tmp/train.svg -- md-train --config config/train.yaml
 ```
 
 ## Примечания и troubleshooting

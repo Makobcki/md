@@ -3,6 +3,8 @@ import { useParams } from "react-router-dom";
 import { api, API_ORIGIN } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 import LineChart from "../components/LineChart.jsx";
+import StatusPill from "../components/StatusPill.jsx";
+import { formatDate, formatRunId, formatRunType, parseRunDate } from "../utils/formatters.js";
 
 const toRunsUrl = (path) => {
   if (!path) return null;
@@ -54,14 +56,18 @@ export default function RunDetails() {
     <div className="page">
       <div className="card">
         <div className="card-header">
-          <h2 className="card-title">Run {runId}</h2>
-          <span className={`status-pill ${run.status}`}>{run.status}</span>
+          <h2 className="card-title" title={runId}>
+            {formatRunId(runId)}
+          </h2>
+          <StatusPill status={run.status} />
         </div>
         <div className="row">
-          <span>{run.run_type}</span>
-          <span className="muted">{run.created_at}</span>
+          <span>{formatRunType(run.run_type)}</span>
+          <span className="muted" title={run.created_at}>
+            {formatDate(parseRunDate(run))}
+          </span>
         </div>
-        <div className="muted">Command: {run.command.join(" ")}</div>
+        <div className="muted">Run settings captured.</div>
         {run.output_path && <div className="muted">Output: {run.output_path}</div>}
       </div>
 
@@ -119,11 +125,11 @@ export default function RunDetails() {
       <div className="grid">
         <div className="card">
           <h3 className="card-title">stdout</h3>
-          <LogViewer lines={stdout} autoScroll={false} />
+          <LogViewer lines={stdout} />
         </div>
         <div className="card">
           <h3 className="card-title">stderr</h3>
-          <LogViewer lines={stderr} autoScroll={false} />
+          <LogViewer lines={stderr} />
         </div>
       </div>
     </div>

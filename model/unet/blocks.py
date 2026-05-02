@@ -13,7 +13,16 @@ def _gn_groups(c: int) -> int:
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, time_dim: int, dropout: float, use_scale_shift: bool):
+    def __init__(
+        self,
+        in_ch: int,
+        out_ch: int,
+        time_dim: int,
+        dropout: float,
+        use_scale_shift: bool,
+        *,
+        zero_init: bool = False,
+    ):
         super().__init__()
         self.norm1 = nn.GroupNorm(_gn_groups(in_ch), in_ch, eps=1e-6)
         self.conv1 = nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1)
@@ -23,6 +32,10 @@ class ResBlock(nn.Module):
         self.norm2 = nn.GroupNorm(_gn_groups(out_ch), out_ch, eps=1e-6)
         self.drop = nn.Dropout(dropout)
         self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1)
+        if zero_init:
+            nn.init.zeros_(self.conv2.weight)
+            if self.conv2.bias is not None:
+                nn.init.zeros_(self.conv2.bias)
 
         self.skip = nn.Conv2d(in_ch, out_ch, kernel_size=1) if in_ch != out_ch else nn.Identity()
         self.act = nn.SiLU()
