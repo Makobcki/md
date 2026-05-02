@@ -8,6 +8,13 @@ latent_patch_size: 2
 objective: rectified_flow
 prediction_type: flow_velocity
 
+# Dataset root used by smoke/tiny/dev MMDiT profiles.
+data_root: ./data/dataset/pixso_512
+image_dir: images
+meta_dir: ""
+tags_dir: ""
+min_tag_count: 0
+
 model:
   hidden_dim: 1024
   depth: 24

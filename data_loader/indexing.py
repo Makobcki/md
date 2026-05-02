@@ -14,7 +14,7 @@ from .types import DataConfig
 
 _ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 _GENDER_TAG_RE = re.compile(r"^\d+(?:boy|boys|girl|girls)$")
-_INDEX_SCHEMA_VERSION = 2
+_INDEX_SCHEMA_VERSION = 3
 
 
 def _read_json(path: Path) -> Optional[dict]:
@@ -25,25 +25,130 @@ def _read_json(path: Path) -> Optional[dict]:
         return None
 
 
-def _extract_caption(meta: dict, field: str) -> str:
-    hf = meta.get("hf_row")
-    if isinstance(hf, dict) and field in hf and isinstance(hf[field], str):
-        return hf[field]
+def _first_str(meta: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return ""
 
 
+def _metadata_containers(meta: dict) -> list[dict]:
+    containers = [meta]
+    for key in ("hf_row", "data", "metadata"):
+        value = meta.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+    return containers
+
+
+def _extract_caption(meta: dict, field: str) -> str:
+    keys = (
+        field,
+        "caption",
+        "text",
+        "prompt",
+        "description",
+        "title",
+        "tag_string",
+        "tags",
+    )
+    for container in _metadata_containers(meta):
+        value = container.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        for key in keys:
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, list) and value:
+                parts = [str(item).strip() for item in value if str(item).strip()]
+                if parts:
+                    return ", ".join(parts)
+    return ""
+
+
+def _extract_tags_from_metadata(meta: dict) -> list[str]:
+    for container in _metadata_containers(meta):
+        for key in ("tags_primary", "tags", "tag_string", "tag_string_general", "keywords"):
+            value = container.get(key)
+            if isinstance(value, list):
+                tags = [str(item).strip() for item in value if str(item).strip()]
+                if tags:
+                    return tags
+            if isinstance(value, str) and value.strip():
+                sep = "," if "," in value else " "
+                tags = [part.strip() for part in value.split(sep) if part.strip()]
+                if tags:
+                    return tags
+    return []
+
+
 def _extract_tag_count(meta: dict) -> int:
-    dp = meta.get("danbooru_post")
-    if isinstance(dp, dict):
-        v = dp.get("tag_count")
-        if isinstance(v, int):
-            return v
-    hf = meta.get("hf_row")
-    if isinstance(hf, dict):
-        v = hf.get("tag_count")
-        if isinstance(v, int):
-            return v
-    return 0
+    for container in _metadata_containers(meta):
+        for key in ("tag_count", "tags_count"):
+            value = container.get(key)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+    return len(_extract_tags_from_metadata(meta))
+
+
+def _read_metadata_jsonl(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    if not path.exists():
+        return rows
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(obj, dict):
+                    rows.append(obj)
+    except Exception:
+        return []
+    return rows
+
+
+def _metadata_md5(meta: dict) -> str:
+    for container in _metadata_containers(meta):
+        value = _first_str(container, ("md5", "sha1", "hash", "id", "image_id"))
+        if value:
+            return Path(value).stem
+        file_value = _first_str(container, ("file_name", "filename", "image", "img", "path", "image_path"))
+        if file_value:
+            return Path(file_value).stem
+    return ""
+
+
+def _metadata_image_path(root: Path, img_dir: Path, meta: dict, md5: str) -> Optional[Path]:
+    candidates: list[Path] = []
+    for container in _metadata_containers(meta):
+        file_value = _first_str(container, ("file_name", "filename", "image", "img", "path", "image_path"))
+        if not file_value:
+            continue
+        raw = Path(file_value)
+        if raw.is_absolute():
+            candidates.append(raw)
+        else:
+            candidates.append(root / raw)
+            candidates.append(img_dir / raw.name)
+    if md5:
+        candidates.extend(sorted(p for p in img_dir.glob(f"{md5}.*") if p.suffix.lower() in _ALLOWED_EXTS))
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.suffix.lower() in _ALLOWED_EXTS and candidate.exists():
+            return candidate
+    return None
 
 
 def _split_is_val(md5: str, val_ratio: float) -> bool:
@@ -102,7 +207,38 @@ def build_token_cache_key(
     return h.hexdigest()[:16]
 
 
-def _load_index_cache(cache_path: Path) -> Optional[Tuple[List[dict], List[dict]]]:
+def _cache_metadata(cfg: DataConfig) -> dict:
+    return {
+        "root": str(Path(cfg.root)),
+        "image_dir": str(cfg.image_dir),
+        "meta_dir": str(cfg.meta_dir),
+        "tags_dir": str(cfg.tags_dir),
+        "caption_field": str(cfg.caption_field),
+        "images_only": bool(cfg.images_only),
+        "use_text_conditioning": bool(cfg.use_text_conditioning),
+        "min_tag_count": int(cfg.min_tag_count),
+        "require_512": bool(cfg.require_512),
+        "val_ratio": float(cfg.val_ratio),
+    }
+
+
+def _cached_entry_paths_exist(entries: list[dict], *, max_checks: int = 16) -> bool:
+    if not entries:
+        return True
+    checked = 0
+    for entry in entries:
+        img = entry.get("img")
+        if not isinstance(img, str) or not img:
+            return False
+        if not Path(img).exists():
+            return False
+        checked += 1
+        if checked >= max_checks:
+            return True
+    return True
+
+
+def _load_index_cache(cache_path: Path, expected_meta: Optional[dict] = None) -> Optional[Tuple[List[dict], List[dict]]]:
     if not cache_path.exists():
         return None
     train_entries: List[dict] = []
@@ -119,6 +255,8 @@ def _load_index_cache(cache_path: Path) -> Optional[Tuple[List[dict], List[dict]
                 if obj.get("type") == "meta":
                     if int(obj.get("schema_version", 0)) != _INDEX_SCHEMA_VERSION:
                         return None
+                    if expected_meta is not None and obj.get("config") != expected_meta:
+                        return None
                     saw_meta = True
                     continue
                 if obj.get("type") == "done":
@@ -132,14 +270,16 @@ def _load_index_cache(cache_path: Path) -> Optional[Tuple[List[dict], List[dict]
         return None
     if not saw_meta or not saw_done:
         return None
+    if not _cached_entry_paths_exist(train_entries) or not _cached_entry_paths_exist(val_entries):
+        return None
     return train_entries, val_entries
 
 
-def _write_index_cache_atomic(cache_path: Path, rows: list[dict]) -> None:
+def _write_index_cache_atomic(cache_path: Path, rows: list[dict], *, metadata: dict) -> None:
     tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps({"type": "meta", "schema_version": _INDEX_SCHEMA_VERSION}, ensure_ascii=False) + "\n")
+        f.write(json.dumps({"type": "meta", "schema_version": _INDEX_SCHEMA_VERSION, "config": metadata}, ensure_ascii=False) + "\n")
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
         f.write(json.dumps({"type": "done", "schema_version": _INDEX_SCHEMA_VERSION}, ensure_ascii=False) + "\n")
@@ -158,6 +298,7 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
     cache_dir = root / cfg.cache_dir
     cache_dir.mkdir(parents=True, exist_ok=True)
     failed = _load_failed_list(root / cfg.failed_list)
+    metadata = _cache_metadata(cfg)
 
     if cfg.images_only:
         cache_key = (
@@ -166,7 +307,7 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
         )
         cache_path = cache_dir / cache_key
 
-        cached = _load_index_cache(cache_path)
+        cached = _load_index_cache(cache_path, metadata)
         if cached is not None:
             train_entries, val_entries = cached
             return train_entries, val_entries
@@ -203,7 +344,7 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
                 train_entries.append(entry)
             rows.append({"split": split, "entry": entry})
 
-        _write_index_cache_atomic(cache_path, rows)
+        _write_index_cache_atomic(cache_path, rows, metadata=metadata)
         return train_entries, val_entries
 
     cache_key = (
@@ -213,7 +354,7 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
     )
     cache_path = cache_dir / cache_key
 
-    cached = _load_index_cache(cache_path)
+    cached = _load_index_cache(cache_path, metadata)
     if cached is not None:
         train_entries, val_entries = cached
         return train_entries, val_entries
@@ -222,14 +363,20 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
     val_entries = []
     rows = []
 
-    meta_files = sorted(meta_dir.glob("*.json"))
-    for mp in meta_files:
-        meta = _read_json(mp)
+    meta_files = sorted(meta_dir.glob("*.json")) if meta_dir.exists() else []
+    metadata_rows = _read_metadata_jsonl(root / "metadata.jsonl") if not meta_files else []
+
+    if meta_files:
+        metadata_iter = (_read_json(mp) for mp in meta_files)
+    else:
+        metadata_iter = iter(metadata_rows)
+
+    for meta in metadata_iter:
         if not meta:
             continue
 
-        md5 = meta.get("md5")
-        if not isinstance(md5, str) or len(md5) < 6:
+        md5 = _metadata_md5(meta)
+        if not isinstance(md5, str) or len(md5) < 1:
             continue
 
         if md5 in failed:
@@ -238,28 +385,24 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
         if _extract_tag_count(meta) < int(cfg.min_tag_count):
             continue
 
-        if cfg.use_text_conditioning:
-            cap = _extract_caption(meta, cfg.caption_field).strip()
-            if not cap:
-                continue
-        else:
-            cap = ""
-
-        candidates = [p for p in img_dir.glob(f"{md5}.*") if p.suffix.lower() in _ALLOWED_EXTS]
-        if not candidates:
-            continue
-        img_path = candidates[0]
-
+        cap = _extract_caption(meta, cfg.caption_field).strip() if cfg.use_text_conditioning else ""
+        metadata_tags = _extract_tags_from_metadata(meta)
+        tags_primary: list[str] = []
+        tags_gender: list[str] = []
         if cfg.use_text_conditioning:
             tags_path = tags_dir / f"{md5}.txt"
-            if not tags_path.exists():
+            if tags_dir.exists() and tags_path.exists():
+                tag_data = _read_tags_file(tags_path)
+                if tag_data:
+                    tags_primary, tags_gender = tag_data
+            elif metadata_tags:
+                tags_primary = metadata_tags
+            if not cap and not tags_primary and not tags_gender:
                 continue
-            tag_data = _read_tags_file(tags_path)
-            if not tag_data:
-                continue
-            tags_primary, tags_gender = tag_data
-        else:
-            tags_primary, tags_gender = [], []
+
+        img_path = _metadata_image_path(root, img_dir, meta, md5)
+        if img_path is None:
+            continue
 
         if cfg.require_512:
             try:
@@ -283,5 +426,5 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
             train_entries.append(entry)
         rows.append({"split": split, "entry": entry})
 
-    _write_index_cache_atomic(cache_path, rows)
+    _write_index_cache_atomic(cache_path, rows, metadata=metadata)
     return train_entries, val_entries

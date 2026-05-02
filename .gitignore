@@ -9,6 +9,7 @@ samples/
 runs/
 webui_runs/
 vae_sd_mse/
+md-dev/
 *.egg-info/
 .codex
 report.md

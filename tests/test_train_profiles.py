@@ -56,6 +56,33 @@ def test_profiles_map_to_distinct_unet_conditioning_modes() -> None:
     assert text_to_image_model.self_conditioning is True
 
 
+def test_mmdit_profiles_use_tracked_eval_prompts_and_dataset_root() -> None:
+    default_cfg = TrainConfig()
+    smoke_cfg = _load_profile("train_mmdit_rf_smoke.yaml")
+
+    assert default_cfg.data_root == smoke_cfg.data_root
+    assert default_cfg.image_dir == smoke_cfg.image_dir
+    assert default_cfg.eval_prompts_file == "./data/eval_prompts/core.txt"
+
+    for name in (
+        "train_mmdit_rf.yaml",
+        "train_mmdit_rf_dev.yaml",
+        "train_mmdit_rf_tiny.yaml",
+        "train_mmdit_rf_smoke.yaml",
+        "train_mmdit_rf_smoke_resume.yaml",
+        "train_mmdit_rf_overfit.yaml",
+        "train_mmdit_rf_overfit_resume.yaml",
+    ):
+        cfg = _load_profile(name)
+        assert cfg.data_root == smoke_cfg.data_root
+        assert cfg.image_dir == smoke_cfg.image_dir
+        assert cfg.meta_dir == smoke_cfg.meta_dir
+        assert cfg.tags_dir == smoke_cfg.tags_dir
+        if name != "train_mmdit_rf.yaml":
+            assert cfg.eval_prompts_file.startswith("./data/eval_prompts/")
+
+
+
 def test_mmdit_smoke_resume_profile_extends_smoke_run() -> None:
     smoke = _load_profile("train_mmdit_rf_smoke.yaml")
     resume = _load_profile("train_mmdit_rf_smoke_resume.yaml")
@@ -66,3 +93,19 @@ def test_mmdit_smoke_resume_profile_extends_smoke_run() -> None:
     assert resume.resume_ckpt.endswith("ckpt_latest.pt")
     assert resume.max_steps > smoke.max_steps
     assert resume.eval_every == 0
+
+
+def test_mmdit_overfit_profile_is_next_control_stage() -> None:
+    cfg = _load_profile("train_mmdit_rf_overfit.yaml")
+    resume = _load_profile("train_mmdit_rf_overfit_resume.yaml")
+
+    assert cfg.architecture == "mmdit_rf"
+    assert cfg.objective == "rectified_flow"
+    assert cfg.out_dir.endswith("mmdit_overfit")
+    assert cfg.dataset_limit == 8
+    assert cfg.max_steps == cfg.sanity_overfit_steps
+    assert cfg.eval_every == 0
+    assert cfg.sampling_sampler == "flow_heun"
+    assert resume.out_dir == cfg.out_dir
+    assert resume.resume_ckpt.endswith("ckpt_latest.pt")
+    assert resume.max_steps > cfg.max_steps

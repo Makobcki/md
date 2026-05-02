@@ -13,13 +13,14 @@ image_dir: images
 meta_dir: ""
 tags_dir: ""
 min_tag_count: 0
-out_dir: ./runs/mmdit_tiny
+out_dir: ./runs/mmdit_overfit
+resume_ckpt: ./runs/mmdit_overfit/ckpt_latest.pt
 eval_prompts_file: ./data/eval_prompts/mmdit_core.txt
-dataset_limit: 32
+dataset_limit: 8
 
 model:
-  hidden_dim: 128
-  depth: 2
+  hidden_dim: 256
+  depth: 4
   num_heads: 4
   mlp_ratio: 2.0
   qk_norm: true
@@ -27,8 +28,8 @@ model:
   swiglu: true
   adaln_zero: true
   pos_embed: sincos_2d
-  double_stream_blocks: 1
-  single_stream_blocks: 1
+  double_stream_blocks: 2
+  single_stream_blocks: 2
   dropout: 0.0
   attn_dropout: 0.0
   gradient_checkpointing: false
@@ -54,16 +55,16 @@ conditioning:
   cfg_drop_prob: 0.15
 
 training:
-  batch_size: 1
+  batch_size: 2
   grad_accum_steps: 1
-  lr: 1.0e-4
+  lr: 3.0e-4
   weight_decay: 0.01
   optimizer: adamw
-  warmup_steps: 10
-  max_steps: 100
-  log_every: 10
-  save_every: 50
-  val_every: 50
+  warmup_steps: 20
+  max_steps: 2100
+  log_every: 20
+  save_every: 500
+  val_every: 500
   val_batches: 2
   eval_every: 0
   ema_decay: 0.999
@@ -81,7 +82,7 @@ flow:
 
 sampling:
   sampler: flow_heun
-  steps: 8
+  steps: 16
   cfg_scale: 3.0
   shift: 1.0
 
@@ -100,3 +101,7 @@ dataset_tasks:
   txt2img: 1.0
   img2img: 0.0
   inpaint: 0.0
+
+sanity_overfit_steps: 2100
+sanity_overfit_images: 8
+sanity_overfit_max_loss: 0.05
