@@ -106,3 +106,29 @@ def test_prepare_latents_cli_overrides_config_extra() -> None:
 
     assert options.batch_size == 16
     assert options.latent_dtype == "fp16"
+
+
+def test_prepare_latents_uses_dataset_limit_as_default_limit() -> None:
+    cfg = TrainConfig.from_dict({
+        "mode": "latent",
+        "latent_dtype": "bf16",
+        "dataset_limit": 32,
+    })
+
+    args = argparse.Namespace(batch_size=16, latent_dtype="fp16")
+    options = _resolve_prepare_options(cfg, args, set())
+
+    assert options.limit == 32
+
+
+def test_prepare_latents_cli_limit_overrides_dataset_limit() -> None:
+    cfg = TrainConfig.from_dict({
+        "mode": "latent",
+        "latent_dtype": "bf16",
+        "dataset_limit": 32,
+    })
+
+    args = argparse.Namespace(limit=8)
+    options = _resolve_prepare_options(cfg, args, {"limit"})
+
+    assert options.limit == 8
