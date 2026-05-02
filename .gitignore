@@ -1,6 +1,12 @@
 .venv/
 .idea/
 webui/frontend/node_modules/
+webui/frontend/dist/
 data/
+runs/
+webui_runs/
+vae_sd_mse/
+*.egg-info/
+.codex
+report.md
 **__pycache__/
-
