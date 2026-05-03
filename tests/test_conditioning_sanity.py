@@ -4,110 +4,76 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-
-def test_different_text_ids_change_unet_output() -> None:
-    from model.unet.unet import UNet, UNetConfig
-
-    torch.manual_seed(0)
-    model = UNet(
-        UNetConfig(
-            image_channels=3,
-            base_channels=8,
-            channel_mults=(1,),
-            num_res_blocks=1,
-            dropout=0.0,
-            attn_resolutions=(4,),
-            attn_heads=1,
-            attn_head_dim=8,
-            vocab_size=16,
-            text_dim=8,
-            text_layers=1,
-            text_heads=1,
-            text_max_len=4,
-            use_text_conditioning=True,
-            self_conditioning=False,
-        )
-    )
-    model.eval()
-
-    x = torch.randn(1, 3, 4, 4)
-    t = torch.tensor([1], dtype=torch.long)
-    mask = torch.tensor([[True, True, True, False]])
-    ids_a = torch.tensor([[1, 2, 3, 0]], dtype=torch.long)
-    ids_b = torch.tensor([[1, 4, 5, 0]], dtype=torch.long)
-
-    with torch.no_grad():
-        out_a = model(x, t, ids_a, mask)
-        out_b = model(x, t, ids_b, mask)
-
-    assert not torch.allclose(out_a, out_b)
+from model.mmdit import MMDiTConfig, MMDiTFlowModel
+from model.text.conditioning import TextConditioning
 
 
-def test_projected_cross_attention_and_spatial_text_conditioning_forward() -> None:
-    from model.unet.unet import UNet, UNetConfig
-
-    torch.manual_seed(0)
-    model = UNet(
-        UNetConfig(
-            image_channels=3,
-            base_channels=8,
-            channel_mults=(1,),
-            num_res_blocks=1,
-            dropout=0.0,
-            attn_resolutions=(4,),
-            attn_heads=1,
-            attn_head_dim=8,
-            vocab_size=16,
-            text_dim=8,
-            cross_attn_dim=12,
-            text_layers=1,
-            text_heads=1,
-            text_max_len=4,
-            text_spatial_conditioning=True,
-            use_text_conditioning=True,
-            self_conditioning=False,
+def _tiny_model() -> MMDiTFlowModel:
+    return MMDiTFlowModel(
+        MMDiTConfig(
+            latent_channels=4,
+            patch_size=2,
+            hidden_dim=32,
+            depth=2,
+            num_heads=4,
+            double_stream_blocks=1,
+            single_stream_blocks=1,
+            text_dim=16,
+            pooled_dim=16,
+            gradient_checkpointing=False,
+            zero_init_final=False,
         )
     )
 
-    x = torch.randn(1, 3, 4, 4)
-    t = torch.tensor([1], dtype=torch.long)
-    ids = torch.tensor([[1, 2, 3, 0]], dtype=torch.long)
-    mask = torch.tensor([[True, True, True, False]])
 
-    out = model(x, t, ids, mask)
+def _text(batch: int = 1, *, token_value: float = 0.0, pooled_value: float = 0.0) -> TextConditioning:
+    tokens = torch.full((batch, 4, 16), float(token_value))
+    pooled = torch.full((batch, 16), float(pooled_value))
+    mask = torch.ones(batch, 4, dtype=torch.bool)
+    return TextConditioning(tokens=tokens, mask=mask, pooled=pooled)
+
+
+def test_different_text_conditioning_changes_mmdit_text_projection() -> None:
+    model = _tiny_model()
+
+    proj_a = model._project_text_tokens(_text(token_value=0.0, pooled_value=0.0), device=torch.device("cpu"), dtype=torch.float32)
+    proj_b = model._project_text_tokens(_text(token_value=1.0, pooled_value=1.0), device=torch.device("cpu"), dtype=torch.float32)
+
+    assert proj_a.shape == (1, 4, 32)
+    assert proj_b.shape == (1, 4, 32)
+    assert not torch.allclose(proj_a, proj_b)
+
+
+def test_mmdit_accepts_img2img_inpaint_and_control_conditioning() -> None:
+    model = _tiny_model()
+    x = torch.randn(2, 4, 8, 8)
+    t = torch.rand(2)
+    text = _text(batch=2, token_value=0.25, pooled_value=0.5)
+    source = torch.randn_like(x)
+    mask = torch.ones(2, 1, 8, 8)
+    controls = torch.randn(2, 2, 4, 8, 8)
+
+    out = model(
+        x,
+        t,
+        text,
+        source_latent=source,
+        mask=mask,
+        control_latents=controls,
+        task=["inpaint", "control"],
+    )
 
     assert out.shape == x.shape
+    assert torch.isfinite(out).all()
 
 
-def test_attention_placement_can_limit_self_attention_to_mid_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    import model.unet.attention as attention_module
-    from model.unet.unet import UNet, UNetConfig
+def test_mmdit_rejects_invalid_conditioning_shapes() -> None:
+    model = _tiny_model()
+    x = torch.randn(1, 4, 8, 8)
+    text = _text()
 
-    calls = {"count": 0}
+    with pytest.raises(ValueError, match="spatial shape"):
+        model(x, torch.rand(1), text, source_latent=torch.randn(1, 4, 4, 4), task="img2img")
 
-    def fake_self_attention(self, x):
-        calls["count"] += 1
-        return x
-
-    monkeypatch.setattr(attention_module.SelfAttention2d, "forward", fake_self_attention)
-
-    model = UNet(
-        UNetConfig(
-            image_channels=3,
-            base_channels=8,
-            channel_mults=(1, 2),
-            num_res_blocks=1,
-            dropout=0.0,
-            attn_resolutions=(4,),
-            attn_heads=1,
-            attn_head_dim=8,
-            use_text_conditioning=False,
-            self_conditioning=False,
-            attention_placement="mid_only",
-        )
-    )
-
-    out = model(torch.randn(1, 3, 4, 4), torch.tensor([1], dtype=torch.long), None, None)
-
-    assert out.shape == (1, 3, 4, 4)
-    assert calls["count"] == 1
+    with pytest.raises(ValueError, match="Unsupported MMDiT task"):
+        model(x, torch.rand(1), text, task="unsupported")

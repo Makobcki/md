@@ -1,0 +1,129 @@
+architecture: mmdit_rf
+objective: rectified_flow
+prediction_type: flow_velocity
+mode: latent
+image_size: 512
+latent_channels: 4
+latent_downsample_factor: 8
+latent_patch_size: 2
+
+data_root: ./data/dataset/pixso_512
+image_dir: images
+meta_dir: ""
+tags_dir: ""
+out_dir: ./runs/milestone_a
+
+dataset_limit: 0
+
+model:
+  hidden_dim: 384
+  depth: 4
+  num_heads: 6
+  mlp_ratio: 4.0
+  qk_norm: true
+  rms_norm: true
+  swiglu: true
+  adaln_zero: true
+  pos_embed: rope_2d
+  double_stream_blocks: 3
+  single_stream_blocks: 1
+  dropout: 0.0
+  attn_dropout: 0.0
+  gradient_checkpointing: true
+
+text:
+  enabled: true
+  backend: fake
+  fake_or_cached: true
+  encoders:
+    - name: clip_l
+      model_name: fake/clip_l
+      max_length: 77
+      trainable: false
+      cache: true
+    - name: t5_base
+      model_name: fake/t5_base
+      max_length: 256
+      trainable: false
+      cache: true
+  text_dim: 1024
+  pooled_dim: 1024
+  empty_prompt_cache: true
+
+conditioning:
+  cfg_drop_prob: 0.15
+  token_drop_prob: 0.0
+  caption_drop_prob: 0.0
+  tag_drop_prob: 0.0
+
+training:
+  batch_size: 2
+  grad_accum_steps: 8
+  max_steps: 2000
+  lr: 1.0e-4
+  weight_decay: 0.01
+  optimizer: adamw
+  warmup_steps: 100
+  log_every: 10
+  save_every: 500
+  val_every: 250
+  val_batches: 4
+  amp: true
+  amp_dtype: bf16
+  tf32: true
+  compile: false
+
+performance:
+  flash_sdp: true
+  mem_efficient_sdp: true
+  math_sdp: false
+
+inpaint:
+  mask_min_area: 0.05
+  mask_max_area: 0.60
+  mask_modes:
+    rectangle: 0.5
+    brush: 0.3
+    random_blocks: 0.2
+  loss_mask_weight: 1.0
+  loss_unmask_weight: 0.1
+
+flow:
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  loss_weighting: none
+  train_t_min: 0.0
+  train_t_max: 1.0
+
+sampling:
+  sampler: flow_heun
+  steps: 16
+  cfg_scale: 4.5
+  shift: 3.0
+
+eval_every: 250
+eval_steps: 16
+eval_cfg: 4.5
+eval_n: 1
+
+vae:
+  pretrained: ./vae_sd_mse
+  freeze: true
+  scaling_factor: 0.18215
+
+cache:
+  latent_cache: true
+  text_cache: true
+  auto_prepare: true
+  rebuild_if_stale: false
+  sharded: true
+  dtype: bf16
+  strict: true
+  validate_on_start: true
+
+dataset_tasks:
+  txt2img: 1.0
+  img2img: 0.0
+  inpaint: 0.0
+  control: 0.0

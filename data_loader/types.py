@@ -2,19 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, List
 
 
 @dataclass(frozen=True)
 class DataConfig:
     root: str
-    image_dir: str = "image_512"
-    meta_dir: str = "meta"
-    tags_dir: str = "tags"
+    image_dir: str = "images"
+    meta_dir: str = ""
+    tags_dir: str = ""
     caption_field: str = "caption_llava_34b_no_tags_short"
+    text_field: str = ""
+    text_fields: List[str] | None = None
     images_only: bool = False
     use_text_conditioning: bool = True
-    min_tag_count: int = 8
+    min_tag_count: int = 0
     require_512: bool = True
     val_ratio: float = 0.01
     seed: int = 42

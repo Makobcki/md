@@ -7,6 +7,7 @@ from .dataset import (
 )
 from .indexing import build_or_load_index, build_token_cache_key
 from .sampling import ShardAwareBatchSampler
+from .buckets import AspectBucketBatchSampler, AspectRatioBucket, assign_bucket, parse_buckets, validate_buckets
 from .types import DataConfig, LatentCacheMetadata
 from .collate import collate_with_tokenizer
 __all__ = [
@@ -15,6 +16,11 @@ __all__ = [
     "build_token_cache_key",
     "ImageTextDataset",
     "ShardAwareBatchSampler",
+    "AspectBucketBatchSampler",
+    "AspectRatioBucket",
+    "assign_bucket",
+    "parse_buckets",
+    "validate_buckets",
     "collate_with_tokenizer",
     "LatentCacheMetadata",
     "load_image_tensor",

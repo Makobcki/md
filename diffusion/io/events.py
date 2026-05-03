@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional, Protocol
@@ -48,7 +51,7 @@ def format_event_line(event: dict) -> str:
         extras = _format_extra_fields(event, {"type", "message", "step"})
         return f"{prefix}{message}{(' ' + extras) if extras else ''}".strip()
 
-    if event_type == "metric":
+    if event_type in {"metric", "progress", "train", "eval", "sample"}:
         fields = []
         max_steps = event.get("max_steps")
         for key in (
@@ -58,6 +61,8 @@ def format_event_line(event: dict) -> str:
             "val_loss",
             "lr",
             "grad_norm",
+            "train_loss",
+            "samples_per_sec",
             "img_per_sec",
             "items_per_sec",
             "peak_mem_mb",
@@ -73,7 +78,7 @@ def format_event_line(event: dict) -> str:
                     fields.append(f"{key}={_format_number(value)}/{_format_number(max_steps)}")
                 else:
                     fields.append(f"{key}={_format_number(value)}")
-        return " ".join(["metric", *fields]).strip()
+        return " ".join([str(event_type), *fields]).strip()
 
     if event_type == "status":
         status = event.get("status", "unknown")
@@ -103,6 +108,53 @@ class JsonlFileSink:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+class AsyncEventBus:
+    # Non-blocking event fan-out. Training only enqueues events; a background
+    # thread performs JSONL/stdout writes so slow UI/log consumers do not stall
+    # optimizer steps.
+    def __init__(self, sinks: Iterable[EventSink]) -> None:
+        self._sinks = list(sinks)
+        self._queue: queue.SimpleQueue[dict | None] = queue.SimpleQueue()
+        self._closed = False
+        self._errors: list[str] = []
+        self._thread = threading.Thread(target=self._drain, name="event-bus-writer", daemon=True)
+        self._thread.start()
+
+    def emit(self, event: dict) -> None:
+        if self._closed:
+            return
+        # Copy the event so later caller-side mutation cannot race the writer.
+        self._queue.put(dict(event))
+
+    def _drain(self) -> None:
+        while True:
+            event = self._queue.get()
+            if event is None:
+                return
+            for sink in self._sinks:
+                try:
+                    sink.emit(event)
+                except Exception:
+                    self._errors.append(traceback.format_exc())
+
+    def close(self, timeout: float | None = 5.0) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._queue.put(None)
+        self._thread.join(timeout=timeout)
+
+    def __enter__(self) -> "AsyncEventBus":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    @property
+    def errors(self) -> list[str]:
+        return list(self._errors)
 
 
 class EventBus:

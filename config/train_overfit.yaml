@@ -1,0 +1,125 @@
+architecture: mmdit_rf
+objective: rectified_flow
+prediction_type: flow_velocity
+mode: latent
+image_size: 512
+latent_channels: 4
+latent_downsample_factor: 8
+latent_patch_size: 2
+
+data_root: ./data/dataset/pixso_512
+image_dir: images
+meta_dir: ""
+tags_dir: ""
+out_dir: ./runs/mmdit_overfit
+dataset_limit: 8
+
+model:
+  hidden_dim: 256
+  depth: 4
+  num_heads: 8
+  mlp_ratio: 4.0
+  qk_norm: true
+  rms_norm: true
+  swiglu: true
+  adaln_zero: true
+  pos_embed: rope_2d
+  double_stream_blocks: 2
+  single_stream_blocks: 2
+  dropout: 0.0
+  attn_dropout: 0.0
+  gradient_checkpointing: false
+
+text:
+  enabled: true
+  encoders:
+    - name: clip_l
+      model_name: openai/clip-vit-large-patch14
+      max_length: 77
+      trainable: false
+      cache: true
+  text_dim: 1024
+  pooled_dim: 1024
+  empty_prompt_cache: true
+
+conditioning:
+  cfg_drop_prob: 0.0
+  token_drop_prob: 0.0
+  caption_drop_prob: 0.0
+  tag_drop_prob: 0.0
+
+training:
+  batch_size: 1
+  grad_accum_steps: 1
+  lr: 1.0e-4
+  weight_decay: 0.01
+  optimizer: adamw
+  warmup_steps: 0
+  max_steps: 1000
+  log_every: 1
+  save_every: 250
+  val_every: 250
+  val_batches: 0
+  amp: true
+  amp_dtype: bf16
+  tf32: true
+  compile: false
+
+inpaint:
+  mask_min_area: 0.05
+  mask_max_area: 0.60
+  mask_modes:
+    rectangle: 0.5
+    brush: 0.3
+    random_blocks: 0.2
+  loss_mask_weight: 1.0
+  loss_unmask_weight: 0.1
+
+flow:
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  loss_weighting: none
+  train_t_min: 0.0
+  train_t_max: 1.0
+
+sampling:
+  sampler: flow_heun
+  steps: 2
+  cfg_scale: 1.0
+  shift: 3.0
+
+eval_every: 250
+eval_steps: 2
+eval_cfg: 1.0
+eval_n: 1
+
+vae:
+  pretrained: ./vae_sd_mse
+  freeze: true
+  scaling_factor: 0.18215
+
+cache:
+  latent_cache: true
+  text_cache: true
+  auto_prepare: true
+  rebuild_if_stale: false
+  sharded: true
+  dtype: bf16
+
+prepare_text:
+  batch_size: 1
+  shard_size: 16
+  device: auto
+  dtype: auto
+
+prepare_latents:
+  batch_size: 1
+  num_workers: 0
+  device: auto
+  overwrite: false
+
+dataset_tasks:
+  txt2img: 1.0
+  img2img: 0.0
+  inpaint: 0.0
