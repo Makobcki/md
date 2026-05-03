@@ -14,7 +14,7 @@ from .types import DataConfig
 
 _ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 _GENDER_TAG_RE = re.compile(r"^\d+(?:boy|boys|girl|girls)$")
-_INDEX_SCHEMA_VERSION = 4
+_INDEX_SCHEMA_VERSION = 5
 
 
 def _read_json(path: Path) -> Optional[dict]:
@@ -42,30 +42,49 @@ def _metadata_containers(meta: dict) -> list[dict]:
     return containers
 
 
-def _extract_caption(meta: dict, field: str) -> str:
-    keys = (
-        field,
-        "caption",
-        "text",
-        "prompt",
-        "description",
-        "title",
-        "tag_string",
-        "tags",
-    )
+def resolve_text_fields(*, caption_field: str, text_field: str = "", text_fields: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    """Return ordered metadata fields used as training text.
+
+    ``caption_field`` is kept for backward compatibility. New configs should use
+    ``text_field: prompt`` or ``text_fields: [prompt, caption]`` when training
+    directly from prompt metadata instead of generated captions.
+    """
+    fields: list[str] = []
+    if text_field and str(text_field).strip():
+        fields.append(str(text_field).strip())
+    for item in text_fields or []:
+        name = str(item).strip()
+        if name:
+            fields.append(name)
+    if caption_field and str(caption_field).strip():
+        fields.append(str(caption_field).strip())
+    fields.extend(["caption", "text", "prompt", "description", "title", "tag_string", "tags"])
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for field in fields:
+        if field not in seen:
+            deduped.append(field)
+            seen.add(field)
+    return deduped
+
+
+def _extract_text(meta: dict, fields: list[str] | tuple[str, ...]) -> tuple[str, str]:
     for container in _metadata_containers(meta):
-        value = container.get(field)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-        for key in keys:
+        for key in fields:
             value = container.get(key)
             if isinstance(value, str) and value.strip():
-                return value.strip()
+                return value.strip(), str(key)
             if isinstance(value, list) and value:
                 parts = [str(item).strip() for item in value if str(item).strip()]
                 if parts:
-                    return ", ".join(parts)
-    return ""
+                    return ", ".join(parts), str(key)
+    return "", ""
+
+
+def _extract_caption(meta: dict, field: str) -> str:
+    # Backward-compatible wrapper for older callers/tests.
+    text, _ = _extract_text(meta, resolve_text_fields(caption_field=field))
+    return text
 
 
 def _extract_tags_from_metadata(meta: dict) -> list[str]:
@@ -214,6 +233,13 @@ def _cache_metadata(cfg: DataConfig) -> dict:
         "meta_dir": str(cfg.meta_dir),
         "tags_dir": str(cfg.tags_dir),
         "caption_field": str(cfg.caption_field),
+        "text_field": str(cfg.text_field or ""),
+        "text_fields": list(cfg.text_fields or []),
+        "resolved_text_fields": resolve_text_fields(
+            caption_field=str(cfg.caption_field),
+            text_field=str(cfg.text_field or ""),
+            text_fields=list(cfg.text_fields or []),
+        ),
         "images_only": bool(cfg.images_only),
         "use_text_conditioning": bool(cfg.use_text_conditioning),
         "min_tag_count": int(cfg.min_tag_count),
@@ -289,7 +315,7 @@ def _write_index_cache_atomic(cache_path: Path, rows: list[dict], *, metadata: d
 def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
     """
     Возвращает (train_entries, val_entries).
-    entry: {"md5":..., "img":..., "caption":..., "tags_primary":..., "tags_gender":...}
+    entry: {"md5":..., "img":..., "text":..., "text_source":..., "caption":..., "tags_primary":..., "tags_gender":...}
     """
     root = Path(cfg.root)
     img_dir = root / cfg.image_dir
@@ -333,6 +359,8 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
             entry = {
                 "md5": md5,
                 "img": str(img_path),
+                "text": "",
+                "text_source": "",
                 "caption": "",
                 "tags_primary": [],
                 "tags_gender": [],
@@ -349,8 +377,14 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
         _write_index_cache_atomic(cache_path, rows, metadata=metadata)
         return train_entries, val_entries
 
+    resolved_text_fields = resolve_text_fields(
+        caption_field=str(cfg.caption_field),
+        text_field=str(cfg.text_field or ""),
+        text_fields=list(cfg.text_fields or []),
+    )
+    text_key_hash = hashlib.sha1("\0".join(resolved_text_fields).encode("utf-8")).hexdigest()[:10]
     cache_key = (
-        f"index_{cfg.caption_field}_tags{cfg.min_tag_count}"
+        f"index_textfields{text_key_hash}_tags{cfg.min_tag_count}"
         f"_req512{int(cfg.require_512)}_val{cfg.val_ratio}_tagsdir{cfg.tags_dir}"
         f"_text{int(cfg.use_text_conditioning)}.jsonl"
     )
@@ -387,7 +421,10 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
         if _extract_tag_count(meta) < int(cfg.min_tag_count):
             continue
 
-        cap = _extract_caption(meta, cfg.caption_field).strip() if cfg.use_text_conditioning else ""
+        text_value, text_source = (
+            _extract_text(meta, resolved_text_fields) if cfg.use_text_conditioning else ("", "")
+        )
+        cap = text_value.strip()
         metadata_tags = _extract_tags_from_metadata(meta)
         tags_primary: list[str] = []
         tags_gender: list[str] = []
@@ -417,6 +454,8 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
         entry = {
             "md5": md5,
             "img": str(img_path),
+            "text": cap,
+            "text_source": text_source,
             "caption": cap,
             "tags_primary": tags_primary,
             "tags_gender": tags_gender,

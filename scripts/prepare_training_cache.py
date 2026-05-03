@@ -34,6 +34,8 @@ def _dataset_entries(cfg: TrainConfig) -> list[dict[str, Any]]:
         meta_dir=str(cfg.meta_dir),
         tags_dir=str(cfg.tags_dir),
         caption_field=str(cfg.caption_field),
+        text_field=str(cfg.text_field),
+        text_fields=list(cfg.text_fields),
         images_only=False,
         use_text_conditioning=True,
         min_tag_count=int(cfg.min_tag_count),

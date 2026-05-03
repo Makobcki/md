@@ -180,9 +180,9 @@ def _build_optimizer(cfg: TrainConfig, model: torch.nn.Module, device: torch.dev
 
 
 def _mmdit_entry_text(entry: dict) -> str:
-    caption = str(entry.get("caption", "") or "")
-    if caption:
-        return caption
+    text = str(entry.get("text", "") or entry.get("prompt", "") or entry.get("caption", "") or "")
+    if text:
+        return text
     tags = list(entry.get("tags_primary", [])) + list(entry.get("tags_gender", []))
     return " ".join(str(x) for x in tags)
 
@@ -193,6 +193,8 @@ def _mmdit_dataset_hash(entries: list[dict]) -> str:
         h.update(str(entry.get("md5", "")).encode("utf-8"))
         h.update(b"\0")
         h.update(_mmdit_entry_text(entry).encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(entry.get("text_source", "")).encode("utf-8"))
         h.update(b"\0")
     return h.hexdigest()
 
@@ -664,6 +666,8 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
         meta_dir=str(cfg.meta_dir),
         tags_dir=str(cfg.tags_dir),
         caption_field=str(cfg.caption_field),
+        text_field=str(cfg.text_field),
+        text_fields=list(cfg.text_fields),
         images_only=False,
         use_text_conditioning=True,
         min_tag_count=int(cfg.min_tag_count),

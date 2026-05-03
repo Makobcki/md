@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from config.train import TrainConfig
 from data_loader import DataConfig, build_or_load_index
+from data_loader.indexing import resolve_text_fields
 from model.text.pretrained import FrozenTextEncoderBundle
 
 
@@ -34,20 +35,24 @@ def _resolve_prepare_dtype(args_dtype: str | None, cfg_dtype: str, device: torch
     return _dtype(str(args_dtype or cfg_dtype))
 
 
-def _entry_text(entry: dict[str, Any], caption_field: str) -> str:
-    caption = str(entry.get("caption", "") or entry.get(caption_field, "") or "")
-    if caption:
-        return caption
+def _entry_text(entry: dict[str, Any], caption_field: str = "") -> str:
+    text = str(entry.get("text", "") or entry.get("prompt", "") or entry.get("caption", "") or "")
+    if not text and caption_field:
+        text = str(entry.get(caption_field, "") or "")
+    if text:
+        return text
     tags = list(entry.get("tags_primary", [])) + list(entry.get("tags_gender", []))
     return " ".join(str(x) for x in tags)
 
 
-def _dataset_hash(entries: list[dict[str, Any]], caption_field: str) -> str:
+def _dataset_hash(entries: list[dict[str, Any]], caption_field: str = "") -> str:
     h = hashlib.sha256()
     for entry in entries:
         h.update(str(entry.get("md5", "")).encode("utf-8"))
         h.update(b"\0")
         h.update(_entry_text(entry, caption_field).encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(entry.get("text_source", "")).encode("utf-8"))
         h.update(b"\0")
     return h.hexdigest()
 
@@ -81,6 +86,8 @@ def prepare_text_cache(
         meta_dir=str(cfg.meta_dir),
         tags_dir=str(cfg.tags_dir),
         caption_field=str(cfg.caption_field),
+        text_field=str(cfg.text_field),
+        text_fields=list(cfg.text_fields),
         images_only=False,
         use_text_conditioning=True,
         min_tag_count=int(cfg.min_tag_count),
@@ -104,6 +111,7 @@ def prepare_text_cache(
             "No dataset entries found for text cache. "
             f"Check data_root={cfg.data_root!r}, image_dir={cfg.image_dir!r}, "
             f"meta_dir={cfg.meta_dir!r}, metadata.jsonl, caption_field={cfg.caption_field!r}, "
+            f"text_field={cfg.text_field!r}, text_fields={list(cfg.text_fields)!r}, "
             f"and min_tag_count={cfg.min_tag_count}."
         )
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -119,6 +127,13 @@ def prepare_text_cache(
         "projection": "not_cached",
         "dataset_hash": _dataset_hash(entries, str(cfg.caption_field)),
         "caption_field": str(cfg.caption_field),
+        "text_field": str(cfg.text_field),
+        "text_fields": list(cfg.text_fields),
+        "resolved_text_fields": resolve_text_fields(
+            caption_field=str(cfg.caption_field),
+            text_field=str(cfg.text_field),
+            text_fields=list(cfg.text_fields),
+        ),
         "dtype": str(dtype).replace("torch.", ""),
     }
     (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -207,6 +222,9 @@ def prepare_text_cache(
         "num_samples": len(entries),
         "dataset_hash": metadata["dataset_hash"],
         "caption_field": metadata["caption_field"],
+        "text_field": metadata["text_field"],
+        "text_fields": metadata["text_fields"],
+        "resolved_text_fields": metadata["resolved_text_fields"],
         "dtype": metadata["dtype"],
         "text_dim": metadata["text_dim"],
         "pooled_dim": metadata["pooled_dim"],
