@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 
 from config.train import TrainConfig
-from diffusion.io.events import EventBus, JsonlFileSink, StdoutJsonSink
+from diffusion.io.events import AsyncEventBus, JsonlFileSink
 from diffusion.objectives import RectifiedFlowObjective
 from diffusion.utils import EMA, unwrap_model
 from model.mmdit import MMDiTFlowModel
@@ -60,6 +60,18 @@ def _replace_text_where(text: TextConditioning, empty_text: TextConditioning, dr
         return text
     drop = torch.rand(text.tokens.shape[0], device=text.tokens.device) < float(drop_prob)
     return text.replace_where(drop, empty_text)
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(float(seconds), 0.0)
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {secs:02d}s"
+    if minutes:
+        return f"{minutes:d}m {secs:02d}s"
+    return f"{secs:d}s"
 
 
 def _per_sample_flow_mse(
@@ -305,12 +317,10 @@ def run_mmdit_training_loop(
     sinks = []
     if write_outputs:
         sinks.extend([JsonlFileSink(out_dir / "events.jsonl"), JsonlFileSink(metrics_dir / "events.jsonl")])
-        if _is_webui_mode():
-            sinks.append(StdoutJsonSink())
         metrics_path = _webui_metrics_path()
         if metrics_path is not None:
-            sinks.append(JsonlFileSink(metrics_path, event_types=["metric"]))
-    event_bus = EventBus(sinks)
+            sinks.append(JsonlFileSink(metrics_path, event_types=["metric", "progress", "train", "eval", "sample"]))
+    event_bus = AsyncEventBus(sinks)
 
     pbar = tqdm(
         total=max_steps,
@@ -327,7 +337,9 @@ def run_mmdit_training_loop(
     recent_losses: list[float] = []
     recent_bins: dict[str, list[float]] = {}
     recent_samples = 0
-    log_window_start = time.perf_counter()
+    run_start = time.perf_counter()
+    log_window_start = run_start
+    log_window_step = int(step)
 
     while step < max_steps:
         saw_batch = False
@@ -383,9 +395,38 @@ def run_mmdit_training_loop(
                 ema.update(model)
                 accum_idx = 0
                 next_step = step + 1
+                now = time.perf_counter()
+                elapsed_sec = max(now - run_start, 0.0)
+                completed_steps = max(int(next_step) - int(start_step), 1)
+                avg_sec_per_step_progress = elapsed_sec / float(completed_steps)
+                remaining_steps_progress = max(int(max_steps) - int(next_step), 0)
+                eta_sec_progress = remaining_steps_progress * avg_sec_per_step_progress
+                event_bus.emit(
+                    {
+                        "type": "progress",
+                        "step": next_step,
+                        "max_steps": max_steps,
+                        "lr": lr,
+                        "elapsed_sec": float(elapsed_sec),
+                        "elapsed": _format_duration(elapsed_sec),
+                        "eta_sec": float(eta_sec_progress),
+                        "eta": _format_duration(eta_sec_progress),
+                        "eta_h": float(eta_sec_progress) / 3600.0,
+                        "sec_per_step": float(avg_sec_per_step_progress),
+                        "s_per_step": float(avg_sec_per_step_progress),
+                        "avg_sec_per_step": float(avg_sec_per_step_progress),
+                        "steps_per_sec": float(1.0 / avg_sec_per_step_progress) if avg_sec_per_step_progress > 0 else 0.0,
+                        "remaining_steps": int(remaining_steps_progress),
+                    }
+                )
 
                 if log_every > 0 and next_step % log_every == 0:
-                    elapsed = max(time.perf_counter() - log_window_start, 1.0e-9)
+                    window_elapsed_sec = max(now - log_window_start, 1.0e-9)
+                    window_steps = max(int(next_step) - int(log_window_step), 1)
+                    sec_per_step = window_elapsed_sec / float(window_steps)
+                    avg_sec_per_step = elapsed_sec / float(max(int(next_step) - int(start_step), 1))
+                    remaining_steps = max(int(max_steps) - int(next_step), 0)
+                    eta_sec = remaining_steps * sec_per_step
                     mean_loss = sum(recent_losses) / max(len(recent_losses), 1)
                     mean_loss = dist.reduce_mean_float(mean_loss, device=device)
                     grad_norm = dist.reduce_mean_float(grad_norm, device=device)
@@ -400,7 +441,17 @@ def run_mmdit_training_loop(
                         "grad_norm_total": float(grad_stats["grad_norm_total"]),
                         "has_nan_grad": bool(grad_stats["has_nan_grad"]),
                         "has_inf_grad": bool(grad_stats["has_inf_grad"]),
-                        "samples_per_sec": float(recent_samples) / elapsed,
+                        "samples_per_sec": float(recent_samples) / window_elapsed_sec,
+                        "steps_per_sec": float(window_steps) / window_elapsed_sec,
+                        "sec_per_step": float(sec_per_step),
+                        "s_per_step": float(sec_per_step),
+                        "avg_sec_per_step": float(avg_sec_per_step),
+                        "elapsed_sec": float(elapsed_sec),
+                        "elapsed": _format_duration(elapsed_sec),
+                        "eta_sec": float(eta_sec),
+                        "eta": _format_duration(eta_sec),
+                        "eta_h": float(eta_sec) / 3600.0,
+                        "remaining_steps": int(remaining_steps),
                     }
                     local_bins = {k: sum(v) / len(v) for k, v in recent_bins.items() if v}
                     event.update({k: dist.reduce_mean_float(float(v), device=device) for k, v in local_bins.items()})
@@ -409,6 +460,7 @@ def run_mmdit_training_loop(
                     recent_bins.clear()
                     recent_samples = 0
                     log_window_start = time.perf_counter()
+                    log_window_step = int(next_step)
 
                 if val_every > 0 and next_step % val_every == 0:
                     val_loss, val_bins = _run_validation(
@@ -509,4 +561,5 @@ def run_mmdit_training_loop(
         save_ckpt(str(out_dir / "ckpt_final.pt"), ckpt)
         save_ckpt(str(out_dir / "ckpt_latest.pt"), ckpt)
     dist.wait_for_everyone()
+    event_bus.close()
     pbar.close()

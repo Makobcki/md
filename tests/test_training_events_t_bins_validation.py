@@ -109,11 +109,23 @@ def test_training_loop_writes_train_and_eval_t_bin_events(tmp_path: Path) -> Non
     events_path = tmp_path / "events.jsonl"
     assert events_path.exists()
     events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    progress_events = [event for event in events if event.get("type") == "progress"]
     train_events = [event for event in events if event.get("type") == "train"]
     eval_events = [event for event in events if event.get("type") == "eval"]
+    assert progress_events
+    assert progress_events[-1]["step"] == 2
+    assert progress_events[-1]["max_steps"] == 2
+    assert progress_events[-1]["sec_per_step"] > 0
+    assert "loss" not in progress_events[-1]
     assert train_events
     assert eval_events
     assert "train_loss" in train_events[-1]
+    assert train_events[-1]["elapsed_sec"] >= 0
+    assert train_events[-1]["eta_sec"] >= 0
+    assert train_events[-1]["sec_per_step"] > 0
+    assert train_events[-1]["s_per_step"] == train_events[-1]["sec_per_step"]
+    assert isinstance(train_events[-1]["elapsed"], str) and train_events[-1]["elapsed"]
+    assert isinstance(train_events[-1]["eta"], str) and train_events[-1]["eta"]
     assert any(key.startswith("loss_t_bin_") for key in train_events[-1])
     assert "val_loss" in eval_events[-1]
     assert any(key.startswith("val_loss_t_bin_") for key in eval_events[-1])

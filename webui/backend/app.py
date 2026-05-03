@@ -7,8 +7,11 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional
+import re
+import shutil
+import uuid
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -20,6 +23,7 @@ from .services import config_service
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 RUNS_DIR = Path(os.environ.get("WEBUI_RUNS_DIR", ROOT_DIR / "webui_runs"))
+UPLOADS_DIR = RUNS_DIR / "_uploads"
 
 
 class WSManager:
@@ -63,6 +67,7 @@ job_manager = JobManager(ROOT_DIR, ws_manager, RUNS_DIR)
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     job_manager.set_loop(asyncio.get_running_loop())
     yield
 
@@ -118,6 +123,19 @@ async def _require_ws_token(websocket: WebSocket) -> bool:
         return True
     await websocket.close(code=1008)
     return False
+
+
+def _safe_upload_name(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(name or "upload").name).strip(".-")
+    return cleaned or "upload"
+
+
+def _upload_relative_url(path: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(RUNS_DIR.resolve())
+    except Exception as exc:
+        raise ValueError("upload path must be inside runs dir") from exc
+    return f"/runs/{rel.as_posix()}"
 
 
 def _configured_allowed_roots() -> list[Path]:
@@ -545,6 +563,42 @@ def list_samples(
 ) -> Dict[str, Any]:
     items = sorted([str(p) for p in RUNS_DIR.rglob("*.png")])
     return {"items": items[offset:offset + limit], "offset": offset, "total": len(items)}
+
+
+@app.post("/api/uploads/image")
+async def upload_image(
+    file: UploadFile = File(...),
+    kind: str = Form(default="image"),
+    _: None = Depends(_require_token),
+) -> Dict[str, Any]:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="file is required")
+    content_type = (file.content_type or "").lower()
+    ext = Path(file.filename).suffix.lower()
+    allowed_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    allowed_types = {"image/png", "image/jpeg", "image/webp", "image/bmp"}
+    if ext not in allowed_exts and content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="unsupported image format")
+    safe_kind = re.sub(r"[^A-Za-z0-9_-]+", "-", kind or "image").strip("-") or "image"
+    safe_name = _safe_upload_name(file.filename)
+    out_dir = UPLOADS_DIR / safe_kind
+    out_dir.mkdir(parents=True, exist_ok=True)
+    suffix = ext or ".png"
+    out_path = out_dir / f"{uuid.uuid4().hex[:12]}_{Path(safe_name).stem}{suffix}"
+    try:
+        with out_path.open("wb") as f:
+            shutil.copyfileobj(file.file, f)
+    finally:
+        await file.close()
+    return {
+        "ok": True,
+        "path": str(out_path.resolve()),
+        "url": _upload_relative_url(out_path),
+        "name": safe_name,
+        "kind": safe_kind,
+        "content_type": file.content_type or "",
+        "size": out_path.stat().st_size,
+    }
 
 
 @app.post("/api/train/start")

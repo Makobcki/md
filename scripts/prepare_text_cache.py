@@ -45,14 +45,21 @@ def _entry_text(entry: dict[str, Any], caption_field: str = "") -> str:
     return " ".join(str(x) for x in tags)
 
 
+def _entry_text_hash(entry: dict[str, Any], caption_field: str = "") -> str:
+    h = hashlib.sha256()
+    h.update(_entry_text(entry, caption_field).encode("utf-8"))
+    h.update(b"\0")
+    h.update(str(entry.get("text_source", "")).encode("utf-8"))
+    h.update(b"\0")
+    return h.hexdigest()
+
+
 def _dataset_hash(entries: list[dict[str, Any]], caption_field: str = "") -> str:
     h = hashlib.sha256()
     for entry in entries:
         h.update(str(entry.get("md5", "")).encode("utf-8"))
         h.update(b"\0")
-        h.update(_entry_text(entry, caption_field).encode("utf-8"))
-        h.update(b"\0")
-        h.update(str(entry.get("text_source", "")).encode("utf-8"))
+        h.update(_entry_text_hash(entry, caption_field).encode("utf-8"))
         h.update(b"\0")
     return h.hexdigest()
 
@@ -204,7 +211,17 @@ def prepare_text_cache(
         shard_name = f"text_{shard_no:05d}.safetensors"
         for offset, entry in enumerate(batch_entries):
             key = str(entry.get("md5", start + offset))
-            index_lines.append(json.dumps({"key": key, "shard": shard_name, "idx": local_start + offset}, ensure_ascii=False))
+            index_lines.append(
+                json.dumps(
+                    {
+                        "key": key,
+                        "shard": shard_name,
+                        "idx": local_start + offset,
+                        "text_hash": _entry_text_hash(entry, str(cfg.caption_field)),
+                    },
+                    ensure_ascii=False,
+                )
+            )
             shard_sample_ids.append(key)
         shard_tokens.append(cond.tokens.detach().cpu())
         shard_masks.append(cond.mask.detach().cpu())
