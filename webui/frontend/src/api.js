@@ -21,13 +21,36 @@ export async function fetchJson(path, options = {}) {
   return res.json();
 }
 
+export async function uploadImage(file, kind = "image") {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("kind", kind);
+  const headers = AUTH_TOKEN ? { Authorization: `Bearer ${AUTH_TOKEN}` } : {};
+  const res = await fetch(`${API_BASE}/api/uploads/image`, {
+    method: "POST",
+    headers,
+    body: form,
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => ({}));
+    throw new Error(detail.detail || res.statusText);
+  }
+  return res.json();
+}
+
 export const api = {
   getStatus: () => fetchJson("/api/status"),
   listRuns: () => fetchJson("/api/runs"),
   getRun: (id) => fetchJson(`/api/runs/${id}`),
   getRunConfig: (id) => fetchJson(`/api/runs/${id}/config`),
   getRunLog: (id, stream) => fetchJson(`/api/runs/${id}/logs/${stream}`),
-  getRunMetrics: (id) => fetchJson(`/api/runs/${id}/metrics`),
+  getRunMetrics: (id, params = {}) => {
+    const query = new URLSearchParams();
+    if (Number.isFinite(params.offset)) query.set("offset", String(params.offset));
+    if (Number.isFinite(params.limit)) query.set("limit", String(params.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return fetchJson(`/api/runs/${id}/metrics${suffix}`);
+  },
   getConfig: () => fetchJson("/api/config"),
   updateConfig: (content) =>
     fetchJson("/api/config", { method: "PUT", body: JSON.stringify({ content }) }),
@@ -47,6 +70,7 @@ export const api = {
   startLatentCache: (args) =>
     fetchJson("/api/latents/start", { method: "POST", body: JSON.stringify({ args }) }),
   stopLatentCache: () => fetchJson("/api/latents/stop", { method: "POST" }),
+  uploadImage,
 };
 
 export function wsUrl(path) {

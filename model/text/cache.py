@@ -16,6 +16,7 @@ class TextCacheEntry:
     key: str
     shard: str
     idx: int
+    text_hash: str = ""
 
 
 class TextCache:
@@ -47,7 +48,12 @@ class TextCache:
                 idx = int(obj["idx"])
                 if idx < 0:
                     raise ValueError(f"Negative text cache shard index at line {line_no}: {line}")
-                self.entries[key] = TextCacheEntry(key=key, shard=str(obj["shard"]), idx=idx)
+                self.entries[key] = TextCacheEntry(
+                    key=key,
+                    shard=str(obj["shard"]),
+                    idx=idx,
+                    text_hash=str(obj.get("text_hash", "") or ""),
+                )
 
     def __contains__(self, key: str) -> bool:
         return key in self.entries

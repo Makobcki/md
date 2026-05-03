@@ -49,14 +49,21 @@ def _mmdit_entry_text(entry: dict) -> str:
     return " ".join(str(x) for x in tags)
 
 
+def _mmdit_entry_text_hash(entry: dict) -> str:
+    h = hashlib.sha256()
+    h.update(_mmdit_entry_text(entry).encode("utf-8"))
+    h.update(b"\0")
+    h.update(str(entry.get("text_source", "")).encode("utf-8"))
+    h.update(b"\0")
+    return h.hexdigest()
+
+
 def _mmdit_dataset_hash(entries: list[dict]) -> str:
     h = hashlib.sha256()
     for entry in entries:
         h.update(str(entry.get("md5", "")).encode("utf-8"))
         h.update(b"\0")
-        h.update(_mmdit_entry_text(entry).encode("utf-8"))
-        h.update(b"\0")
-        h.update(str(entry.get("text_source", "")).encode("utf-8"))
+        h.update(_mmdit_entry_text_hash(entry).encode("utf-8"))
         h.update(b"\0")
     return h.hexdigest()
 
@@ -95,16 +102,26 @@ def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: 
         if expected != actual:
             raise RuntimeError(f"text cache encoder metadata mismatch: cache={actual!r}, config={expected!r}")
 
-    expected_hash = meta.get("dataset_hash")
-    if isinstance(expected_hash, str) and expected_hash:
-        actual_hash = _mmdit_dataset_hash(entries)
-        if actual_hash != expected_hash:
-            raise RuntimeError(f"text cache dataset_hash mismatch: {expected_hash} != {actual_hash}")
-
     missing = [str(entry.get("md5", "")) for entry in entries if str(entry.get("md5", "")) not in cache.entries]
     if missing:
         examples = ", ".join(missing[:10])
         raise RuntimeError(f"text cache missing {len(missing)} md5 keys used by dataset. Examples: {examples}")
+
+    text_hash_mismatches = []
+    for entry in entries:
+        key = str(entry.get("md5", ""))
+        cached_hash = cache.entries[key].text_hash
+        if cached_hash and cached_hash != _mmdit_entry_text_hash(entry):
+            text_hash_mismatches.append(key)
+    if text_hash_mismatches:
+        examples = ", ".join(text_hash_mismatches[:10])
+        raise RuntimeError(f"text cache prompt/text hash mismatch for {len(text_hash_mismatches)} md5 keys. Examples: {examples}")
+
+    expected_hash = meta.get("dataset_hash")
+    if isinstance(expected_hash, str) and expected_hash:
+        actual_hash = _mmdit_dataset_hash(entries)
+        if actual_hash != expected_hash and len(cache.entries) <= len(entries):
+            raise RuntimeError(f"text cache dataset_hash mismatch: {expected_hash} != {actual_hash}")
 
 
 def _batch_text(text: TextConditioning) -> TextConditioning:

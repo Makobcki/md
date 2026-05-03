@@ -187,14 +187,21 @@ def _mmdit_entry_text(entry: dict) -> str:
     return " ".join(str(x) for x in tags)
 
 
+def _mmdit_entry_text_hash(entry: dict) -> str:
+    h = hashlib.sha256()
+    h.update(_mmdit_entry_text(entry).encode("utf-8"))
+    h.update(b"\0")
+    h.update(str(entry.get("text_source", "")).encode("utf-8"))
+    h.update(b"\0")
+    return h.hexdigest()
+
+
 def _mmdit_dataset_hash(entries: list[dict]) -> str:
     h = hashlib.sha256()
     for entry in entries:
         h.update(str(entry.get("md5", "")).encode("utf-8"))
         h.update(b"\0")
-        h.update(_mmdit_entry_text(entry).encode("utf-8"))
-        h.update(b"\0")
-        h.update(str(entry.get("text_source", "")).encode("utf-8"))
+        h.update(_mmdit_entry_text_hash(entry).encode("utf-8"))
         h.update(b"\0")
     return h.hexdigest()
 
@@ -247,16 +254,34 @@ def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: 
         if expected != actual:
             _warn_or_raise(f"text cache encoder metadata mismatch: cache={actual!r}, config={expected!r}", strict=strict)
 
-    expected_hash = meta.get("dataset_hash")
-    if isinstance(expected_hash, str) and expected_hash:
-        actual_hash = _mmdit_dataset_hash(entries)
-        if actual_hash != expected_hash:
-            _warn_or_raise(f"text cache dataset_hash mismatch: {expected_hash} != {actual_hash}", strict=strict)
-
     missing = [str(entry.get("md5", "")) for entry in entries if str(entry.get("md5", "")) not in cache.entries]
     if missing:
         examples = ", ".join(missing[:10])
         raise RuntimeError(f"text cache missing {len(missing)} md5 keys used by dataset. Examples: {examples}")
+
+    text_hash_mismatches = []
+    for entry in entries:
+        key = str(entry.get("md5", ""))
+        cached_hash = cache.entries[key].text_hash
+        if cached_hash and cached_hash != _mmdit_entry_text_hash(entry):
+            text_hash_mismatches.append(key)
+    if text_hash_mismatches:
+        examples = ", ".join(text_hash_mismatches[:10])
+        raise RuntimeError(f"text cache prompt/text hash mismatch for {len(text_hash_mismatches)} md5 keys. Examples: {examples}")
+
+    expected_hash = meta.get("dataset_hash")
+    if isinstance(expected_hash, str) and expected_hash:
+        actual_hash = _mmdit_dataset_hash(entries)
+        if actual_hash != expected_hash:
+            message = f"text cache dataset_hash mismatch: {expected_hash} != {actual_hash}"
+            # A cache produced for train+val or a larger dataset is still valid
+            # for a train-only subset as long as every requested key is present.
+            # New caches additionally carry per-entry text_hash values above,
+            # which catch real prompt/caption changes at key granularity.
+            if len(cache.entries) > len(entries):
+                print(f"[WARN] {message}; using compatible text cache superset with {len(cache.entries)} entries for current {len(entries)} entries.", flush=True)
+            else:
+                _warn_or_raise(message, strict=strict)
 
     if cache.manifest:
         manifest_samples = int(cache.manifest.get("num_samples", len(cache.entries)))
@@ -681,7 +706,12 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
     if int(cfg.dataset_limit) > 0:
         train_entries = train_entries[: int(cfg.dataset_limit)]
         val_entries = []
-    _ensure_mmdit_caches_ready(cfg, train_entries + val_entries, device)
+    # The training set is the hard requirement for starting a run.  Latent
+    # preparation intentionally processes train split entries first; with the
+    # default val_ratio this can leave validation-only md5 keys absent from an
+    # otherwise usable cache.  Missing validation latents are filtered below and
+    # validation is disabled when none remain, instead of aborting training.
+    _ensure_mmdit_caches_ready(cfg, train_entries, device)
     latent_dtype = torch.bfloat16 if cfg.latent_dtype == "bf16" else torch.float16
     latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
     latent_expected_meta = LatentCacheMetadata(
@@ -714,7 +744,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
         shard_cache_size=int(cfg.text_shard_cache_size),
     )
     if bool(cfg.cache_validate_on_start):
-        _validate_text_cache_for_mmdit(text_cache, cfg, train_entries + val_entries, strict=bool(cfg.cache_strict))
+        _validate_text_cache_for_mmdit(text_cache, cfg, train_entries, strict=bool(cfg.cache_strict))
     ds = _MMDiTCachedDataset(
         latent_ds,
         text_cache,
@@ -762,29 +792,46 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
             latent_shard_cache_size=int(cfg.latent_shard_cache_size),
         )
         if len(val_latent_ds) > 0:
-            dl_val = DataLoader(
-                _MMDiTCachedDataset(
-                    val_latent_ds,
-                    text_cache,
-                    dataset_tasks={"txt2img": 1.0},
-                    seed=int(cfg.seed) + 17,
-                    inpaint_config=InpaintMaskConfig(
-                        mask_min_area=float(cfg.inpaint_mask_min_area),
-                        mask_max_area=float(cfg.inpaint_mask_max_area),
-                        mask_modes=dict(cfg.inpaint_mask_modes),
+            val_text_ready = True
+            if bool(cfg.cache_validate_on_start):
+                try:
+                    _validate_text_cache_for_mmdit(text_cache, cfg, val_latent_ds.entries, strict=bool(cfg.cache_strict))
+                except RuntimeError as exc:
+                    val_text_ready = False
+                    print(
+                        "[WARN] Validation split has cached latents, but text cache validation failed; "
+                        f"validation is disabled for this run. Reason: {exc}",
+                        flush=True,
+                    )
+            if val_text_ready:
+                dl_val = DataLoader(
+                    _MMDiTCachedDataset(
+                        val_latent_ds,
+                        text_cache,
+                        dataset_tasks={"txt2img": 1.0},
+                        seed=int(cfg.seed) + 17,
+                        inpaint_config=InpaintMaskConfig(
+                            mask_min_area=float(cfg.inpaint_mask_min_area),
+                            mask_max_area=float(cfg.inpaint_mask_max_area),
+                            mask_modes=dict(cfg.inpaint_mask_modes),
+                        ),
+                        control_enabled=bool(cfg.control_enabled),
+                        control_strength=float(cfg.control_strength),
+                        control_num_streams=int(cfg.control_num_streams),
                     ),
-                    control_enabled=bool(cfg.control_enabled),
-                    control_strength=float(cfg.control_strength),
-                    control_num_streams=int(cfg.control_num_streams),
-                ),
-                batch_size=int(cfg.batch_size),
-                shuffle=False,
-                num_workers=_resolve_num_workers(int(cfg.num_workers)),
-                pin_memory=bool(cfg.pin_memory),
-                drop_last=False,
-                persistent_workers=bool(cfg.persistent_workers) and int(cfg.num_workers) != 0,
-                prefetch_factor=int(cfg.prefetch_factor) if int(cfg.num_workers) != 0 else None,
-                collate_fn=_collate_mmdit,
+                    batch_size=int(cfg.batch_size),
+                    shuffle=False,
+                    num_workers=_resolve_num_workers(int(cfg.num_workers)),
+                    pin_memory=bool(cfg.pin_memory),
+                    drop_last=False,
+                    persistent_workers=bool(cfg.persistent_workers) and int(cfg.num_workers) != 0,
+                    prefetch_factor=int(cfg.prefetch_factor) if int(cfg.num_workers) != 0 else None,
+                    collate_fn=_collate_mmdit,
+                )
+        elif val_entries:
+            print(
+                "[WARN] Validation split has entries, but none are present in the latent cache; validation is disabled for this run.",
+                flush=True,
             )
 
     mmdit_cfg = MMDiTConfig(
