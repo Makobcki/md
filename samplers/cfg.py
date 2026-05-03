@@ -15,6 +15,11 @@ def concat_text_conditioning(items: list[TextConditioning]) -> TextConditioning:
             if all(x.is_uncond is not None for x in items)
             else None
         ),
+        token_types=(
+            torch.cat([x.token_types for x in items], dim=0)
+            if all(x.token_types is not None for x in items)
+            else None
+        ),
     )
 
 
@@ -42,3 +47,32 @@ def cfg_predict(
     pred_uncond, pred_cond = model(x_in, t_in, text_in, **kwargs_in).chunk(2, dim=0)
     return pred_uncond + float(scale) * (pred_cond - pred_uncond)
 
+
+
+def preserve_inpaint_region(
+    x: torch.Tensor,
+    *,
+    source_latent: torch.Tensor | None = None,
+    mask: torch.Tensor | None = None,
+    task: str | list[str] | tuple[str, ...] = "txt2img",
+) -> torch.Tensor:
+    """Keep unmasked source pixels fixed for latent inpainting sampling.
+
+    The mask convention is 1 = editable/repaint region, 0 = known source.
+    Mixed task batches are not used by the public sampler; if a list is passed,
+    rows whose task is not inpaint are left untouched.
+    """
+    if source_latent is None or mask is None:
+        return x
+    m = mask.to(device=x.device, dtype=x.dtype)
+    if m.dim() == 3:
+        m = m.unsqueeze(1)
+    src = source_latent.to(device=x.device, dtype=x.dtype)
+    if isinstance(task, str):
+        if task != "inpaint":
+            return x
+        return x * m + src * (1.0 - m)
+    tasks = list(task)
+    keep = torch.tensor([name == "inpaint" for name in tasks], device=x.device, dtype=torch.bool).view(-1, 1, 1, 1)
+    blended = x * m + src * (1.0 - m)
+    return torch.where(keep, blended, x)
