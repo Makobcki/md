@@ -196,7 +196,10 @@ def _synthetic_batch(cfg: TrainConfig) -> tuple[torch.Tensor, TextConditioning, 
 
     gen = torch.Generator(device="cpu").manual_seed(int(cfg.seed))
     batch_size = 1
-    text_len = max(1, min(int(cfg.text_max_len), 16))
+    text_cfg = cfg.extra.get("text", {}) if isinstance(cfg.extra.get("text", {}), dict) else {}
+    encoders = text_cfg.get("encoders", []) if isinstance(text_cfg, dict) else []
+    total_text_len = sum(int(item.get("max_length", 0)) for item in encoders if isinstance(item, dict))
+    text_len = max(1, min(total_text_len or 16, 16))
     x0 = torch.randn(batch_size, int(cfg.latent_channels), latent_side, latent_side, generator=gen)
     text = TextConditioning(
         tokens=torch.randn(batch_size, text_len, int(cfg.text_dim), generator=gen),

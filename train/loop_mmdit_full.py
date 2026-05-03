@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Optional
 
 import torch
@@ -9,7 +10,7 @@ from tqdm import tqdm
 from config.train import TrainConfig
 from diffusion.io.events import EventBus, JsonlFileSink, StdoutJsonSink
 from diffusion.objectives import RectifiedFlowObjective
-from diffusion.utils import EMA
+from diffusion.utils import EMA, unwrap_model
 from model.mmdit import MMDiTFlowModel
 from model.text.conditioning import TextConditioning, TrainBatch
 from model.text.pretrained import FrozenTextEncoderBundle
@@ -18,6 +19,9 @@ from train.checkpoint import _prune_checkpoints, save_ckpt
 from train.eval_mmdit import run_mmdit_eval_sampling
 from train.schedulers import _apply_lr, _compute_lr
 from train.webui import _is_webui_mode, _webui_metrics_path
+from train.metrics import loss_by_t_bins
+from train.checkpoint_mmdit import build_mmdit_checkpoint_metadata
+from train.dist import DistributedContext
 
 
 def _assert_finite(name: str, x: torch.Tensor) -> None:
@@ -31,6 +35,7 @@ def _move_text(text: TextConditioning, device: torch.device) -> TextConditioning
         mask=text.mask.to(device),
         pooled=text.pooled.to(device),
         is_uncond=text.is_uncond.to(device) if text.is_uncond is not None else None,
+        token_types=text.token_types.to(device) if text.token_types is not None else None,
     )
 
 
@@ -42,6 +47,9 @@ def _move_batch(batch: TrainBatch, device: torch.device) -> TrainBatch:
         if batch.source_latent is not None
         else None,
         mask=batch.mask.to(device=device, dtype=torch.float32) if batch.mask is not None else None,
+        control_latents=batch.control_latents.to(device=device, dtype=torch.float32)
+        if batch.control_latents is not None
+        else None,
         task=batch.task,
         metadata=batch.metadata,
     )
@@ -54,6 +62,34 @@ def _replace_text_where(text: TextConditioning, empty_text: TextConditioning, dr
     return text.replace_where(drop, empty_text)
 
 
+def _per_sample_flow_mse(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    *,
+    mask_weight: float = 1.0,
+    unmask_weight: float = 1.0,
+) -> torch.Tensor:
+    err = (pred.float() - target.to(device=pred.device, dtype=torch.float32)).pow(2)
+    full = err.mean(dim=[1, 2, 3])
+    if mask is None:
+        return full
+    m = mask.to(device=pred.device, dtype=torch.float32)
+    if m.dim() == 3:
+        m = m.unsqueeze(1)
+    if m.shape[-2:] != pred.shape[-2:]:
+        raise RuntimeError(f"mask shape {tuple(m.shape)} is incompatible with prediction shape {tuple(pred.shape)}")
+    if m.shape[0] != pred.shape[0]:
+        raise RuntimeError(f"mask batch {m.shape[0]} is incompatible with prediction batch {pred.shape[0]}")
+    if m.shape[1] not in {1, pred.shape[1]}:
+        raise RuntimeError(f"mask channel count {m.shape[1]} is incompatible with prediction channels {pred.shape[1]}")
+    weights = m * float(mask_weight) + (1.0 - m) * float(unmask_weight)
+    weights = weights.expand_as(err) if weights.shape[1] == 1 else weights
+    denom = weights.sum(dim=[1, 2, 3])
+    weighted = (err * weights).sum(dim=[1, 2, 3]) / denom.clamp_min(1.0)
+    return torch.where(denom > 0, weighted, full)
+
+
 def _loss_and_bins(
     *,
     model: MMDiTFlowModel,
@@ -63,6 +99,8 @@ def _loss_and_bins(
     cfg_drop_prob: float,
     use_amp: bool,
     amp_dtype: torch.dtype,
+    inpaint_loss_mask_weight: float = 1.0,
+    inpaint_loss_unmask_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     train_tuple = objective.sample_training_tuple(batch.x0)
     text = _replace_text_where(batch.text, empty_text, cfg_drop_prob)
@@ -73,24 +111,20 @@ def _loss_and_bins(
             text=text,
             source_latent=batch.source_latent,
             mask=batch.mask,
+            control_latents=batch.control_latents,
             task=batch.task,
         )
         _assert_finite("mmdit_pred", pred)
-        per = (pred - train_tuple.target.to(dtype=pred.dtype)).pow(2).mean(dim=[1, 2, 3])
+        per = _per_sample_flow_mse(
+            pred,
+            train_tuple.target,
+            batch.mask,
+            mask_weight=float(inpaint_loss_mask_weight),
+            unmask_weight=float(inpaint_loss_unmask_weight),
+        )
         loss = (per * train_tuple.weight.to(device=per.device, dtype=per.dtype)).mean()
 
-    stats: dict[str, float] = {}
-    t = train_tuple.t.detach()
-    per_f = per.detach().float()
-    for idx in range(10):
-        lo = idx / 10.0
-        hi = (idx + 1) / 10.0
-        if idx == 9:
-            mask = (t >= lo) & (t <= hi)
-        else:
-            mask = (t >= lo) & (t < hi)
-        if mask.any():
-            stats[f"loss_t_{idx}_{idx + 1}"] = float(per_f[mask].mean().cpu())
+    stats = loss_by_t_bins(per.detach(), train_tuple.t.detach(), bins=10, prefix="loss_t_bin")
     return loss, stats
 
 
@@ -104,6 +138,8 @@ def _run_validation(
     max_batches: int,
     use_amp: bool,
     amp_dtype: torch.dtype,
+    inpaint_loss_mask_weight: float = 1.0,
+    inpaint_loss_unmask_weight: float = 1.0,
 ) -> tuple[Optional[float], dict[str, float]]:
     if dataloader is None or max_batches <= 0:
         return None, {}
@@ -124,18 +160,19 @@ def _run_validation(
                     text=batch.text,
                     source_latent=batch.source_latent,
                     mask=batch.mask,
+                    control_latents=batch.control_latents,
                     task=batch.task,
                 )
-                per = (pred - train_tuple.target.to(dtype=pred.dtype)).pow(2).mean(dim=[1, 2, 3])
+                per = _per_sample_flow_mse(
+                    pred,
+                    train_tuple.target,
+                    batch.mask,
+                    mask_weight=float(inpaint_loss_mask_weight),
+                    unmask_weight=float(inpaint_loss_unmask_weight),
+                )
             losses.append(float(per.mean().cpu()))
-            t = train_tuple.t.detach()
-            per_f = per.detach().float()
-            for idx in range(10):
-                lo = idx / 10.0
-                hi = (idx + 1) / 10.0
-                mask = ((t >= lo) & (t <= hi)) if idx == 9 else ((t >= lo) & (t < hi))
-                if mask.any():
-                    bins.setdefault(f"val_loss_t_{idx}_{idx + 1}", []).append(float(per_f[mask].mean().cpu()))
+            for key, value in loss_by_t_bins(per.detach(), train_tuple.t.detach(), bins=10, prefix="val_loss_t_bin").items():
+                bins.setdefault(key, []).append(value)
     finally:
         model.train(was_training)
     if not losses:
@@ -143,13 +180,29 @@ def _run_validation(
     return sum(losses) / len(losses), {k: sum(v) / len(v) for k, v in bins.items() if v}
 
 
-def _grad_norm(model: torch.nn.Module) -> float:
+def _grad_diagnostics(model: torch.nn.Module) -> dict[str, float | bool]:
     total = 0.0
+    has_nan = False
+    has_inf = False
     for param in model.parameters():
         if param.grad is None:
             continue
-        total += float(param.grad.detach().data.norm(2).item()) ** 2
-    return total ** 0.5
+        grad = param.grad.detach()
+        has_nan = has_nan or bool(torch.isnan(grad).any().item())
+        has_inf = has_inf or bool(torch.isinf(grad).any().item())
+        finite_grad = torch.nan_to_num(grad.float(), nan=0.0, posinf=0.0, neginf=0.0)
+        total += float(finite_grad.norm(2).item()) ** 2
+    norm = total ** 0.5
+    return {
+        "grad_norm_total": norm,
+        "grad_norm": norm,
+        "has_nan_grad": has_nan,
+        "has_inf_grad": has_inf,
+    }
+
+
+def _grad_norm(model: torch.nn.Module) -> float:
+    return float(_grad_diagnostics(model)["grad_norm_total"])
 
 
 def _build_ckpt(
@@ -163,26 +216,38 @@ def _build_ckpt(
     step: int,
     text_metadata: dict,
 ) -> dict:
+    metadata = build_mmdit_checkpoint_metadata(
+        cfg=cfg,
+        cfg_dict=cfg_dict,
+        step=step,
+        text_metadata=text_metadata,
+        dataset_hash=str(cfg_dict.get("dataset_hash", "")),
+    )
     return {
-        "model": model.state_dict(),
+        "model": unwrap_model(model).state_dict(),
         "ema": ema.shadow,
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict(),
         "scheduler": {"lr_scheduler": str(cfg.lr_scheduler)},
         "step": int(step),
         "cfg": cfg_dict,
-        "architecture": "mmdit_rf",
-        "objective": "rectified_flow",
-        "vae": {
-            "pretrained": str(cfg.vae_pretrained),
-            "scaling_factor": float(cfg.vae_scaling_factor),
-        },
-        "text_encoders": text_metadata.get("encoders", []),
+        "metadata": metadata,
+        "architecture": metadata["architecture"],
+        "objective": metadata["objective"],
+        "prediction_type": metadata["prediction_type"],
+        "latent_channels": int(cfg.latent_channels),
+        "latent_patch_size": int(cfg.latent_patch_size),
+        "hidden_dim": int(cfg.hidden_dim),
+        "depth": int(cfg.depth),
+        "num_heads": int(cfg.num_heads),
+        "double_stream_blocks": int(cfg.double_stream_blocks),
+        "single_stream_blocks": int(cfg.single_stream_blocks),
+        "pos_embed": str(cfg.pos_embed),
+        "vae": metadata["vae_config"],
+        "text_encoders": metadata["text_config"].get("encoders", []),
         "text_dim": int(cfg.text_dim),
         "pooled_dim": int(cfg.pooled_dim),
-        "text_max_length_total": int(
-            sum(int(item.get("max_length", 0)) for item in text_metadata.get("encoders", []))
-        ),
+        "text_max_length_total": int(metadata["text_config"].get("max_length_total", 0)),
     }
 
 
@@ -200,11 +265,13 @@ def run_mmdit_training_loop(
     device: torch.device,
     out_dir: Path,
     empty_text: TextConditioning,
+    checkpoint_dir: Path | None = None,
     start_step: int,
     text_metadata: dict,
     eval_prompts: Optional[list[str]] = None,
     eval_text_encoder: Optional[FrozenTextEncoderBundle] = None,
     eval_vae: Optional[VAEWrapper] = None,
+    dist: DistributedContext | None = None,
 ) -> None:
     try:
         dl_len = len(dataloader)
@@ -229,14 +296,20 @@ def run_mmdit_training_loop(
     use_amp = bool(cfg.amp) and device.type == "cuda"
     amp_dtype = torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16
     grad_clip = float(cfg.grad_clip_norm)
+    dist = dist or DistributedContext(device=device)
+    write_outputs = dist.should_write()
 
     metrics_dir = out_dir / "metrics"
-    sinks = [JsonlFileSink(metrics_dir / "events.jsonl")]
-    if _is_webui_mode():
-        sinks.append(StdoutJsonSink())
-    metrics_path = _webui_metrics_path()
-    if metrics_path is not None:
-        sinks.append(JsonlFileSink(metrics_path, event_types=["metric"]))
+    checkpoint_dir = checkpoint_dir or out_dir
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    sinks = []
+    if write_outputs:
+        sinks.extend([JsonlFileSink(out_dir / "events.jsonl"), JsonlFileSink(metrics_dir / "events.jsonl")])
+        if _is_webui_mode():
+            sinks.append(StdoutJsonSink())
+        metrics_path = _webui_metrics_path()
+        if metrics_path is not None:
+            sinks.append(JsonlFileSink(metrics_path, event_types=["metric"]))
     event_bus = EventBus(sinks)
 
     pbar = tqdm(
@@ -244,7 +317,7 @@ def run_mmdit_training_loop(
         initial=min(start_step, max_steps),
         desc="mmdit_rf",
         unit="step",
-        disable=_is_webui_mode(),
+        disable=_is_webui_mode() or not write_outputs,
     )
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -253,6 +326,8 @@ def run_mmdit_training_loop(
     accum_idx = 0
     recent_losses: list[float] = []
     recent_bins: dict[str, list[float]] = {}
+    recent_samples = 0
+    log_window_start = time.perf_counter()
 
     while step < max_steps:
         saw_batch = False
@@ -278,10 +353,13 @@ def run_mmdit_training_loop(
                 cfg_drop_prob=float(cfg.cond_drop_prob),
                 use_amp=use_amp,
                 amp_dtype=amp_dtype,
+                inpaint_loss_mask_weight=float(cfg.inpaint_loss_mask_weight),
+                inpaint_loss_unmask_weight=float(cfg.inpaint_loss_unmask_weight),
             )
             _assert_finite("mmdit_loss", loss.detach())
             scaler.scale(loss / grad_accum).backward()
             recent_losses.append(float(loss.detach().cpu()))
+            recent_samples += int(batch.x0.shape[0])
             for key, value in bins.items():
                 recent_bins.setdefault(key, []).append(value)
             accum_idx += 1
@@ -289,13 +367,16 @@ def run_mmdit_training_loop(
             if accum_idx >= grad_accum:
                 if use_amp:
                     scaler.unscale_(optimizer)
-                grad_norm = _grad_norm(model)
+                grad_stats = _grad_diagnostics(model)
+                grad_norm = float(grad_stats["grad_norm_total"])
                 if grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 if bool(cfg.fail_on_nonfinite_grad):
-                    for name, param in model.named_parameters():
-                        if param.grad is not None and not torch.isfinite(param.grad).all():
-                            raise RuntimeError(f"Non-finite gradient in {name}")
+                    if bool(grad_stats["has_nan_grad"]) or bool(grad_stats["has_inf_grad"]):
+                        for name, param in model.named_parameters():
+                            if param.grad is not None and not torch.isfinite(param.grad).all():
+                                raise RuntimeError(f"Non-finite gradient in {name}")
+                        raise RuntimeError("Non-finite gradient detected")
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
@@ -304,18 +385,30 @@ def run_mmdit_training_loop(
                 next_step = step + 1
 
                 if log_every > 0 and next_step % log_every == 0:
+                    elapsed = max(time.perf_counter() - log_window_start, 1.0e-9)
+                    mean_loss = sum(recent_losses) / max(len(recent_losses), 1)
+                    mean_loss = dist.reduce_mean_float(mean_loss, device=device)
+                    grad_norm = dist.reduce_mean_float(grad_norm, device=device)
                     event = {
-                        "type": "metric",
+                        "type": "train",
                         "step": next_step,
                         "max_steps": max_steps,
-                        "loss": sum(recent_losses) / max(len(recent_losses), 1),
+                        "loss": mean_loss,
+                        "train_loss": mean_loss,
                         "lr": lr,
                         "grad_norm": grad_norm,
+                        "grad_norm_total": float(grad_stats["grad_norm_total"]),
+                        "has_nan_grad": bool(grad_stats["has_nan_grad"]),
+                        "has_inf_grad": bool(grad_stats["has_inf_grad"]),
+                        "samples_per_sec": float(recent_samples) / elapsed,
                     }
-                    event.update({k: sum(v) / len(v) for k, v in recent_bins.items() if v})
+                    local_bins = {k: sum(v) / len(v) for k, v in recent_bins.items() if v}
+                    event.update({k: dist.reduce_mean_float(float(v), device=device) for k, v in local_bins.items()})
                     event_bus.emit(event)
                     recent_losses.clear()
                     recent_bins.clear()
+                    recent_samples = 0
+                    log_window_start = time.perf_counter()
 
                 if val_every > 0 and next_step % val_every == 0:
                     val_loss, val_bins = _run_validation(
@@ -326,25 +419,29 @@ def run_mmdit_training_loop(
                         max_batches=val_batches,
                         use_amp=use_amp,
                         amp_dtype=amp_dtype,
+                        inpaint_loss_mask_weight=float(cfg.inpaint_loss_mask_weight),
+                        inpaint_loss_unmask_weight=float(cfg.inpaint_loss_unmask_weight),
                     )
                     if val_loss is not None:
+                        val_loss = dist.reduce_mean_float(float(val_loss), device=device)
                         event = {
-                            "type": "metric",
+                            "type": "eval",
                             "step": next_step,
                             "max_steps": max_steps,
                             "val_loss": val_loss,
                         }
-                        event.update(val_bins)
+                        event.update({k: dist.reduce_mean_float(float(v), device=device) for k, v in val_bins.items()})
                         event_bus.emit(event)
 
                 if (
                     int(cfg.eval_every) > 0
                     and next_step % int(cfg.eval_every) == 0
+                    and write_outputs
                     and eval_prompts
                     and eval_text_encoder is not None
                     and eval_vae is not None
                 ):
-                    run_mmdit_eval_sampling(
+                    sample_events = run_mmdit_eval_sampling(
                         step=next_step,
                         model=model,
                         ema=ema,
@@ -364,16 +461,12 @@ def run_mmdit_training_loop(
                         use_amp=use_amp,
                         amp_dtype=amp_dtype,
                     )
-                    event_bus.emit(
-                        {
-                            "type": "metric",
-                            "step": next_step,
-                            "max_steps": max_steps,
-                            "eval_samples": len(eval_prompts) * int(cfg.eval_n),
-                        }
-                    )
+                    for sample_event in sample_events:
+                        event = dict(sample_event)
+                        event["max_steps"] = max_steps
+                        event_bus.emit(event)
 
-                if save_every > 0 and next_step % save_every == 0:
+                if save_every > 0 and next_step % save_every == 0 and write_outputs:
                     ckpt = _build_ckpt(
                         cfg=cfg,
                         cfg_dict=cfg_dict,
@@ -384,9 +477,13 @@ def run_mmdit_training_loop(
                         step=next_step,
                         text_metadata=text_metadata,
                     )
+                    save_ckpt(str(checkpoint_dir / f"step_{next_step:06d}.pt"), ckpt)
+                    save_ckpt(str(checkpoint_dir / "latest.pt"), ckpt)
+                    # Backward-compatible flat names for older scripts/UI.
                     save_ckpt(str(out_dir / f"ckpt_{next_step:07d}.pt"), ckpt)
                     save_ckpt(str(out_dir / "ckpt_latest.pt"), ckpt)
                     _prune_checkpoints(out_dir, int(cfg.ckpt_keep_last))
+                    _prune_checkpoints(checkpoint_dir, int(cfg.ckpt_keep_last))
 
                 step = next_step
                 pbar.update(1)
@@ -396,16 +493,20 @@ def run_mmdit_training_loop(
                 "Check latent cache, text cache, batch_size, drop_last, and dataset filters."
             )
 
-    ckpt = _build_ckpt(
-        cfg=cfg,
-        cfg_dict=cfg_dict,
-        model=model,
-        optimizer=optimizer,
-        scaler=scaler,
-        ema=ema,
-        step=step,
-        text_metadata=text_metadata,
-    )
-    save_ckpt(str(out_dir / "ckpt_final.pt"), ckpt)
-    save_ckpt(str(out_dir / "ckpt_latest.pt"), ckpt)
+    if write_outputs:
+        ckpt = _build_ckpt(
+            cfg=cfg,
+            cfg_dict=cfg_dict,
+            model=model,
+            optimizer=optimizer,
+            scaler=scaler,
+            ema=ema,
+            step=step,
+            text_metadata=text_metadata,
+        )
+        save_ckpt(str(checkpoint_dir / "final.pt"), ckpt)
+        save_ckpt(str(checkpoint_dir / "latest.pt"), ckpt)
+        save_ckpt(str(out_dir / "ckpt_final.pt"), ckpt)
+        save_ckpt(str(out_dir / "ckpt_latest.pt"), ckpt)
+    dist.wait_for_everyone()
     pbar.close()

@@ -60,7 +60,7 @@ def test_mmdit_full_loop_rejects_empty_dataloader(tmp_path) -> None:
             dataloader=[],
             val_dataloader=None,
             objective=RectifiedFlowObjective(),
-            optimizer=torch.optim.AdamW(model.parameters(), lr=1e-4),
+            optimizer=torch.optim.SGD(model.parameters(), lr=1e-4),
             scaler=torch.amp.GradScaler("cuda", enabled=False),
             ema=EMA(model),
             device=torch.device("cpu"),

@@ -37,8 +37,11 @@ from train.checkpoint import (
     resolve_resume_path,
 )
 from train.eval import _resolve_eval_prompts
+from train.inpaint_masks import InpaintMaskConfig, generate_inpaint_mask
 from train.loop_mmdit_full import run_mmdit_training_loop
+from train.run_dirs import TrainRunPaths, prepare_train_run_structure
 from train.checkpoint_mmdit import validate_mmdit_checkpoint_compatibility
+from train.dist import DistributedContext, create_distributed_context
 
 
 _SMALL_GPU_MAX_AUTOTUNE_WARNING = "Not enough SMs to use max_autotune_gemm mode"
@@ -87,6 +90,73 @@ def _count_params(module: torch.nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
 
 
+def _linear_params(in_dim: int, out_dim: int, bias: bool = True) -> int:
+    return int(in_dim) * int(out_dim) + (int(out_dim) if bias else 0)
+
+
+def _norm_params(hidden_dim: int, *, rms_norm: bool) -> int:
+    return int(hidden_dim) if rms_norm else int(hidden_dim) * 2
+
+
+def _ff_params(hidden_dim: int, mlp_ratio: float, *, swiglu: bool) -> int:
+    d = int(hidden_dim)
+    inner = int(d * float(mlp_ratio))
+    if swiglu:
+        return _linear_params(d, inner * 2) + _linear_params(inner, d)
+    return _linear_params(d, inner) + _linear_params(inner, d)
+
+
+def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
+    """Fast parameter-count estimate for dry-run validation.
+
+    Dry-run must be cheap even for base configs. Building a 900M-parameter
+    module on the meta device is still slow enough to be a bad config check,
+    so this mirrors the module shapes analytically. The value is intended for
+    sizing, not checkpoint compatibility.
+    """
+    d = int(cfg.hidden_dim)
+    c = int(cfg.latent_channels)
+    p = int(cfg.latent_patch_size)
+    out_patch = c * p * p
+    head_dim = d // int(cfg.num_heads)
+    total = 0
+    # target/source/control patch emb plus mask patch emb
+    total += 3 * (c * p * p * d + d)
+    total += 1 * (1 * p * p * d + d)
+    total += 3 * _linear_params(int(cfg.text_dim), d)
+    total += _linear_params(int(cfg.pooled_dim), d)
+    total += _linear_params(d, d * 4) + _linear_params(d * 4, d)
+    total += 8 * d  # type embeddings
+    total += 5 * d  # task embedding
+    total += _norm_params(d, rms_norm=bool(cfg.rms_norm))
+
+    qk_norm_params = 2 * head_dim if bool(cfg.qk_norm) else 0
+    norm = _norm_params(d, rms_norm=bool(cfg.rms_norm))
+
+    double = 0
+    double += 4 * norm
+    double += 2 * _linear_params(d, 6 * d)  # image/text AdaLN
+    double += 2 * _linear_params(d, 3 * d)  # image/text qkv
+    double += qk_norm_params
+    double += 2 * _linear_params(d, d)
+    double += 2 * _ff_params(d, float(cfg.mlp_ratio), swiglu=bool(cfg.swiglu))
+    total += int(cfg.double_stream_blocks) * double
+
+    single = 0
+    single += 2 * norm
+    single += _linear_params(d, 6 * d)
+    single += _linear_params(d, 3 * d)
+    single += qk_norm_params
+    single += _linear_params(d, d)
+    single += _ff_params(d, float(cfg.mlp_ratio), swiglu=bool(cfg.swiglu))
+    total += int(cfg.single_stream_blocks) * single
+
+    total += 2 * d  # final LayerNorm
+    total += _linear_params(d, 2 * d)
+    total += _linear_params(d, out_patch)
+    return int(total)
+
+
 def _build_optimizer(cfg: TrainConfig, model: torch.nn.Module, device: torch.device) -> torch.optim.Optimizer:
     name = str(cfg.optimizer)
     if name == "adamw":
@@ -127,17 +197,31 @@ def _mmdit_dataset_hash(entries: list[dict]) -> str:
     return h.hexdigest()
 
 
-def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: list[dict]) -> None:
+def _warn_or_raise(message: str, *, strict: bool) -> None:
+    if strict:
+        raise RuntimeError(message)
+    print(f"[WARN] {message}", flush=True)
+
+
+def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: list[dict], *, strict: bool | None = None) -> None:
+    strict = bool(cfg.cache_strict if strict is None else strict)
     if not cache.index_path.exists():
         raise RuntimeError(f"Missing text cache index: {cache.index_path}")
     if not cache.metadata:
         raise RuntimeError(f"Missing text cache metadata: {cache.metadata_path}")
+    if not cache.empty_prompt_path.exists():
+        raise RuntimeError(f"Missing empty prompt text cache: {cache.empty_prompt_path}")
+
+    try:
+        cache.validate_files_readable()
+    except RuntimeError as exc:
+        raise RuntimeError(f"Text cache files are unreadable or malformed: {exc}") from exc
 
     meta = cache.metadata
     if int(meta.get("text_dim", -1)) != int(cfg.text_dim):
-        raise RuntimeError(f"text cache text_dim mismatch: {meta.get('text_dim')} != {cfg.text_dim}")
+        _warn_or_raise(f"text cache text_dim mismatch: {meta.get('text_dim')} != {cfg.text_dim}", strict=strict)
     if int(meta.get("pooled_dim", -1)) != int(cfg.pooled_dim):
-        raise RuntimeError(f"text cache pooled_dim mismatch: {meta.get('pooled_dim')} != {cfg.pooled_dim}")
+        _warn_or_raise(f"text cache pooled_dim mismatch: {meta.get('pooled_dim')} != {cfg.pooled_dim}", strict=strict)
 
     expected_encoders = cfg.extra.get("text", {}).get("encoders", [])
     actual_encoders = meta.get("encoders", [])
@@ -159,18 +243,27 @@ def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: 
             for item in actual_encoders
         ]
         if expected != actual:
-            raise RuntimeError(f"text cache encoder metadata mismatch: cache={actual!r}, config={expected!r}")
+            _warn_or_raise(f"text cache encoder metadata mismatch: cache={actual!r}, config={expected!r}", strict=strict)
 
     expected_hash = meta.get("dataset_hash")
     if isinstance(expected_hash, str) and expected_hash:
         actual_hash = _mmdit_dataset_hash(entries)
         if actual_hash != expected_hash:
-            raise RuntimeError(f"text cache dataset_hash mismatch: {expected_hash} != {actual_hash}")
+            _warn_or_raise(f"text cache dataset_hash mismatch: {expected_hash} != {actual_hash}", strict=strict)
 
     missing = [str(entry.get("md5", "")) for entry in entries if str(entry.get("md5", "")) not in cache.entries]
     if missing:
         examples = ", ".join(missing[:10])
         raise RuntimeError(f"text cache missing {len(missing)} md5 keys used by dataset. Examples: {examples}")
+
+    if cache.manifest:
+        manifest_samples = int(cache.manifest.get("num_samples", len(cache.entries)))
+        if manifest_samples != len(cache.entries):
+            _warn_or_raise(f"text cache manifest sample count mismatch: {manifest_samples} != {len(cache.entries)}", strict=strict)
+        manifest_shards = {str(item.get("name", "")) for item in cache.manifest.get("shards", []) if isinstance(item, dict)}
+        actual_shards = set(cache.shard_names())
+        if manifest_shards and manifest_shards != actual_shards:
+            _warn_or_raise(f"text cache manifest shard list mismatch: {sorted(manifest_shards)} != {sorted(actual_shards)}", strict=strict)
 
 
 def _prepare_section(cfg: TrainConfig, name: str) -> dict[str, Any]:
@@ -234,13 +327,16 @@ def _ensure_text_cache_ready(cfg: TrainConfig, entries: list[dict], device: torc
 
     if missing:
         if not bool(cfg.cache_auto_prepare):
-            raise RuntimeError(f"Missing text cache at {cache_root}; set cache.auto_prepare=true or run scripts/prepare_text_cache.py.")
+            raise RuntimeError(f"Missing text cache at {cache_root}; set cache.auto_prepare=true or enable cache.auto_prepare in config.")
         print(f"[INFO] Missing text cache at {cache_root}; preparing before training.", flush=True)
         _prepare_text_cache_for_training(cfg, device)
         cache = TextCache(cache_root, shard_cache_size=int(cfg.text_shard_cache_size))
 
+    if not bool(cfg.cache_validate_on_start):
+        return
+
     try:
-        _validate_text_cache_for_mmdit(cache, cfg, entries)
+        _validate_text_cache_for_mmdit(cache, cfg, entries, strict=bool(cfg.cache_strict))
     except RuntimeError as exc:
         if not bool(cfg.cache_rebuild_if_stale):
             raise RuntimeError(
@@ -254,6 +350,7 @@ def _ensure_text_cache_ready(cfg: TrainConfig, entries: list[dict], device: torc
             TextCache(cache_root, shard_cache_size=int(cfg.text_shard_cache_size)),
             cfg,
             entries,
+            strict=bool(cfg.cache_strict),
         )
 
 
@@ -324,7 +421,7 @@ def _ensure_latent_cache_ready_for_mmdit(cfg: TrainConfig, entries: list[dict], 
             "Set cache.rebuild_if_stale=true to rebuild it automatically."
         )
     if not bool(cfg.cache_auto_prepare):
-        raise RuntimeError(f"Latent cache is {state}: {reason}; set cache.auto_prepare=true or run scripts/prepare_latents.py.")
+        raise RuntimeError(f"Latent cache is {state}: {reason}; set cache.auto_prepare=true or enable cache.auto_prepare in config.")
 
     rebuild = state == "stale"
     if rebuild:
@@ -335,7 +432,7 @@ def _ensure_latent_cache_ready_for_mmdit(cfg: TrainConfig, entries: list[dict], 
     _prepare_latent_cache_for_training(cfg, rebuild=rebuild)
     state, reason = _latent_cache_state(cfg, entries)
     if state != "ready":
-        raise RuntimeError(f"Latent cache preparation finished but cache is still {state}: {reason}")
+        raise RuntimeError("Latent cache is empty after auto-prepare. Check data_root, dataset_limit, VAE path, and cache metadata. " + f"State={state}; reason={reason}")
 
 
 def _ensure_mmdit_caches_ready(cfg: TrainConfig, entries: list[dict], device: torch.device) -> None:
@@ -350,11 +447,33 @@ class _MMDiTCachedDataset(torch.utils.data.Dataset):
         text_cache: TextCache,
         *,
         dataset_tasks: dict[str, float] | None = None,
+        seed: int = 42,
+        inpaint_config: InpaintMaskConfig | None = None,
+        control_enabled: bool = False,
+        control_strength: float = 1.0,
+        control_num_streams: int = 1,
     ) -> None:
         self.latent_ds = latent_ds
         self.text_cache = text_cache
         self.entries = latent_ds.entries
+        self.seed = int(seed)
+        self.inpaint_config = inpaint_config or InpaintMaskConfig()
+        self.control_enabled = bool(control_enabled)
+        self.control_strength = float(control_strength)
+        self.control_num_streams = int(control_num_streams)
+        if self.control_strength < 0:
+            raise RuntimeError("MMDiT control_strength must be non-negative.")
+        if self.control_num_streams <= 0:
+            raise RuntimeError("MMDiT control_num_streams must be positive.")
         task_weights = dict(dataset_tasks or {"txt2img": 1.0})
+        allowed_tasks = {"txt2img", "img2img", "inpaint", "control"}
+        unknown = sorted(set(task_weights) - allowed_tasks)
+        if unknown:
+            raise RuntimeError("MMDiT dataset_tasks contains unsupported task(s): " + ", ".join(unknown))
+        if any(float(weight) < 0 for weight in task_weights.values()):
+            raise RuntimeError("MMDiT dataset task weights must be non-negative.")
+        if float(task_weights.get("control", 0.0)) > 0 and not self.control_enabled:
+            raise RuntimeError("MMDiT control dataset task requires control_enabled=true.")
         self.task_names = [name for name, weight in task_weights.items() if float(weight) > 0]
         weights = torch.tensor([float(task_weights[name]) for name in self.task_names], dtype=torch.float32)
         if not self.task_names or float(weights.sum().item()) <= 0:
@@ -370,19 +489,14 @@ class _MMDiTCachedDataset(torch.utils.data.Dataset):
         idx = int(torch.multinomial(self.task_probs, 1).item())
         return self.task_names[idx]
 
-    def _random_mask(self, x0: torch.Tensor) -> torch.Tensor:
-        _, h, w = x0.shape
-        mask = torch.zeros((1, h, w), dtype=x0.dtype, device=x0.device)
-        mh_min = max(h // 8, 1)
-        mw_min = max(w // 8, 1)
-        mh_max = max(h // 2, mh_min)
-        mw_max = max(w // 2, mw_min)
-        mh = int(torch.randint(mh_min, mh_max + 1, ()).item())
-        mw = int(torch.randint(mw_min, mw_max + 1, ()).item())
-        y0 = int(torch.randint(0, max(h - mh + 1, 1), ()).item())
-        x0_pos = int(torch.randint(0, max(w - mw + 1, 1), ()).item())
-        mask[:, y0 : y0 + mh, x0_pos : x0_pos + mw] = 1
-        return mask
+    def _random_mask(self, x0: torch.Tensor, *, idx: int) -> torch.Tensor:
+        return generate_inpaint_mask(
+            tuple(x0.shape),
+            config=self.inpaint_config,
+            seed=self.seed + int(idx) * 1009,
+            dtype=x0.dtype,
+            device=x0.device,
+        )
 
     def __getitem__(self, idx: int) -> TrainBatch:
         raw = self.latent_ds[idx]
@@ -391,11 +505,25 @@ class _MMDiTCachedDataset(torch.utils.data.Dataset):
         task = self._sample_task()
         source_latent = None
         mask = None
+        control_latents = None
+        metadata = {"key": key, "task": task}
         if task == "img2img":
             source_latent = x0.clone()
         elif task == "inpaint":
-            mask = self._random_mask(x0)
-            source_latent = x0 * (1.0 - mask)
+            mask = self._random_mask(x0, idx=idx)
+            source_latent = x0.clone()
+        elif task == "control":
+            # First-stage control preprocessing: use the encoded condition latent
+            # directly as a control stream. In cached training this is the
+            # already-encoded sample latent; later preprocessors can replace it
+            # with canny/depth/pose latents without touching the model API.
+            control = x0.clone() * self.control_strength
+            control_latents = control.unsqueeze(0).repeat(self.control_num_streams, 1, 1, 1)
+            metadata.update({
+                "control_strength": self.control_strength,
+                "control_num_streams": self.control_num_streams,
+                "control_preprocessing": "latent_identity",
+            })
         elif task != "txt2img":
             raise RuntimeError(f"Unsupported MMDiT dataset task: {task}")
         return TrainBatch(
@@ -403,16 +531,19 @@ class _MMDiTCachedDataset(torch.utils.data.Dataset):
             text=self.text_cache.load(key),
             source_latent=source_latent,
             mask=mask,
+            control_latents=control_latents,
             task=task,
-            metadata={"key": key, "task": task},
+            metadata=metadata,
         )
 
 
 def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
     has_source = any(item.source_latent is not None for item in batch)
     has_mask = any(item.mask is not None for item in batch)
+    has_control = any(item.control_latents is not None for item in batch)
     source_latent = None
     mask = None
+    control_latents = None
     if has_source:
         source_latent = torch.stack(
             [
@@ -429,6 +560,24 @@ def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
             ],
             dim=0,
         )
+    if has_control:
+        max_controls = max(
+            int(item.control_latents.shape[0]) if item.control_latents is not None and item.control_latents.dim() == 4 else 1
+            for item in batch
+        )
+        control_items = []
+        for item in batch:
+            if item.control_latents is None:
+                control = torch.zeros((max_controls, *item.x0.shape), dtype=item.x0.dtype)
+            else:
+                control = item.control_latents
+                if control.dim() == 3:
+                    control = control.unsqueeze(0)
+                if control.shape[0] < max_controls:
+                    pad = torch.zeros((max_controls - control.shape[0], *item.x0.shape), dtype=item.x0.dtype)
+                    control = torch.cat([control, pad], dim=0)
+            control_items.append(control)
+        control_latents = torch.stack(control_items, dim=0)
     tasks = [item.task for item in batch]
     return TrainBatch(
         x0=torch.stack([item.x0 for item in batch], dim=0),
@@ -443,10 +592,18 @@ def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
             if batch[0].text.pooled.dim() == 1
             else torch.cat([item.text.pooled for item in batch], dim=0),
             is_uncond=None,
+            token_types=(
+                torch.stack([item.text.token_types for item in batch], dim=0)
+                if batch[0].text.token_types is not None and batch[0].text.token_types.dim() == 1
+                else torch.cat([item.text.token_types for item in batch], dim=0)
+                if batch[0].text.token_types is not None
+                else None
+            ),
         ),
         source_latent=source_latent,
         mask=mask,
-        task=tasks[0] if all(task == tasks[0] for task in tasks) else "mixed",
+        control_latents=control_latents,
+        task=tasks if not all(task == tasks[0] for task in tasks) else tasks[0],
         metadata={
             "keys": [item.metadata.get("key") if item.metadata else None for item in batch],
             "tasks": tasks,
@@ -454,22 +611,52 @@ def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
     )
 
 
-def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) -> None:
+def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, dist: DistributedContext | None = None) -> None:
     if str(cfg.mode) != "latent":
         raise RuntimeError("architecture=mmdit_rf requires mode=latent.")
     if not bool(cfg.latent_cache):
-        raise RuntimeError("architecture=mmdit_rf requires latent_cache=true.")
+        raise RuntimeError("architecture=mmdit_rf requires cache.latent_cache=true.")
     if not bool(cfg.text_cache):
-        raise RuntimeError("architecture=mmdit_rf requires text_cache=true; run scripts/prepare_text_cache.py.")
+        raise RuntimeError("architecture=mmdit_rf requires cache.text_cache=true.")
 
-    out_dir = Path(cfg.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    seed_everything(int(cfg.seed), deterministic=bool(cfg.deterministic))
+    dist = dist or DistributedContext(device=device)
     cfg_dict = cfg.to_dict()
-    _atomic_write_yaml(out_dir / "config_snapshot.yaml", cfg_dict)
+    cache_manifest_source = Path(cfg.data_root) / str(cfg.cache_dir) / "training_cache_manifest.json"
+    run_paths: TrainRunPaths | None = None
+    if dist.should_write():
+        run_paths = prepare_train_run_structure(
+            base_out_dir=cfg.out_dir,
+            cfg_dict=cfg_dict,
+            run_name=str(cfg.extra.get("run_name", cfg.extra.get("profile", "")) or ""),
+            cache_manifest_source=cache_manifest_source,
+            create_unique_subdir=bool(cfg.extra.get("run_dir_structure", True)),
+        )
+    run_dir_value = dist.broadcast_object(str(run_paths.run_dir) if run_paths is not None else None)
+    if run_dir_value is None:
+        raise RuntimeError("Distributed run directory was not created by the main process.")
+    out_dir = Path(str(run_dir_value))
+    if run_paths is None:
+        run_paths = TrainRunPaths(
+            base_dir=Path(cfg.out_dir),
+            run_dir=out_dir,
+            checkpoints_dir=out_dir / "checkpoints",
+            samples_dir=out_dir / "samples",
+            eval_dir=out_dir / "eval",
+            events_path=out_dir / "events.jsonl",
+            train_log_path=out_dir / "train.log",
+            cache_manifest_path=out_dir / "cache_manifest.json",
+        )
+    dist.wait_for_everyone()
+    seed_everything(int(cfg.seed) + int(dist.rank), deterministic=bool(cfg.deterministic))
     run_meta = build_run_metadata(perf_active)
     run_meta["architecture"] = "mmdit_rf"
-    _atomic_write_yaml(out_dir / "run_meta.yaml", run_meta)
+    run_meta["base_out_dir"] = str(run_paths.base_dir)
+    run_meta["run_dir"] = str(run_paths.run_dir)
+    run_meta["distributed_backend"] = str(dist.backend)
+    run_meta["rank"] = int(dist.rank)
+    run_meta["world_size"] = int(dist.world_size)
+    if dist.should_write():
+        _atomic_write_yaml(out_dir / "run_meta.yaml", run_meta)
 
     dcfg = DataConfig(
         root=str(cfg.data_root),
@@ -517,13 +704,27 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         latent_shard_cache_size=int(cfg.latent_shard_cache_size),
     )
     if len(latent_ds) == 0:
-        raise RuntimeError("latent cache is empty; run scripts/prepare_latents.py first.")
+        raise RuntimeError("Latent cache is empty after auto-prepare. Check data_root, dataset_limit, VAE path, and cache metadata.")
     text_cache = TextCache(
         Path(cfg.data_root) / str(cfg.text_cache_dir),
         shard_cache_size=int(cfg.text_shard_cache_size),
     )
-    _validate_text_cache_for_mmdit(text_cache, cfg, train_entries + val_entries)
-    ds = _MMDiTCachedDataset(latent_ds, text_cache, dataset_tasks=cfg.dataset_tasks)
+    if bool(cfg.cache_validate_on_start):
+        _validate_text_cache_for_mmdit(text_cache, cfg, train_entries + val_entries, strict=bool(cfg.cache_strict))
+    ds = _MMDiTCachedDataset(
+        latent_ds,
+        text_cache,
+        dataset_tasks=cfg.dataset_tasks,
+        seed=int(cfg.seed),
+        inpaint_config=InpaintMaskConfig(
+            mask_min_area=float(cfg.inpaint_mask_min_area),
+            mask_max_area=float(cfg.inpaint_mask_max_area),
+            mask_modes=dict(cfg.inpaint_mask_modes),
+        ),
+        control_enabled=bool(cfg.control_enabled),
+        control_strength=float(cfg.control_strength),
+        control_num_streams=int(cfg.control_num_streams),
+    )
     if len(ds) == 0:
         raise RuntimeError("MMDiT dataset is empty after latent/text cache filtering.")
     dl = DataLoader(
@@ -558,7 +759,20 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         )
         if len(val_latent_ds) > 0:
             dl_val = DataLoader(
-                _MMDiTCachedDataset(val_latent_ds, text_cache, dataset_tasks={"txt2img": 1.0}),
+                _MMDiTCachedDataset(
+                    val_latent_ds,
+                    text_cache,
+                    dataset_tasks={"txt2img": 1.0},
+                    seed=int(cfg.seed) + 17,
+                    inpaint_config=InpaintMaskConfig(
+                        mask_min_area=float(cfg.inpaint_mask_min_area),
+                        mask_max_area=float(cfg.inpaint_mask_max_area),
+                        mask_modes=dict(cfg.inpaint_mask_modes),
+                    ),
+                    control_enabled=bool(cfg.control_enabled),
+                    control_strength=float(cfg.control_strength),
+                    control_num_streams=int(cfg.control_num_streams),
+                ),
                 batch_size=int(cfg.batch_size),
                 shuffle=False,
                 num_workers=_resolve_num_workers(int(cfg.num_workers)),
@@ -585,13 +799,19 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         single_stream_blocks=int(cfg.single_stream_blocks),
         dropout=float(cfg.dropout),
         attn_dropout=float(cfg.attn_dropout),
-        gradient_checkpointing=bool(cfg.grad_checkpointing),
+        gradient_checkpointing=bool(cfg.gradient_checkpointing),
         text_dim=int(cfg.text_dim),
         pooled_dim=int(cfg.pooled_dim),
     )
     model = MMDiTFlowModel(mmdit_cfg).to(device)
     opt = _build_optimizer(cfg, model, device)
     ema = EMA(model, decay=float(cfg.ema_decay))
+    if dist.backend != "none":
+        prepared = dist.prepare(model, opt, dl, dl_val) if dl_val is not None else dist.prepare(model, opt, dl)
+        if dl_val is not None:
+            model, opt, dl, dl_val = prepared
+        else:
+            model, opt, dl = prepared
     use_amp = bool(cfg.amp) and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     objective = RectifiedFlowObjective(
@@ -601,6 +821,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         train_t_min=float(cfg.flow_train_t_min),
         train_t_max=float(cfg.flow_train_t_max),
         loss_weighting=str(cfg.flow_loss_weighting),
+        timestep_shift=float(cfg.flow_timestep_shift),
     )
     empty_text = text_cache.load_empty()
 
@@ -656,12 +877,14 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict) 
         device=device,
         ema=ema,
         out_dir=out_dir,
+        checkpoint_dir=run_paths.checkpoints_dir,
         empty_text=empty_text,
         start_step=start_step,
         text_metadata=text_cache.metadata,
         eval_prompts=eval_prompts,
         eval_text_encoder=eval_text_encoder,
         eval_vae=eval_vae,
+        dist=dist,
     )
 
 
@@ -704,20 +927,25 @@ def _configure_inductor_for_compile(device: torch.device) -> dict[str, bool | in
 
 
 def _attention_token_counts(cfg: TrainConfig) -> dict[str, int]:
-    side = int(cfg.image_size)
-    if str(cfg.mode) == "latent":
-        side = side // int(cfg.latent_downsample_factor)
-    resolutions = sorted(set(int(r) for r in cfg.attn_resolutions), reverse=True)
-    return {str(r): r * r for r in resolutions if r > 0 and r <= side}
+    latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
+    patch = int(cfg.latent_patch_size)
+    grid_side = latent_side // patch
+    return {"latent_tokens": grid_side * grid_side}
 
 
 def _validate_resume_compatibility(cfg: TrainConfig, model_cfg: TrainConfig) -> None:
     fields = (
         "mode",
         "latent_channels",
+        "latent_patch_size",
         "image_size",
-        "self_conditioning",
-        "use_text_conditioning",
+        "hidden_dim",
+        "depth",
+        "num_heads",
+        "double_stream_blocks",
+        "single_stream_blocks",
+        "text_dim",
+        "pooled_dim",
     )
     mismatches = [
         f"{name}: ckpt={getattr(model_cfg, name)!r}, config={getattr(cfg, name)!r}"
@@ -746,35 +974,18 @@ def _load_resume_checkpoint(path: str) -> dict:
 def dry_run(cfg: TrainConfig) -> None:
     if cfg.architecture != "mmdit_rf":
         raise RuntimeError("Only architecture=mmdit_rf is supported.")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dcfg = DataConfig(
-        root=str(cfg.data_root),
-        image_dir=str(cfg.image_dir),
-        meta_dir=str(cfg.meta_dir),
-        tags_dir=str(cfg.tags_dir),
-        caption_field=str(cfg.caption_field),
-        images_only=False,
-        use_text_conditioning=True,
-        min_tag_count=int(cfg.min_tag_count),
-        require_512=bool(cfg.require_512),
-        val_ratio=float(cfg.val_ratio),
-        seed=int(cfg.seed),
-        cache_dir=str(cfg.cache_dir),
-        failed_list=str(cfg.failed_list),
-    )
-    train_entries, val_entries = build_or_load_index(dcfg)
-    if int(cfg.dataset_limit) > 0:
-        train_entries = train_entries[: int(cfg.dataset_limit)]
-        val_entries = []
-    entries = train_entries + val_entries
-    _ensure_mmdit_caches_ready(cfg, entries, device)
-    mmdit_cfg = MMDiTConfig.from_dict(cfg.to_dict())
-    model = MMDiTFlowModel(mmdit_cfg)
+    if str(cfg.mode) != "latent":
+        raise RuntimeError("architecture=mmdit_rf requires mode=latent.")
+    # TrainConfig and MMDiTConfig construction perform strict validation;
+    # parameter count is estimated analytically to keep base dry-runs fast.
+    MMDiTConfig.from_dict(cfg.to_dict())
+    latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
     print(
         "[DRY-RUN] "
         f"architecture={cfg.architecture} objective={cfg.objective} mode={cfg.mode} "
-        f"train_entries={len(train_entries)} val_entries={len(val_entries)} "
-        f"params={_count_params(model)}",
+        f"image_size={cfg.image_size} latent_shape=({cfg.latent_channels}, {latent_side}, {latent_side}) "
+        f"hidden_dim={cfg.hidden_dim} depth={cfg.depth} num_heads={cfg.num_heads} "
+        f"params={_estimate_mmdit_params_from_config(cfg)}",
         flush=True,
     )
 
@@ -791,7 +1002,9 @@ def run(cfg: TrainConfig) -> None:
     out_dir = Path(cfg.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    requested_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dist = create_distributed_context(cfg, device=requested_device)
+    device = dist.device or requested_device
     perf_active = configure_performance(
         PerfConfig(
             tf32=bool(cfg.tf32),
@@ -806,4 +1019,4 @@ def run(cfg: TrainConfig) -> None:
     perf_active["triton_python_cuda_include_patch"] = (
         patch_triton_cuda_python_include_order() if bool(cfg.compile) and device.type == "cuda" else False
     )
-    _run_mmdit_rf(cfg, device=device, perf_active=perf_active)
+    _run_mmdit_rf(cfg, device=device, perf_active=perf_active, dist=dist)
