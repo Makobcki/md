@@ -14,7 +14,7 @@ from .types import DataConfig
 
 _ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 _GENDER_TAG_RE = re.compile(r"^\d+(?:boy|boys|girl|girls)$")
-_INDEX_SCHEMA_VERSION = 3
+_INDEX_SCHEMA_VERSION = 4
 
 
 def _read_json(path: Path) -> Optional[dict]:
@@ -322,13 +322,13 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
                 continue
             if md5 in failed:
                 continue
-            if cfg.require_512:
-                try:
-                    with Image.open(img_path) as im:
-                        if im.size != (512, 512):
-                            continue
-                except Exception:
-                    continue
+            try:
+                with Image.open(img_path) as im:
+                    width, height = im.size
+                    if cfg.require_512 and (width, height) != (512, 512):
+                        continue
+            except Exception:
+                continue
 
             entry = {
                 "md5": md5,
@@ -336,6 +336,8 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
                 "caption": "",
                 "tags_primary": [],
                 "tags_gender": [],
+                "width": int(width),
+                "height": int(height),
             }
             split = "val" if _split_is_val(md5, cfg.val_ratio) else "train"
             if split == "val":
@@ -404,13 +406,13 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
         if img_path is None:
             continue
 
-        if cfg.require_512:
-            try:
-                with Image.open(img_path) as im:
-                    if im.size != (512, 512):
-                        continue
-            except Exception:
-                continue
+        try:
+            with Image.open(img_path) as im:
+                width, height = im.size
+                if cfg.require_512 and (width, height) != (512, 512):
+                    continue
+        except Exception:
+            continue
 
         entry = {
             "md5": md5,
@@ -418,6 +420,8 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
             "caption": cap,
             "tags_primary": tags_primary,
             "tags_gender": tags_gender,
+            "width": int(width),
+            "height": int(height),
         }
         split = "val" if _split_is_val(md5, cfg.val_ratio) else "train"
         if split == "val":
