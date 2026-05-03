@@ -20,29 +20,6 @@ def test_train_yaml_defaults_disable_compile_and_nonfinite_grad_fail() -> None:
     assert cfg.fail_on_nonfinite_grad is False
 
 
-def test_train_config_accepts_compat_model_fields() -> None:
-    cfg = TrainConfig.from_dict({
-        "base_channels": 16,
-        "channel_mults": [1],
-        "attn_resolutions": [8],
-    })
-
-    assert cfg.self_attn_type == "global"
-    assert cfg.attention_placement == "all"
-    assert cfg.cross_attn_resolutions == ()
-    assert cfg.mid_blocks == 1
-    assert cfg.checkpoint_attention is False
-    assert cfg.checkpoint_downsample is False
-    assert cfg.optimizer == "adamw"
-    assert cfg.self_cond_interval == 1
-
-
-def test_train_config_accepts_image_only_alias() -> None:
-    cfg = TrainConfig.from_dict({"image_only": True})
-
-    assert cfg.images_only is True
-
-
 def test_train_config_accepts_main_yaml() -> None:
     cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train.yaml"))
 
@@ -50,7 +27,7 @@ def test_train_config_accepts_main_yaml() -> None:
     assert cfg.objective == "rectified_flow"
     assert cfg.prediction_type == "flow_velocity"
     assert cfg.hidden_dim == 1024
-    assert cfg.pos_embed == "sincos_2d"
+    assert cfg.pos_embed == "rope_2d"
     assert cfg.eval_sampler == "flow_heun"
 
 

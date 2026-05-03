@@ -9,10 +9,10 @@ objective: rectified_flow
 prediction_type: flow_velocity
 
 # Dataset root used by smoke/tiny/dev MMDiT profiles.
-data_root: ./data/dataset
+data_root: ./data/dataset/pixso_512
 image_dir: images
 meta_dir: ""
-tags_dir: "prompts"
+tags_dir: ""
 min_tag_count: 0
 out_dir: ./runs/mmdit_base
 eval_prompts_file: ./data/eval_prompts/mmdit_core.txt

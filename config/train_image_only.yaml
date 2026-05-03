@@ -1,0 +1,139 @@
+# Image-only latent diffusion profile.
+# This is the stable quality baseline: no tokenizer, no text encoder, no CFG branch.
+
+data_root: ./data/dataset/pixso_512
+image_dir: images
+meta_dir: ""
+tags_dir: ""
+caption_field: caption_llava_34b_no_tags_short
+images_only: true
+min_tag_count: 0
+require_512: true
+val_ratio: 0.01
+cache_dir: .cache
+failed_list: failed/md5.txt
+
+seed: 42
+out_dir: ./runs/anime_image_only
+
+batch_size: 4
+grad_accum_steps: 16
+num_workers: 4
+prefetch_factor: 4
+pin_memory: true
+persistent_workers: true
+
+lr: 1.0e-4
+lr_scheduler: cosine
+warmup_steps: 3000
+min_lr_ratio: 0.05
+decay_steps: 0
+weight_decay: 1.0e-4
+max_steps: 80000
+log_every: 10
+save_every: 2000
+val_every: 1000
+val_batches: 8
+
+timesteps: 1000
+beta_start: 1.0e-4
+beta_end: 2.0e-2
+min_snr_gamma: 5.0
+prediction_type: v
+noise_schedule: cosine
+cosine_s: 0.008
+
+base_channels: 192
+channel_mults: [1, 2, 4, 4]
+num_res_blocks: 3
+dropout: 0.10
+attn_resolutions: [32, 16]
+cross_attn_resolutions: []
+attn_heads: 6
+attn_head_dim: 32
+self_attn_type: global
+self_attn_window_size: 8
+cross_attn_dim: 0
+mid_blocks: 1
+text_dim: 256
+text_layers: 4
+text_heads: 4
+text_max_len: 128
+text_spatial_conditioning: false
+use_text_conditioning: false
+text_vocab_path: diffusion/bpe/vocab.json
+text_merges_path: diffusion/bpe/merges.txt
+tokenizer_type: bpe
+use_scale_shift_norm: true
+
+grad_checkpointing: true
+checkpoint_resblocks: false
+checkpoint_attention: false
+checkpoint_text_encoder: false
+zero_init_residual: false
+
+cond_drop_prob: 0.15
+token_drop_prob: 0.0
+tag_drop_prob: 0.0
+caption_drop_prob: 0.0
+
+amp: true
+amp_dtype: bf16
+compile: false
+compile_warmup_steps: 10
+compile_cudagraphs: true
+grad_clip_norm: 1.0
+fail_on_nonfinite_grad: false
+ema_decay: 0.999
+ema_decay_fast: 0.999
+ema_decay_slow: 0.99995
+ema_switch_step: 20000
+resume_ckpt: ""
+deterministic: false
+
+tf32: true
+cudnn_benchmark: true
+channels_last: true
+enable_flash_sdp: true
+enable_mem_efficient_sdp: true
+enable_math_sdp: false
+
+mode: latent
+latent_channels: 4
+latent_downsample_factor: 8
+latent_cache: true
+latent_cache_dir: .cache/latents
+latent_cache_sharded: true
+latent_cache_index: index.jsonl
+latent_dtype: fp16
+latent_precompute: false
+latent_cache_fallback: false
+latent_cache_strict: true
+latent_shard_cache_size: 2
+vae_pretrained: ./vae_sd_mse
+vae_freeze: true
+vae_scaling_factor: 0.18215
+
+ckpt_keep_last: 5
+sanity_overfit_steps: 0
+sanity_overfit_images: 2
+sanity_overfit_max_loss: 0.1
+
+curriculum_enabled: false
+curriculum_steps: 20000
+curriculum_require_one_person: true
+curriculum_prefer_solo: true
+curriculum_exclude_multi: true
+curriculum_solo_weight: 2.0
+curriculum_non_solo_weight: 1.0
+
+self_conditioning: true
+self_cond_prob: 0.5
+
+eval_prompts_file: ""
+eval_every: 1000
+eval_seed: 42
+eval_sampler: euler
+eval_steps: 60
+eval_cfg: 1.0
+eval_n: 1
