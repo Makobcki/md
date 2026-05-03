@@ -9,6 +9,7 @@ from diffusion.objectives import RectifiedFlowObjective, rectified_flow_loss
 from diffusion.utils import EMA
 from model.mmdit import MMDiTFlowModel
 from model.text.conditioning import TextConditioning, TrainBatch
+from train.checkpoint_mmdit import build_mmdit_checkpoint_metadata
 
 
 def as_train_batch(batch) -> TrainBatch:
@@ -20,13 +21,6 @@ def as_train_batch(batch) -> TrainBatch:
         x0 = batch[0]
         if len(batch) >= 2 and isinstance(batch[1], TextConditioning):
             text = batch[1]
-        elif len(batch) >= 3 and batch[1] is not None and batch[2] is not None:
-            ids = batch[1]
-            mask = batch[2].bool()
-            # Compatibility fallback for legacy token batches used only by smoke tests.
-            tokens = torch.nn.functional.one_hot(ids.clamp(0, 1023), num_classes=1024).to(dtype=x0.dtype)
-            pooled = tokens.mean(dim=1)
-            text = TextConditioning(tokens=tokens, mask=mask, pooled=pooled)
         else:
             b = x0.shape[0]
             text = TextConditioning(
@@ -72,9 +66,10 @@ def training_step_mmdit(
             text=text,
             source_latent=batch.source_latent,
             mask=batch.mask,
+            control_latents=batch.control_latents,
             task=batch.task,
         )
-        return rectified_flow_loss(pred, train_tuple.target, train_tuple.weight)
+        return rectified_flow_loss(pred, train_tuple.target, train_tuple.weight, mask=batch.mask)
 
 
 def build_mmdit_checkpoint(
@@ -86,6 +81,36 @@ def build_mmdit_checkpoint(
     step: int,
     cfg_dict: dict,
 ) -> dict:
+    class _CfgProxy:
+        def __init__(self, data: dict) -> None:
+            self.latent_channels = int(data.get("latent_channels", 4))
+            self.latent_patch_size = int(data.get("latent_patch_size", data.get("patch_size", 2)))
+            self.hidden_dim = int(data.get("hidden_dim", data.get("model", {}).get("hidden_dim", 1024)))
+            self.depth = int(data.get("depth", data.get("model", {}).get("depth", 24)))
+            self.num_heads = int(data.get("num_heads", data.get("model", {}).get("num_heads", 16)))
+            self.double_stream_blocks = int(data.get("double_stream_blocks", data.get("model", {}).get("double_stream_blocks", 16)))
+            self.single_stream_blocks = int(data.get("single_stream_blocks", data.get("model", {}).get("single_stream_blocks", 8)))
+            self.pos_embed = str(data.get("pos_embed", data.get("model", {}).get("pos_embed", "rope_2d")))
+            self.text_dim = int(data.get("text_dim", data.get("text", {}).get("text_dim", 1024)))
+            self.pooled_dim = int(data.get("pooled_dim", data.get("text", {}).get("pooled_dim", 1024)))
+            self.vae_pretrained = str(data.get("vae_pretrained", data.get("vae", {}).get("pretrained", "")))
+            self.vae_scaling_factor = float(data.get("vae_scaling_factor", data.get("vae", {}).get("scaling_factor", 0.18215)))
+            flow = data.get("flow", {})
+            self.flow_timestep_sampling = str(data.get("flow_timestep_sampling", flow.get("timestep_sampling", "logit_normal")))
+            self.flow_logit_mean = float(data.get("flow_logit_mean", flow.get("logit_mean", 0.0)))
+            self.flow_logit_std = float(data.get("flow_logit_std", flow.get("logit_std", 1.0)))
+            self.flow_loss_weighting = str(data.get("flow_loss_weighting", flow.get("loss_weighting", "none")))
+            self.flow_timestep_shift = float(data.get("flow_timestep_shift", flow.get("timestep_shift", flow.get("shift", 1.0))))
+            self.flow_train_t_min = float(data.get("flow_train_t_min", flow.get("train_t_min", 0.0)))
+            self.flow_train_t_max = float(data.get("flow_train_t_max", flow.get("train_t_max", 1.0)))
+
+    metadata = build_mmdit_checkpoint_metadata(
+        cfg=_CfgProxy(cfg_dict),
+        cfg_dict=dict(cfg_dict),
+        step=step,
+        text_metadata={"encoders": cfg_dict.get("text", {}).get("encoders", [])},
+        dataset_hash=str(cfg_dict.get("dataset_hash", "")),
+    )
     return {
         "model": model.state_dict(),
         "ema": ema.shadow if ema is not None else None,
@@ -93,13 +118,12 @@ def build_mmdit_checkpoint(
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "step": int(step),
         "cfg": dict(cfg_dict),
+        "metadata": metadata,
         "architecture": "mmdit_rf",
         "objective": "rectified_flow",
-        "vae": {
-            "pretrained": cfg_dict.get("vae_pretrained", ""),
-            "scaling_factor": cfg_dict.get("vae_scaling_factor", 0.18215),
-        },
-        "text_encoders": cfg_dict.get("text", {}).get("encoders", []),
+        "prediction_type": "flow_velocity",
+        "vae": metadata["vae_config"],
+        "text_encoders": metadata["text_config"].get("encoders", []),
     }
 
 
@@ -134,9 +158,11 @@ def run_minimal_mmdit_loop(
                     mask=batch.text.mask.to(device),
                     pooled=batch.text.pooled.to(device),
                     is_uncond=batch.text.is_uncond.to(device) if batch.text.is_uncond is not None else None,
+                    token_types=batch.text.token_types.to(device) if batch.text.token_types is not None else None,
                 ),
                 source_latent=batch.source_latent.to(device) if batch.source_latent is not None else None,
                 mask=batch.mask.to(device) if batch.mask is not None else None,
+                control_latents=batch.control_latents.to(device) if batch.control_latents is not None else None,
                 task=batch.task,
                 metadata=batch.metadata,
             )

@@ -33,7 +33,7 @@ def test_mmdit_checkpoint_uses_human_step(tmp_path) -> None:
         }
     )
     model = torch.nn.Linear(1, 1)
-    opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    opt = torch.optim.SGD(model.parameters(), lr=1e-4)
     ckpt = _build_ckpt(
         cfg=cfg,
         cfg_dict=cfg.to_dict(),
