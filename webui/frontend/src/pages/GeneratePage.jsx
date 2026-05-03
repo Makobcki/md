@@ -4,7 +4,7 @@ import useLogBuffer from "../hooks/useLogBuffer.js";
 import ArgField from "../components/ArgField.jsx";
 
 const quickFields = ["ckpt", "steps", "n", "seed"];
-const promptFields = ["prompt", "neg_prompt", "neg"];
+const promptFields = ["prompt", "neg_prompt"];
 
 const toRunsUrl = (path) => {
   if (!path) return null;
@@ -173,7 +173,6 @@ export default function GeneratePage() {
       if (!textConditioningAvailable) {
         payload.prompt = "";
         payload.neg_prompt = "";
-        payload.neg = "";
       }
       const resp = await api.startSample(payload);
       setRunId(resp.run_id);
@@ -207,7 +206,7 @@ export default function GeneratePage() {
       : "";
 
   const negativeSpec = useMemo(
-    () => argSpecs.find((spec) => spec.name === "neg_prompt") || argSpecs.find((spec) => spec.name === "neg"),
+    () => argSpecs.find((spec) => spec.name === "neg_prompt"),
     [argSpecs]
   );
   const quickSpecs = useMemo(
@@ -234,7 +233,7 @@ export default function GeneratePage() {
     wasGeneratingRef.current = false;
     refreshSamples().catch((err) => console.warn("failed to refresh samples", err));
     const timer = setTimeout(() => {
-      setArgs((prev) => ({ ...prev, prompt: "", neg_prompt: "", neg: "" }));
+      setArgs((prev) => ({ ...prev, prompt: "", neg_prompt: "" }));
     }, 900);
     return () => clearTimeout(timer);
   }, [isGenerating]);

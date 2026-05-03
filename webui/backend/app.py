@@ -162,30 +162,49 @@ def _bounded_path(value: str | None, *, required: bool = False) -> str | None:
 
 
 class SampleArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     ckpt: str
     out: Optional[str] = None
     n: int = Field(default=8, ge=1, le=64)
     steps: int = Field(default=30, ge=1, le=500)
     prompt: str = ""
-    neg: str = ""
     neg_prompt: str = ""
     cfg: float = Field(default=5.0, ge=0.0, le=30.0)
     sampler: Literal["flow_euler", "flow_heun"] = "flow_heun"
     seed: Optional[int] = 42
     device: Literal["auto", "cpu", "cuda"] = "cuda"
+    task: Literal["txt2img", "img2img", "inpaint", "control"] = "txt2img"
+    init_image: str = Field(default="", alias="init-image")
+    strength: float = Field(default=1.0, ge=0.0, le=1.0)
+    mask: str = ""
+    control_image: str = Field(default="", alias="control-image")
+    control_strength: float = Field(default=1.0, ge=0.0, alias="control-strength")
+    latent_only: bool = Field(default=False, alias="latent-only")
+    fake_vae: bool = Field(default=False, alias="fake-vae")
+    use_ema: bool = Field(default=True, alias="use-ema")
 
     @model_validator(mode="after")
     def _validate_paths(self) -> "SampleArgs":
         self.ckpt = _bounded_path(self.ckpt, required=True) or self.ckpt
         self.out = _bounded_path(self.out)
+        self.init_image = _bounded_path(self.init_image) or ""
+        self.mask = _bounded_path(self.mask) or ""
+        self.control_image = _bounded_path(self.control_image) or ""
+        if self.task in {"img2img", "inpaint"} and not self.init_image:
+            raise ValueError(f"task={self.task} requires init-image")
+        if self.task == "inpaint" and not self.mask:
+            raise ValueError("task=inpaint requires mask")
+        if self.task == "control" and not self.control_image:
+            raise ValueError("task=control requires control-image")
         return self
 
     def to_cli_args(self) -> Dict[str, Any]:
-        data = self.model_dump(exclude_none=True)
+        data = self.model_dump(by_alias=True, exclude_none=True)
         if data.get("device") == "auto":
             data.pop("device")
+        if data.get("use-ema") is True:
+            data.pop("use-ema", None)
         return data
 
 
