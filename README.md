@@ -60,6 +60,22 @@ data/dataset/pixso_512/
 
 `config/train.yaml` is the main full training profile. Smaller profiles are available for smoke, overfit, and development runs.
 
+Training text can come from generated captions or directly from prompt fields in metadata.
+The existing `caption_field` still works, but prompt-first training can be enabled with either form:
+
+```yaml
+# top-level
+text_field: prompt
+text_fields: [prompt, caption, text]
+
+# or nested
+dataset:
+  text_field: prompt
+  text_fields: [prompt, caption, text]
+```
+
+The resolved text is stored in dataset entries as `text`/`text_source` while keeping `caption` populated for backward compatibility. Text-cache metadata records `text_field`, `text_fields`, and `resolved_text_fields`, so caches are invalidated when the prompt/caption source changes.
+
 ## Training
 
 ```bash
