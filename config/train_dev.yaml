@@ -11,6 +11,9 @@ data_root: ./data/dataset/pixso_512
 image_dir: images
 meta_dir: ""
 tags_dir: ""
+# To train from prompt metadata instead of captions, set:
+# text_field: prompt
+# text_fields: [prompt, caption, text]
 out_dir: ./runs/mmdit_dev
 dataset_limit: 0
 

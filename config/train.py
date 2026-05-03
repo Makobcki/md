@@ -114,6 +114,25 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
         if "cache" in text and "text_cache" not in flat:
             flat["text_cache"] = text["cache"]
 
+    dataset = data.get("dataset")
+    if isinstance(dataset, dict):
+        mapping = {
+            "text_field": "text_field",
+            "text_fields": "text_fields",
+            "caption_field": "caption_field",
+            "prompt_field": "text_field",
+            "image_dir": "image_dir",
+            "meta_dir": "meta_dir",
+            "tags_dir": "tags_dir",
+            "min_tag_count": "min_tag_count",
+            "require_512": "require_512",
+            "val_ratio": "val_ratio",
+            "dataset_limit": "dataset_limit",
+        }
+        for src, dst in mapping.items():
+            if src in dataset and dst not in flat:
+                flat[dst] = dataset[src]
+
     inpaint = data.get("inpaint")
     if isinstance(inpaint, dict):
         mapping = {
@@ -275,6 +294,8 @@ class TrainConfig:
     meta_dir: str = ""
     tags_dir: str = ""
     caption_field: str = "caption_llava_34b_no_tags_short"
+    text_field: str = ""
+    text_fields: list[str] = field(default_factory=list)
     images_only: bool = False
     min_tag_count: int = 0
     require_512: bool = True
@@ -473,6 +494,13 @@ class TrainConfig:
             raise ValueError("text_shard_cache_size must be positive.")
         if not self.text_cache and not self.allow_on_the_fly_text:
             raise ValueError("text_cache=false is only allowed when allow_on_the_fly_text=true.")
+        if not isinstance(self.text_field, str):
+            raise ValueError("text_field must be a string.")
+        if not isinstance(self.text_fields, list) or any(not isinstance(x, str) for x in self.text_fields):
+            raise ValueError("text_fields must be a list of strings.")
+        if self.text_field.strip() and self.text_field.strip() not in [x.strip() for x in self.text_fields if x.strip()]:
+            # text_field is valid as a shortcut and will be prepended to text_fields at read time.
+            pass
 
         if self.warmup_steps < 0:
             raise ValueError("warmup_steps must be non-negative.")
