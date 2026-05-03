@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from typing import Literal, Optional
+from dataclasses import dataclass
+from typing import Literal, Optional, Sequence
 
 import torch
+
+TaskName = Literal["txt2img", "img2img", "inpaint", "control"]
+TaskSpec = str | Sequence[str]
 
 
 @dataclass(frozen=True)
@@ -12,13 +15,19 @@ class TextConditioning:
     mask: torch.Tensor
     pooled: torch.Tensor
     is_uncond: torch.Tensor | None = None
+    # Optional per-token encoder type IDs. 0=CLIP-like, 1=T5-like, 2=generic/other.
+    # Existing caches and tests may omit this; the model then uses a generic text type embedding.
+    token_types: torch.Tensor | None = None
 
     def to(self, *args, **kwargs) -> "TextConditioning":
+        dtype = kwargs.get("dtype", None)
+        device = kwargs.get("device", None)
         return TextConditioning(
             tokens=self.tokens.to(*args, **kwargs),
-            mask=self.mask.to(device=kwargs.get("device", None)) if "dtype" in kwargs else self.mask.to(*args, **kwargs),
+            mask=self.mask.to(device=device) if dtype is not None else self.mask.to(*args, **kwargs),
             pooled=self.pooled.to(*args, **kwargs),
-            is_uncond=self.is_uncond.to(device=kwargs.get("device", None)) if self.is_uncond is not None else None,
+            is_uncond=self.is_uncond.to(device=device) if self.is_uncond is not None else None,
+            token_types=self.token_types.to(device=device) if self.token_types is not None else None,
         )
 
     def replace_where(self, drop: torch.Tensor, empty: "TextConditioning") -> "TextConditioning":
@@ -28,11 +37,17 @@ class TextConditioning:
         is_uncond = drop.to(device=self.tokens.device, dtype=torch.bool)
         if self.is_uncond is not None:
             is_uncond = torch.logical_or(self.is_uncond.to(is_uncond.device), is_uncond)
+        token_types = self.token_types
+        if token_types is None and empty.token_types is not None:
+            token_types = empty.token_types.to(device=self.tokens.device)
+        elif token_types is not None:
+            token_types = token_types.to(device=self.tokens.device)
         return TextConditioning(
             tokens=torch.where(drop_tokens, empty.tokens.to(self.tokens), self.tokens),
             mask=torch.where(drop_mask, empty.mask.to(self.mask.device), self.mask),
             pooled=torch.where(drop_pooled, empty.pooled.to(self.pooled), self.pooled),
             is_uncond=is_uncond,
+            token_types=token_types,
         )
 
 
@@ -42,7 +57,7 @@ class ConditionBatch:
     source_latent: Optional[torch.Tensor] = None
     mask: Optional[torch.Tensor] = None
     control_latents: Optional[torch.Tensor] = None
-    task: Literal["txt2img", "img2img", "inpaint", "control"] = "txt2img"
+    task: TaskName | str = "txt2img"
     strength: Optional[torch.Tensor] = None
 
 
@@ -52,6 +67,6 @@ class TrainBatch:
     text: TextConditioning
     source_latent: Optional[torch.Tensor] = None
     mask: Optional[torch.Tensor] = None
-    task: str = "txt2img"
+    control_latents: Optional[torch.Tensor] = None
+    task: str | list[str] = "txt2img"
     metadata: dict | None = None
-
