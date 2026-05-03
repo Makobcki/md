@@ -5,7 +5,7 @@ import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 
 @dataclass(frozen=True)
@@ -233,7 +233,7 @@ def _load_latent_mask(path: str, *, latent_h: int, latent_w: int, device):
     return torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
 
 
-def run_sample(options: SampleOptions) -> dict[str, object]:
+def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, object]], None] | None = None, quiet: bool = False) -> dict[str, object]:
     options.validate()
     import torch
     from data_loader.dataset import load_image_tensor
@@ -243,7 +243,17 @@ def run_sample(options: SampleOptions) -> dict[str, object]:
     from .build import build_all
 
     device = torch.device(options.device if options.device == "cpu" or torch.cuda.is_available() else "cpu")
-    event_bus = EventBus([StdoutJsonSink()])
+    class _CallbackSink:
+        def __init__(self, callback: Callable[[dict[str, object]], None]) -> None:
+            self.callback = callback
+
+        def emit(self, event: dict[str, object]) -> None:
+            self.callback(event)
+
+    sinks = [] if quiet else [StdoutJsonSink()]
+    if event_callback is not None:
+        sinks.append(_CallbackSink(event_callback))
+    event_bus = EventBus(sinks)
     base_seed = random.SystemRandom().randint(0, 2**31 - 1) if options.seed is None else int(options.seed)
     seeds = [base_seed + i for i in range(options.n)]
     event_bus.emit({"type": "status", "status": "start", "seed": base_seed, "n": options.n, "task": options.task})
@@ -346,6 +356,7 @@ def run_sample(options: SampleOptions) -> dict[str, object]:
     metadata = _sample_metadata(options, built, sampler=sampler, seed=base_seed, latent_only=options.latent_only, fake_vae=options.fake_vae)
     sidecar = _write_sample_metadata(out, metadata)
     event_bus.emit({"type": "status", "status": "done", "path": str(out), "metadata": str(sidecar)})
-    print(f"[OK] saved {out}")
-    print(f"[OK] saved metadata {sidecar}")
+    if not quiet:
+        print(f"[OK] saved {out}")
+        print(f"[OK] saved metadata {sidecar}")
     return {"path": str(out), "metadata_path": str(sidecar), "metadata": metadata, "seed": base_seed}
