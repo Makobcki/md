@@ -1,7 +1,6 @@
 const LABELS = {
   ckpt: "Модель (Checkpoint)",
   prompt: "Промпт",
-  neg: "Негативный промпт",
   neg_prompt: "Негативный промпт",
   cfg: "Guidance scale",
   guidance: "Guidance scale",
