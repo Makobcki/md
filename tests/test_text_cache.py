@@ -5,17 +5,27 @@ import json
 import pytest
 
 torch = pytest.importorskip("torch")
-safetensors = pytest.importorskip("safetensors.torch")
-
 from model.text.cache import TextCache
 from config.train import TrainConfig
 from train.runner import _validate_text_cache_for_mmdit
 
 
+def _write_empty_prompt(root, *, tokens_shape=(1, 3, 4)) -> None:
+    torch.save(
+        {
+            "tokens": torch.zeros(*tokens_shape),
+            "mask": torch.zeros(tokens_shape[0], tokens_shape[1], dtype=torch.uint8),
+            "pooled": torch.zeros(tokens_shape[0], tokens_shape[2]),
+            "is_uncond": torch.ones(tokens_shape[0], dtype=torch.uint8),
+        },
+        str(root / "empty_prompt.safetensors"),
+    )
+
+
 def test_text_cache_loads_shard(tmp_path) -> None:
     root = tmp_path / "text"
     (root / "shards").mkdir(parents=True)
-    safetensors.save_file(
+    torch.save(
         {
             "tokens": torch.randn(1, 3, 4),
             "mask": torch.ones(1, 3, dtype=torch.uint8),
@@ -24,17 +34,39 @@ def test_text_cache_loads_shard(tmp_path) -> None:
         },
         str(root / "shards" / "text_00000.safetensors"),
     )
+    _write_empty_prompt(root)
     (root / "index.jsonl").write_text(json.dumps({"key": "abc", "shard": "text_00000.safetensors", "idx": 0}) + "\n")
     cache = TextCache(root)
     cond = cache.load("abc")
     assert cond.tokens.shape == (3, 4)
     assert cond.mask.dtype == torch.bool
     assert cond.pooled.shape == (4,)
+    empty = cache.load_empty()
+    assert empty.is_uncond is not None and empty.is_uncond.item() is True
+
+
+def test_text_cache_missing_key_error_is_explicit(tmp_path) -> None:
+    root = tmp_path / "text"
+    root.mkdir(parents=True)
+    (root / "index.jsonl").write_text("")
+    cache = TextCache(root)
+    with pytest.raises(KeyError, match="Text cache missing key: missing"):
+        cache.load("missing")
 
 
 def test_text_cache_metadata_validation_catches_missing_key(tmp_path) -> None:
     root = tmp_path / "text"
-    root.mkdir(parents=True)
+    (root / "shards").mkdir(parents=True)
+    torch.save(
+        {
+            "tokens": torch.randn(1, 3, 1024),
+            "mask": torch.ones(1, 3, dtype=torch.uint8),
+            "pooled": torch.randn(1, 1024),
+            "is_uncond": torch.zeros(1, dtype=torch.uint8),
+        },
+        str(root / "shards" / "text_00000.safetensors"),
+    )
+    _write_empty_prompt(root, tokens_shape=(1, 3, 1024))
     (root / "metadata.json").write_text(
         json.dumps(
             {
@@ -73,6 +105,28 @@ def test_text_cache_metadata_validation_catches_missing_key(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="text cache missing"):
         _validate_text_cache_for_mmdit(cache, cfg, [{"md5": "missing", "caption": "x"}])
+
+
+def test_text_cache_validation_strict_false_warns_for_metadata_mismatch(tmp_path, capsys) -> None:
+    root = tmp_path / "text"
+    (root / "shards").mkdir(parents=True)
+    torch.save(
+        {
+            "tokens": torch.randn(1, 3, 4),
+            "mask": torch.ones(1, 3, dtype=torch.uint8),
+            "pooled": torch.randn(1, 4),
+            "is_uncond": torch.zeros(1, dtype=torch.uint8),
+        },
+        str(root / "shards" / "text_00000.safetensors"),
+    )
+    _write_empty_prompt(root)
+    (root / "metadata.json").write_text(json.dumps({"text_dim": 999, "pooled_dim": 4, "encoders": []}))
+    (root / "manifest.json").write_text(json.dumps({"num_samples": 1, "shards": [{"name": "text_00000.safetensors"}]}))
+    (root / "index.jsonl").write_text(json.dumps({"key": "present", "shard": "text_00000.safetensors", "idx": 0}) + "\n")
+    cfg = TrainConfig.from_dict({"text_dim": 4, "pooled_dim": 4, "cache": {"strict": False}})
+
+    _validate_text_cache_for_mmdit(TextCache(root), cfg, [{"md5": "present", "caption": "x"}], strict=False)
+    assert "text cache text_dim mismatch" in capsys.readouterr().out
 
 
 def test_text_cache_reuses_loaded_shard(tmp_path, monkeypatch) -> None:
