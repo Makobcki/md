@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "md-diffusion"
 version = "0.1.0"
-description = "Text-conditioned latent and pixel diffusion training, sampling, and WebUI tooling."
+description = "MMDiT rectified-flow latent image model training and sampling."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -59,7 +59,9 @@ md-train = "train.cli:main"
 md-sample = "sample.cli:main"
 md-prepare-latents = "scripts.prepare_latents:main"
 md-prepare-text-cache = "scripts.prepare_text_cache:main"
-md-smoke-mmdit-rf = "scripts.smoke_mmdit_rf:main"
+md-prepare-training-cache = "scripts.prepare_training_cache:main"
+md-eval = "train.eval_cli:main"
+md-cache-validate = "scripts.validate_cache:main"
 
 [tool.setuptools]
 py-modules = ["main"]
