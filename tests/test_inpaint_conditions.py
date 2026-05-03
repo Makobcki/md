@@ -51,3 +51,33 @@ def test_mmdit_dataset_builds_inpaint_train_batch() -> None:
     assert batch.mask is not None
     assert batch.source_latent.shape == (1, 4, 8, 8)
     assert batch.mask.shape == (1, 1, 8, 8)
+
+
+def test_flow_sampler_preserves_unmasked_inpaint_region() -> None:
+    from samplers.flow_euler import sample_flow_euler
+
+    class _ConstantFlow(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.zeros(()))
+
+        def forward(self, x, t, text, **kwargs):
+            del t, text, kwargs
+            return torch.ones_like(x)
+
+    model = _ConstantFlow()
+    text = TextConditioning(torch.zeros(1, 1, 4), torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 4))
+    source = torch.full((1, 4, 4, 4), 7.0)
+    mask = torch.zeros(1, 1, 4, 4)
+    mask[:, :, 1:3, 1:3] = 1.0
+    out = sample_flow_euler(
+        model,
+        (1, 4, 4, 4),
+        text,
+        steps=2,
+        noise=torch.zeros(1, 4, 4, 4),
+        source_latent=source,
+        mask=mask,
+        task="inpaint",
+    )
+    assert torch.equal(out * (1.0 - mask), source * (1.0 - mask))
