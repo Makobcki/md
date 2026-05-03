@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -52,13 +53,14 @@ def _dataset_hash(entries: list[dict[str, Any]], caption_field: str) -> str:
 
 
 def _save_shard(path: Path, payload: dict[str, torch.Tensor]) -> None:
-    try:
-        from safetensors.torch import save_file
-    except ImportError as exc:
-        raise RuntimeError("scripts/prepare_text_cache.py requires safetensors to be installed.") from exc
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    save_file(payload, str(tmp))
+    try:
+        from safetensors.torch import save_file
+
+        save_file(payload, str(tmp))
+    except ImportError:
+        torch.save(payload, tmp)
     tmp.replace(path)
 
 
@@ -72,7 +74,7 @@ def prepare_text_cache(
     limit: int | None,
     device: torch.device,
     dtype: torch.dtype,
-) -> None:
+) -> dict[str, Any]:
     dcfg = DataConfig(
         root=str(cfg.data_root),
         image_dir=str(cfg.image_dir),
@@ -129,35 +131,55 @@ def prepare_text_cache(
             "mask": empty.mask.detach().cpu().to(torch.uint8),
             "pooled": empty.pooled.detach().cpu(),
             "is_uncond": torch.ones(1, dtype=torch.uint8),
+            **({"token_types": empty.token_types.detach().cpu().to(torch.long)} if empty.token_types is not None else {}),
         },
     )
 
     index_lines: list[str] = []
+    shard_manifests: list[dict[str, Any]] = []
+    shard_sample_ids: list[str] = []
     shard_tokens: list[torch.Tensor] = []
     shard_masks: list[torch.Tensor] = []
     shard_pooled: list[torch.Tensor] = []
     shard_uncond: list[torch.Tensor] = []
+    shard_token_types: list[torch.Tensor] = []
     shard_no = 0
 
     def flush() -> None:
-        nonlocal shard_no, shard_tokens, shard_masks, shard_pooled, shard_uncond
+        nonlocal shard_no, shard_sample_ids, shard_tokens, shard_masks, shard_pooled, shard_uncond, shard_token_types
         if not shard_tokens:
             return
         shard_name = f"text_{shard_no:05d}.safetensors"
-        _save_shard(
-            out_dir / "shards" / shard_name,
+        payload = {
+            "tokens": torch.cat(shard_tokens, dim=0).cpu(),
+            "mask": torch.cat(shard_masks, dim=0).cpu().to(torch.uint8),
+            "pooled": torch.cat(shard_pooled, dim=0).cpu(),
+            "is_uncond": torch.cat(shard_uncond, dim=0).cpu().to(torch.uint8),
+        }
+        if shard_token_types:
+            payload["token_types"] = torch.cat(shard_token_types, dim=0).cpu().to(torch.long)
+        _save_shard(out_dir / "shards" / shard_name, payload)
+        shard_manifests.append(
             {
-                "tokens": torch.cat(shard_tokens, dim=0).cpu(),
-                "mask": torch.cat(shard_masks, dim=0).cpu().to(torch.uint8),
-                "pooled": torch.cat(shard_pooled, dim=0).cpu(),
-                "is_uncond": torch.cat(shard_uncond, dim=0).cpu().to(torch.uint8),
-            },
+                "name": shard_name,
+                "sample_ids": list(shard_sample_ids),
+                "num_samples": int(payload["tokens"].shape[0]),
+                "tokens_shape": list(payload["tokens"].shape),
+                "mask_shape": list(payload["mask"].shape),
+                "pooled_shape": list(payload["pooled"].shape),
+                "token_types_shape": list(payload["token_types"].shape) if "token_types" in payload else None,
+                "dtype": str(payload["tokens"].dtype).replace("torch.", ""),
+                "encoders": metadata["encoders"],
+                "max_lengths": [int(e.get("max_length", 0)) for e in metadata["encoders"]],
+            }
         )
         shard_no += 1
+        shard_sample_ids = []
         shard_tokens = []
         shard_masks = []
         shard_pooled = []
         shard_uncond = []
+        shard_token_types = []
 
     for start in tqdm(range(0, len(entries), batch_size), desc="text-cache"):
         batch_entries = entries[start : start + batch_size]
@@ -168,14 +190,38 @@ def prepare_text_cache(
         for offset, entry in enumerate(batch_entries):
             key = str(entry.get("md5", start + offset))
             index_lines.append(json.dumps({"key": key, "shard": shard_name, "idx": local_start + offset}, ensure_ascii=False))
+            shard_sample_ids.append(key)
         shard_tokens.append(cond.tokens.detach().cpu())
         shard_masks.append(cond.mask.detach().cpu())
         shard_pooled.append(cond.pooled.detach().cpu())
         shard_uncond.append((cond.is_uncond if cond.is_uncond is not None else torch.zeros(len(prompts), dtype=torch.bool, device=device)).detach().cpu())
+        if cond.token_types is not None:
+            shard_token_types.append(cond.token_types.detach().cpu())
         if sum(x.shape[0] for x in shard_tokens) >= shard_size:
             flush()
     flush()
     (out_dir / "index.jsonl").write_text("\n".join(index_lines) + ("\n" if index_lines else ""), encoding="utf-8")
+    manifest = {
+        "version": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "num_samples": len(entries),
+        "dataset_hash": metadata["dataset_hash"],
+        "caption_field": metadata["caption_field"],
+        "dtype": metadata["dtype"],
+        "text_dim": metadata["text_dim"],
+        "pooled_dim": metadata["pooled_dim"],
+        "encoders": metadata["encoders"],
+        "empty_prompt": {
+            "path": "empty_prompt.safetensors",
+            "tokens_shape": list(empty.tokens.detach().cpu().shape),
+            "mask_shape": list(empty.mask.detach().cpu().shape),
+            "pooled_shape": list(empty.pooled.detach().cpu().shape),
+            "token_types_shape": list(empty.token_types.detach().cpu().shape) if empty.token_types is not None else None,
+        },
+        "shards": shard_manifests,
+    }
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return manifest
 
 
 def main() -> None:

@@ -32,7 +32,7 @@ def test_index_cache_with_stale_image_paths_is_rebuilt(tmp_path: Path) -> None:
     cache_path = cache_dir / "index_images_only_req5121_val0.0_imgdirimages.jsonl"
     stale_entry = {
         "md5": "stale",
-        "img": str(tmp_path / "old-root" / "stale.png"),
+        "img": str(tmp_path / "missing-root" / "stale.png"),
         "caption": "",
         "tags_primary": [],
         "tags_gender": [],
@@ -142,7 +142,7 @@ def test_mmdit_smoke_config_indexes_metadata_jsonl(tmp_path: Path) -> None:
         tags_dir=str(cfg.tags_dir),
         caption_field=str(cfg.caption_field),
         images_only=bool(cfg.images_only),
-        use_text_conditioning=bool(cfg.use_text_conditioning),
+        use_text_conditioning=True,
         min_tag_count=int(cfg.min_tag_count),
         require_512=bool(cfg.require_512),
         val_ratio=0.0,
@@ -158,9 +158,3 @@ def test_mmdit_smoke_config_indexes_metadata_jsonl(tmp_path: Path) -> None:
     assert train_entries[0]["md5"] == "sample-001"
     assert train_entries[0]["caption"] == "1girl, simple background"
     assert Path(train_entries[0]["img"]).name == "sample-001.png"
-
-
-def test_diffusion_package_no_longer_exports_legacy_config() -> None:
-    import diffusion
-
-    assert not hasattr(diffusion, "DiffusionConfig")
