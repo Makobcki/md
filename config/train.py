@@ -1,24 +1,61 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict, replace
-from typing import Any, Dict, Iterable, Tuple
+from dataclasses import asdict, dataclass, field, replace
+from typing import Any, Dict
 
-from .curriculum import CurriculumConfig
-from .data import DataConfig as SplitDataConfig
-from .diffusion import DiffusionConfig as SplitDiffusionConfig
-from .eval import EvalConfig
-from .io import IOConfig
-from .model import ModelConfig
-from .perf import PerfConfig
-from .text import TextConfig
-from .vae import VAEConfig
+TEXT_ENCODER_PRESETS: Dict[str, Dict[str, Any]] = {
+    "clip_l_t5_base": {
+        "text_dim": 1024,
+        "pooled_dim": 1024,
+        "encoders": [
+            {"name": "clip_l", "model_name": "openai/clip-vit-large-patch14", "max_length": 77, "trainable": False, "cache": True},
+            {"name": "t5_base", "model_name": "google/t5-v1_1-base", "max_length": 256, "trainable": False, "cache": True},
+        ],
+    },
+    "clip_l_t5_large": {
+        "text_dim": 1024,
+        "pooled_dim": 1024,
+        "encoders": [
+            {"name": "clip_l", "model_name": "openai/clip-vit-large-patch14", "max_length": 77, "trainable": False, "cache": True},
+            {"name": "t5_large", "model_name": "google/t5-v1_1-large", "max_length": 256, "trainable": False, "cache": True},
+        ],
+    },
+    "clip_l_clip_bigG_t5_large": {
+        "text_dim": 1024,
+        "pooled_dim": 1024,
+        "encoders": [
+            {"name": "clip_l", "model_name": "openai/clip-vit-large-patch14", "max_length": 77, "trainable": False, "cache": True},
+            {"name": "clip_bigG", "model_name": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", "max_length": 77, "trainable": False, "cache": True},
+            {"name": "t5_large", "model_name": "google/t5-v1_1-large", "max_length": 256, "trainable": False, "cache": True},
+        ],
+    },
+}
 
-def _as_tuple(value: Iterable[int] | Iterable[float]) -> Tuple:
-    return tuple(value)
+
+def _apply_text_preset(data: Dict[str, Any]) -> Dict[str, Any]:
+    preset_name = str(data.get("text_preset", data.get("text", {}).get("preset", "")) or "").strip()
+    if not preset_name:
+        return dict(data)
+    if preset_name not in TEXT_ENCODER_PRESETS:
+        allowed = ", ".join(sorted(TEXT_ENCODER_PRESETS))
+        raise ValueError(f"Unsupported text_preset={preset_name!r}. Allowed: {allowed}.")
+    out = dict(data)
+    preset = TEXT_ENCODER_PRESETS[preset_name]
+    text = dict(out.get("text") or {})
+    text.setdefault("preset", preset_name)
+    text.setdefault("text_dim", int(preset["text_dim"]))
+    text.setdefault("pooled_dim", int(preset["pooled_dim"]))
+    if not text.get("encoders"):
+        text["encoders"] = [dict(item) for item in preset["encoders"]]
+    out["text"] = text
+    return out
 
 
 def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Accept the current nested YAML shape while exposing a flat TrainConfig."""
+    data = _apply_text_preset(data)
     flat = dict(data)
+
     training = data.get("training")
     if isinstance(training, dict):
         for key in (
@@ -47,6 +84,7 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
         ):
             if key in training and key not in flat:
                 flat[key] = training[key]
+
     model = data.get("model")
     if isinstance(model, dict):
         for key in (
@@ -64,11 +102,10 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
             "dropout",
             "attn_dropout",
             "gradient_checkpointing",
+            "zero_init_final",
         ):
             if key in model and key not in flat:
                 flat[key] = model[key]
-        if "gradient_checkpointing" in model and "grad_checkpointing" not in flat:
-            flat["grad_checkpointing"] = model["gradient_checkpointing"]
     text = data.get("text")
     if isinstance(text, dict):
         for key in ("text_dim", "pooled_dim"):
@@ -76,6 +113,20 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
                 flat[key] = text[key]
         if "cache" in text and "text_cache" not in flat:
             flat["text_cache"] = text["cache"]
+
+    inpaint = data.get("inpaint")
+    if isinstance(inpaint, dict):
+        mapping = {
+            "mask_min_area": "inpaint_mask_min_area",
+            "mask_max_area": "inpaint_mask_max_area",
+            "mask_modes": "inpaint_mask_modes",
+            "loss_mask_weight": "inpaint_loss_mask_weight",
+            "loss_unmask_weight": "inpaint_loss_unmask_weight",
+        }
+        for src, dst in mapping.items():
+            if src in inpaint and dst not in flat:
+                flat[dst] = inpaint[src]
+
     conditioning = data.get("conditioning")
     if isinstance(conditioning, dict):
         mapping = {
@@ -87,6 +138,19 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
         for src, dst in mapping.items():
             if src in conditioning and dst not in flat:
                 flat[dst] = conditioning[src]
+
+    control = data.get("control")
+    if isinstance(control, dict):
+        mapping = {
+            "enabled": "control_enabled",
+            "types": "control_types",
+            "strength": "control_strength",
+            "num_streams": "control_num_streams",
+        }
+        for src, dst in mapping.items():
+            if src in control and dst not in flat:
+                flat[dst] = control[src]
+
     flow = data.get("flow")
     if isinstance(flow, dict):
         mapping = {
@@ -94,12 +158,15 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
             "logit_mean": "flow_logit_mean",
             "logit_std": "flow_logit_std",
             "loss_weighting": "flow_loss_weighting",
+            "timestep_shift": "flow_timestep_shift",
+            "shift": "flow_timestep_shift",
             "train_t_min": "flow_train_t_min",
             "train_t_max": "flow_train_t_max",
         }
         for src, dst in mapping.items():
             if src in flow and dst not in flat:
                 flat[dst] = flow[src]
+
     sampling = data.get("sampling")
     if isinstance(sampling, dict):
         mapping = {
@@ -117,6 +184,7 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
             flat["eval_steps"] = sampling["steps"]
         if "cfg_scale" in sampling and "eval_cfg" not in flat:
             flat["eval_cfg"] = sampling["cfg_scale"]
+
     vae = data.get("vae")
     if isinstance(vae, dict):
         mapping = {
@@ -127,25 +195,72 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
         for src, dst in mapping.items():
             if src in vae and dst not in flat:
                 flat[dst] = vae[src]
+
     cache = data.get("cache")
     if isinstance(cache, dict):
-        if "latent_cache" in cache and "latent_cache" not in flat:
-            flat["latent_cache"] = cache["latent_cache"]
-        if "text_cache" in cache and "text_cache" not in flat:
-            flat["text_cache"] = cache["text_cache"]
-        if "auto_prepare" in cache and "cache_auto_prepare" not in flat:
-            flat["cache_auto_prepare"] = cache["auto_prepare"]
-        if "rebuild_if_stale" in cache and "cache_rebuild_if_stale" not in flat:
-            flat["cache_rebuild_if_stale"] = cache["rebuild_if_stale"]
-        if "sharded" in cache:
-            flat.setdefault("latent_cache_sharded", cache["sharded"])
-        if "dtype" in cache:
-            flat.setdefault("latent_dtype", cache["dtype"])
-        if "text_shard_cache_size" in cache and "text_shard_cache_size" not in flat:
-            flat["text_shard_cache_size"] = cache["text_shard_cache_size"]
+        mapping = {
+            "latent_cache": "latent_cache",
+            "text_cache": "text_cache",
+            "auto_prepare": "cache_auto_prepare",
+            "rebuild_if_stale": "cache_rebuild_if_stale",
+            "sharded": "latent_cache_sharded",
+            "dtype": "latent_dtype",
+            "text_shard_cache_size": "text_shard_cache_size",
+            "allow_on_the_fly_text": "allow_on_the_fly_text",
+            "strict": "cache_strict",
+            "validate_on_start": "cache_validate_on_start",
+        }
+        for src, dst in mapping.items():
+            if src in cache and dst not in flat:
+                flat[dst] = cache[src]
+        if "strict" in cache and "latent_cache_strict" not in flat:
+            flat["latent_cache_strict"] = cache["strict"]
+
+    performance = data.get("performance")
+    if isinstance(performance, dict):
+        mapping = {
+            "flash_sdp": "enable_flash_sdp",
+            "mem_efficient_sdp": "enable_mem_efficient_sdp",
+            "math_sdp": "enable_math_sdp",
+            "tf32": "tf32",
+            "cudnn_benchmark": "cudnn_benchmark",
+            "channels_last": "channels_last",
+        }
+        for src, dst in mapping.items():
+            if src in performance and dst not in flat:
+                flat[dst] = performance[src]
+
+    distributed = data.get("distributed")
+    if isinstance(distributed, dict):
+        mapping = {
+            "backend": "distributed_backend",
+            "save_on_rank0_only": "save_on_rank0_only",
+            "metrics_aggregation": "distributed_metrics_aggregation",
+            "find_unused_parameters": "ddp_find_unused_parameters",
+            "gradient_as_bucket_view": "ddp_gradient_as_bucket_view",
+        }
+        for src, dst in mapping.items():
+            if src in distributed and dst not in flat:
+                flat[dst] = distributed[src]
+
+    fsdp = data.get("fsdp")
+    if isinstance(fsdp, dict):
+        mapping = {
+            "enabled": "fsdp_enabled",
+            "min_hidden_dim": "fsdp_min_hidden_dim",
+            "min_num_params": "fsdp_min_num_params",
+            "sharding_strategy": "fsdp_sharding_strategy",
+            "auto_wrap_policy": "fsdp_auto_wrap_policy",
+            "cpu_offload": "fsdp_cpu_offload",
+        }
+        for src, dst in mapping.items():
+            if src in fsdp and dst not in flat:
+                flat[dst] = fsdp[src]
+
     debug = data.get("debug")
     if isinstance(debug, dict) and "dataset_limit" in debug and "dataset_limit" not in flat:
         flat["dataset_limit"] = debug["dataset_limit"]
+
     return flat
 
 
@@ -153,6 +268,7 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
 class TrainConfig:
     architecture: str = "mmdit_rf"
     objective: str = "rectified_flow"
+    prediction_type: str = "flow_velocity"
 
     data_root: str = "./data/dataset/pixso_512"
     image_dir: str = "images"
@@ -167,19 +283,17 @@ class TrainConfig:
     failed_list: str = "failed/md5.txt"
     dataset_limit: int = 0
     dataset_tasks: Dict[str, float] = field(
-        default_factory=lambda: {"txt2img": 1.0, "img2img": 0.0, "inpaint": 0.0}
+        default_factory=lambda: {"txt2img": 1.0, "img2img": 0.0, "inpaint": 0.0, "control": 0.0}
     )
 
     seed: int = 42
     out_dir: str = "./runs/danbooru_512"
-
     batch_size: int = 1
     grad_accum_steps: int = 8
     num_workers: int = 8
     prefetch_factor: int = 4
     pin_memory: bool = True
     persistent_workers: bool = True
-
     lr: float = 1.0e-4
     weight_decay: float = 1.0e-4
     lr_scheduler: str = "cosine"
@@ -191,53 +305,6 @@ class TrainConfig:
     save_every: int = 2_000
     val_every: int = 500
     val_batches: int = 8
-
-    timesteps: int = 1_000
-    beta_start: float = 1.0e-4
-    beta_end: float = 2.0e-2
-    min_snr_gamma: float = 5.0
-    prediction_type: str = "flow_velocity"
-
-    base_channels: int = 64
-    channel_mults: Tuple[int, ...] = (1, 2, 3, 4)
-    num_res_blocks: int = 2
-    dropout: float = 0.10
-    attn_resolutions: Tuple[int, ...] = (32, 16)
-    cross_attn_resolutions: Tuple[int, ...] = ()
-    attn_heads: int = 4
-    attn_head_dim: int = 32
-    self_attn_type: str = "global"
-    self_attn_window_size: int = 8
-    attention_placement: str = "all"
-    cross_attn_dim: int = 0
-    mid_blocks: int = 1
-    text_dim: int = 256
-    text_layers: int = 4
-    text_heads: int = 4
-    text_max_len: int = 128
-    text_spatial_conditioning: bool = False
-    use_text_conditioning: bool = True
-    use_scale_shift_norm: bool = True
-    grad_checkpointing: bool = False
-    checkpoint_resblocks: bool = False
-    checkpoint_attention: bool = False
-    checkpoint_downsample: bool = False
-    zero_init_residual: bool = False
-
-    text_vocab_path: str = "diffusion/bpe/vocab.json"
-    text_merges_path: str = "diffusion/bpe/merges.txt"
-    tokenizer_type: str = "bpe"
-
-    cond_drop_prob: float = 0.15
-    token_drop_prob: float = 0.0
-    tag_drop_prob: float = 0.0
-    caption_drop_prob: float = 0.0
-
-    amp: bool = True
-    amp_dtype: str = "fp16"
-    compile: bool = False
-    compile_warmup_steps: int = 2
-    compile_cudagraphs: bool = True
     optimizer: str = "adamw"
     grad_clip_norm: float = 1.0
     fail_on_nonfinite_grad: bool = False
@@ -248,6 +315,11 @@ class TrainConfig:
     resume_ckpt: str = ""
     deterministic: bool = False
 
+    amp: bool = True
+    amp_dtype: str = "fp16"
+    compile: bool = False
+    compile_warmup_steps: int = 2
+    compile_cudagraphs: bool = True
     tf32: bool = True
     cudnn_benchmark: bool = True
     channels_last: bool = True
@@ -255,7 +327,21 @@ class TrainConfig:
     enable_mem_efficient_sdp: bool = True
     enable_math_sdp: bool = False
 
+    distributed_backend: str = "none"
+    save_on_rank0_only: bool = True
+    distributed_metrics_aggregation: bool = True
+    ddp_find_unused_parameters: bool = False
+    ddp_gradient_as_bucket_view: bool = True
+
+    fsdp_enabled: bool = False
+    fsdp_min_hidden_dim: int = 1024
+    fsdp_min_num_params: int = 500_000_000
+    fsdp_sharding_strategy: str = "full_shard"
+    fsdp_auto_wrap_policy: str = "transformer_block"
+    fsdp_cpu_offload: bool = False
+
     mode: str = "latent"
+    image_size: int = 512
     latent_channels: int = 4
     latent_downsample_factor: int = 8
     latent_patch_size: int = 2
@@ -280,22 +366,49 @@ class TrainConfig:
     rms_norm: bool = True
     swiglu: bool = True
     adaln_zero: bool = True
-    pos_embed: str = "sincos_2d"
+    pos_embed: str = "rope_2d"
     double_stream_blocks: int = 16
     single_stream_blocks: int = 8
+    dropout: float = 0.0
     attn_dropout: float = 0.0
+    gradient_checkpointing: bool = True
+    zero_init_final: bool = True
 
+    text_preset: str = ""
+    text_dim: int = 1024
     pooled_dim: int = 1024
     text_cache: bool = True
+    allow_on_the_fly_text: bool = False
     text_cache_dir: str = ".cache/text"
     text_shard_cache_size: int = 2
     cache_auto_prepare: bool = True
     cache_rebuild_if_stale: bool = False
+    cache_strict: bool = True
+    cache_validate_on_start: bool = True
+
+    cond_drop_prob: float = 0.15
+    token_drop_prob: float = 0.0
+    tag_drop_prob: float = 0.0
+    caption_drop_prob: float = 0.0
+
+    inpaint_mask_min_area: float = 0.05
+    inpaint_mask_max_area: float = 0.60
+    inpaint_mask_modes: Dict[str, float] = field(
+        default_factory=lambda: {"rectangle": 0.5, "brush": 0.3, "random_blocks": 0.2}
+    )
+    inpaint_loss_mask_weight: float = 1.0
+    inpaint_loss_unmask_weight: float = 0.1
+
+    control_enabled: bool = False
+    control_types: Dict[str, bool] = field(default_factory=lambda: {"canny": True, "depth": False, "pose": False})
+    control_strength: float = 1.0
+    control_num_streams: int = 1
 
     flow_timestep_sampling: str = "logit_normal"
     flow_logit_mean: float = 0.0
     flow_logit_std: float = 1.0
     flow_loss_weighting: str = "none"
+    flow_timestep_shift: float = 1.0
     flow_train_t_min: float = 0.0
     flow_train_t_max: float = 1.0
 
@@ -303,6 +416,14 @@ class TrainConfig:
     sampling_steps: int = 28
     sampling_cfg_scale: float = 4.5
     sampling_shift: float = 3.0
+
+    eval_prompts_file: str = "./data/eval_prompts/core.txt"
+    eval_every: int = 500
+    eval_seed: int = 42
+    eval_sampler: str = "flow_heun"
+    eval_steps: int = 30
+    eval_cfg: float = 5.0
+    eval_n: int = 1
 
     ckpt_keep_last: int = 5
 
@@ -318,23 +439,6 @@ class TrainConfig:
     curriculum_solo_weight: float = 2.0
     curriculum_non_solo_weight: float = 1.0
 
-    self_conditioning: bool = True
-    self_cond_prob: float = 0.5
-    self_cond_interval: int = 1
-
-    noise_schedule: str = "linear"
-    cosine_s: float = 0.008
-
-    eval_prompts_file: str = "./data/eval_prompts/core.txt"
-    eval_every: int = 500
-    eval_seed: int = 42
-    eval_sampler: str = "flow_heun"
-    eval_steps: int = 30
-    eval_cfg: float = 5.0
-    eval_n: int = 1
-
-    image_size: int = 512
-
     extra: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -344,10 +448,32 @@ class TrainConfig:
             raise ValueError("Only objective=rectified_flow is supported.")
         if self.prediction_type != "flow_velocity":
             raise ValueError("Only prediction_type=flow_velocity is supported.")
-        if self.text_max_len <= 0:
-            raise ValueError("text_max_len must be positive.")
-        if self.timesteps <= 0:
-            raise ValueError("timesteps must be positive.")
+        if self.mode != "latent":
+            raise ValueError("Only mode=latent is supported.")
+        if self.image_size <= 0:
+            raise ValueError("image_size must be positive.")
+        if self.latent_channels <= 0:
+            raise ValueError("latent_channels must be positive.")
+        if self.latent_downsample_factor <= 0:
+            raise ValueError("latent_downsample_factor must be positive.")
+        if self.latent_patch_size <= 0:
+            raise ValueError("latent_patch_size must be positive.")
+        if self.image_size % self.latent_downsample_factor != 0:
+            raise ValueError("image_size must be divisible by latent_downsample_factor.")
+        latent_side = self.image_size // self.latent_downsample_factor
+        if latent_side % self.latent_patch_size != 0:
+            raise ValueError("latent side must be divisible by latent_patch_size.")
+        if self.latent_dtype not in {"fp16", "bf16"}:
+            raise ValueError("latent_dtype must be 'fp16' or 'bf16'.")
+        if self.latent_cache_sharded and not self.latent_cache:
+            raise ValueError("latent_cache_sharded requires latent_cache=true.")
+        if self.latent_shard_cache_size <= 0:
+            raise ValueError("latent_shard_cache_size must be positive.")
+        if self.text_shard_cache_size <= 0:
+            raise ValueError("text_shard_cache_size must be positive.")
+        if not self.text_cache and not self.allow_on_the_fly_text:
+            raise ValueError("text_cache=false is only allowed when allow_on_the_fly_text=true.")
+
         if self.warmup_steps < 0:
             raise ValueError("warmup_steps must be non-negative.")
         if self.min_lr_ratio <= 0 or self.min_lr_ratio > 1:
@@ -358,7 +484,53 @@ class TrainConfig:
             raise ValueError("batch_size and grad_accum_steps must be positive.")
         if self.dataset_limit < 0:
             raise ValueError("dataset_limit must be non-negative.")
-        allowed_tasks = {"txt2img", "img2img", "inpaint"}
+        if self.val_every < 0 or self.val_batches < 0:
+            raise ValueError("validation cadence and batch counts must be non-negative.")
+        if self.amp_dtype not in {"fp16", "bf16"}:
+            raise ValueError("amp_dtype must be 'fp16' or 'bf16'.")
+        if self.distributed_backend not in {"none", "accelerate"}:
+            raise ValueError("distributed_backend must be one of: none, accelerate.")
+        if not isinstance(self.save_on_rank0_only, bool):
+            raise ValueError("save_on_rank0_only must be boolean.")
+        if not isinstance(self.distributed_metrics_aggregation, bool):
+            raise ValueError("distributed_metrics_aggregation must be boolean.")
+        if not isinstance(self.ddp_find_unused_parameters, bool):
+            raise ValueError("ddp_find_unused_parameters must be boolean.")
+        if not isinstance(self.ddp_gradient_as_bucket_view, bool):
+            raise ValueError("ddp_gradient_as_bucket_view must be boolean.")
+        if self.fsdp_min_hidden_dim <= 0:
+            raise ValueError("fsdp_min_hidden_dim must be positive.")
+        if self.fsdp_min_num_params <= 0:
+            raise ValueError("fsdp_min_num_params must be positive.")
+        if self.fsdp_sharding_strategy not in {"full_shard", "shard_grad_op", "hybrid_shard"}:
+            raise ValueError("fsdp_sharding_strategy must be one of: full_shard, shard_grad_op, hybrid_shard.")
+        if self.fsdp_auto_wrap_policy not in {"transformer_block", "size_based", "none"}:
+            raise ValueError("fsdp_auto_wrap_policy must be one of: transformer_block, size_based, none.")
+        if bool(self.fsdp_enabled):
+            raise ValueError("fsdp.enabled=true is reserved for future large-model runs and is not supported by this trainer yet.")
+        if self.lr_scheduler not in {"cosine", "linear"}:
+            raise ValueError("lr_scheduler must be 'cosine' or 'linear'.")
+        if self.optimizer not in {"adamw", "adamw_8bit"}:
+            raise ValueError("optimizer must be one of: adamw, adamw_8bit.")
+        if self.ckpt_keep_last < 0:
+            raise ValueError("ckpt_keep_last must be non-negative.")
+
+        if self.hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive.")
+        if self.num_heads <= 0 or self.hidden_dim % self.num_heads != 0:
+            raise ValueError("hidden_dim must be divisible by num_heads.")
+        if self.depth <= 0:
+            raise ValueError("depth must be positive.")
+        if self.double_stream_blocks < 0 or self.single_stream_blocks < 0:
+            raise ValueError("block counts must be non-negative.")
+        if self.double_stream_blocks + self.single_stream_blocks != self.depth:
+            raise ValueError("double_stream_blocks + single_stream_blocks must equal depth.")
+        if self.pos_embed not in {"rope_2d", "sincos_2d", "none"}:
+            raise ValueError("pos_embed must be one of: rope_2d, sincos_2d, none.")
+        if self.text_dim <= 0 or self.pooled_dim <= 0:
+            raise ValueError("text_dim and pooled_dim must be positive.")
+
+        allowed_tasks = {"txt2img", "img2img", "inpaint", "control"}
         unknown_tasks = sorted(set(self.dataset_tasks) - allowed_tasks)
         if unknown_tasks:
             raise ValueError("dataset_tasks contains unsupported task(s): " + ", ".join(unknown_tasks))
@@ -366,52 +538,56 @@ class TrainConfig:
             raise ValueError("dataset_tasks weights must be non-negative.")
         if sum(float(v) for v in self.dataset_tasks.values()) <= 0:
             raise ValueError("dataset_tasks must have at least one positive weight.")
-        if self.val_every < 0:
-            raise ValueError("val_every must be non-negative.")
-        if self.val_batches < 0:
-            raise ValueError("val_batches must be non-negative.")
-        if self.amp_dtype not in {"fp16", "bf16"}:
-            raise ValueError("amp_dtype must be 'fp16' or 'bf16'.")
-        if self.lr_scheduler not in {"cosine", "linear"}:
-            raise ValueError("lr_scheduler must be 'cosine' or 'linear'.")
-        if self.self_attn_type not in {"global", "windowed", "hybrid"}:
-            raise ValueError("self_attn_type must be one of: global, windowed, hybrid.")
-        if self.self_attn_window_size <= 0:
-            raise ValueError("self_attn_window_size must be positive.")
-        if self.attention_placement not in {"all", "mid_down", "mid_only"}:
-            raise ValueError("attention_placement must be one of: all, mid_down, mid_only.")
-        if self.cross_attn_dim < 0:
-            raise ValueError("cross_attn_dim must be non-negative.")
-        if self.mid_blocks <= 0:
-            raise ValueError("mid_blocks must be positive.")
-        if self.mode != "latent":
-            raise ValueError("Only mode=latent is supported.")
-        if self.latent_channels <= 0:
-            raise ValueError("latent_channels must be positive.")
-        if self.latent_downsample_factor <= 0:
-            raise ValueError("latent_downsample_factor must be positive.")
-        if self.latent_dtype not in {"fp16", "bf16"}:
-            raise ValueError("latent_dtype must be 'fp16' or 'bf16'.")
-        if self.latent_cache_sharded and not self.latent_cache:
-            raise ValueError("latent_cache_sharded requires latent_cache=true.")
-        if self.latent_shard_cache_size <= 0:
-            raise ValueError("latent_shard_cache_size must be positive.")
-        if self.ckpt_keep_last < 0:
-            raise ValueError("ckpt_keep_last must be non-negative.")
-        if self.curriculum_steps < 0:
-            raise ValueError("curriculum_steps must be non-negative.")
-        if self.curriculum_solo_weight <= 0 or self.curriculum_non_solo_weight <= 0:
-            raise ValueError("curriculum_solo_weight and curriculum_non_solo_weight must be positive.")
-        if self.self_cond_prob < 0 or self.self_cond_prob > 1:
-            raise ValueError("self_cond_prob must be in [0, 1].")
-        if self.self_cond_interval <= 0:
-            raise ValueError("self_cond_interval must be positive.")
-        if self.optimizer not in {"adamw", "adamw_8bit"}:
-            raise ValueError("optimizer must be one of: adamw, adamw_8bit.")
-        if self.noise_schedule not in {"linear", "cosine"}:
-            raise ValueError("noise_schedule must be 'linear' or 'cosine'.")
-        if self.cosine_s <= 0:
-            raise ValueError("cosine_s must be positive.")
+        if float(self.dataset_tasks.get("control", 0.0)) > 0 and not bool(self.control_enabled):
+            raise ValueError("dataset_tasks.control is reserved unless control.enabled=true.")
+        if self.control_strength < 0:
+            raise ValueError("control_strength must be non-negative.")
+        if self.control_num_streams <= 0:
+            raise ValueError("control_num_streams must be positive.")
+        if any(not isinstance(v, bool) for v in self.control_types.values()):
+            raise ValueError("control_types values must be boolean.")
+        if bool(self.control_enabled) and not any(bool(v) for v in self.control_types.values()):
+            raise ValueError("control.enabled=true requires at least one enabled control type.")
+
+        if not (0.0 <= float(self.inpaint_mask_min_area) <= float(self.inpaint_mask_max_area) <= 1.0):
+            raise ValueError("inpaint mask area must satisfy 0 <= min <= max <= 1.")
+        allowed_mask_modes = {"rectangle", "brush", "center_rectangle", "full", "small", "large", "random_blocks"}
+        unknown_mask_modes = sorted(set(self.inpaint_mask_modes) - allowed_mask_modes)
+        if unknown_mask_modes:
+            raise ValueError("inpaint_mask_modes contains unsupported mode(s): " + ", ".join(unknown_mask_modes))
+        if any(float(v) < 0 for v in self.inpaint_mask_modes.values()):
+            raise ValueError("inpaint_mask_modes weights must be non-negative.")
+        if sum(float(v) for v in self.inpaint_mask_modes.values()) <= 0:
+            raise ValueError("inpaint_mask_modes must include at least one positive weight.")
+        if float(self.inpaint_mask_modes.get("full", 0.0)) > 0 and float(self.inpaint_mask_max_area) < 1.0:
+            raise ValueError("inpaint_mask_modes.full requires inpaint_mask_max_area=1.0.")
+        if self.inpaint_loss_mask_weight < 0 or self.inpaint_loss_unmask_weight < 0:
+            raise ValueError("inpaint loss weights must be non-negative.")
+
+        for name, value in (
+            ("cond_drop_prob", self.cond_drop_prob),
+            ("token_drop_prob", self.token_drop_prob),
+            ("tag_drop_prob", self.tag_drop_prob),
+            ("caption_drop_prob", self.caption_drop_prob),
+        ):
+            if not (0.0 <= value <= 1.0):
+                raise ValueError(f"{name} must be in [0, 1].")
+        if not (0.0 <= self.flow_train_t_min <= self.flow_train_t_max <= 1.0):
+            raise ValueError("flow_train_t_min/max must satisfy 0 <= min <= max <= 1.")
+        if self.flow_timestep_sampling not in {"uniform", "logit_normal", "shifted_logit_normal", "cosmap", "cosmap_like"}:
+            raise ValueError("flow_timestep_sampling must be one of: uniform, logit_normal, shifted_logit_normal, cosmap, cosmap_like.")
+        if self.flow_timestep_shift <= 0:
+            raise ValueError("flow_timestep_shift must be positive.")
+        if self.flow_loss_weighting not in {"none"}:
+            raise ValueError("flow_loss_weighting must be 'none'.")
+        if self.sampling_sampler not in {"flow_euler", "flow_heun"}:
+            raise ValueError("sampling_sampler must be one of: flow_euler, flow_heun.")
+        if self.sampling_steps <= 0:
+            raise ValueError("sampling_steps must be positive.")
+        if self.sampling_cfg_scale < 0:
+            raise ValueError("sampling_cfg_scale must be non-negative.")
+        if self.sampling_shift <= 0:
+            raise ValueError("sampling_shift must be positive.")
         if self.eval_every < 0:
             raise ValueError("eval_every must be non-negative.")
         if self.eval_steps <= 0:
@@ -422,22 +598,16 @@ class TrainConfig:
             raise ValueError("eval_n must be positive.")
         if self.eval_sampler not in {"flow_euler", "flow_heun"}:
             raise ValueError("eval_sampler must be one of: flow_euler, flow_heun.")
-        if not (0.0 <= self.cond_drop_prob <= 1.0):
-            raise ValueError("cond_drop_prob must be in [0, 1].")
-        if not (0.0 <= self.token_drop_prob <= 1.0):
-            raise ValueError("token_drop_prob must be in [0, 1].")
-        if not (0.0 <= self.tag_drop_prob <= 1.0):
-            raise ValueError("tag_drop_prob must be in [0, 1].")
-        if not (0.0 <= self.caption_drop_prob <= 1.0):
-            raise ValueError("caption_drop_prob must be in [0, 1].")
         if not (0.0 < self.ema_decay_fast <= 1.0):
             raise ValueError("ema_decay_fast must be in (0, 1].")
         if not (0.0 < self.ema_decay_slow <= 1.0):
             raise ValueError("ema_decay_slow must be in (0, 1].")
         if self.ema_switch_step < 0:
             raise ValueError("ema_switch_step must be non-negative.")
-        if self.text_shard_cache_size <= 0:
-            raise ValueError("text_shard_cache_size must be positive.")
+        if self.curriculum_steps < 0:
+            raise ValueError("curriculum_steps must be non-negative.")
+        if self.curriculum_solo_weight <= 0 or self.curriculum_non_solo_weight <= 0:
+            raise ValueError("curriculum_solo_weight and curriculum_non_solo_weight must be positive.")
 
     @classmethod
     def from_yaml(cls, path: str) -> "TrainConfig":
@@ -451,14 +621,6 @@ class TrainConfig:
         fields = {f.name for f in cls.__dataclass_fields__.values()}
         kwargs = {k: v for k, v in data.items() if k in fields}
         extra = {k: v for k, v in data.items() if k not in fields}
-        if "images_only" not in kwargs and "image_only" in extra:
-            kwargs["images_only"] = extra["image_only"]
-        if "channel_mults" in kwargs:
-            kwargs["channel_mults"] = _as_tuple(kwargs["channel_mults"])
-        if "attn_resolutions" in kwargs:
-            kwargs["attn_resolutions"] = _as_tuple(kwargs["attn_resolutions"])
-        if "cross_attn_resolutions" in kwargs:
-            kwargs["cross_attn_resolutions"] = _as_tuple(kwargs["cross_attn_resolutions"])
         cfg = cls(**kwargs)
         return replace(cfg, extra=extra)
 
@@ -467,126 +629,3 @@ class TrainConfig:
         extra = data.pop("extra", {})
         data.update(extra)
         return data
-
-    def to_data_config(self) -> SplitDataConfig:
-        return SplitDataConfig(
-            data_root=self.data_root,
-            image_dir=self.image_dir,
-            meta_dir=self.meta_dir,
-            tags_dir=self.tags_dir,
-            caption_field=self.caption_field,
-            images_only=self.images_only,
-            min_tag_count=self.min_tag_count,
-            require_512=self.require_512,
-            val_ratio=self.val_ratio,
-            cache_dir=self.cache_dir,
-            failed_list=self.failed_list,
-            seed=self.seed,
-        )
-
-    def to_model_config(self) -> ModelConfig:
-        return ModelConfig(
-            base_channels=self.base_channels,
-            channel_mults=self.channel_mults,
-            num_res_blocks=self.num_res_blocks,
-            dropout=self.dropout,
-            attn_resolutions=self.attn_resolutions,
-            cross_attn_resolutions=self.cross_attn_resolutions,
-            attn_heads=self.attn_heads,
-            attn_head_dim=self.attn_head_dim,
-            self_attn_type=self.self_attn_type,
-            self_attn_window_size=self.self_attn_window_size,
-            attention_placement=self.attention_placement,
-            cross_attn_dim=self.cross_attn_dim,
-            mid_blocks=self.mid_blocks,
-            text_dim=self.text_dim,
-            text_layers=self.text_layers,
-            text_heads=self.text_heads,
-            text_max_len=self.text_max_len,
-            text_spatial_conditioning=self.text_spatial_conditioning,
-            use_scale_shift_norm=self.use_scale_shift_norm,
-            grad_checkpointing=self.grad_checkpointing,
-            checkpoint_resblocks=self.checkpoint_resblocks,
-            checkpoint_attention=self.checkpoint_attention,
-            checkpoint_downsample=self.checkpoint_downsample,
-            zero_init_residual=self.zero_init_residual,
-            use_text_conditioning=self.use_text_conditioning,
-            self_conditioning=self.self_conditioning,
-        )
-
-    def to_diffusion_config(self) -> SplitDiffusionConfig:
-        return SplitDiffusionConfig(
-            timesteps=self.timesteps,
-            beta_start=self.beta_start,
-            beta_end=self.beta_end,
-            min_snr_gamma=self.min_snr_gamma,
-            prediction_type=self.prediction_type,
-            noise_schedule=self.noise_schedule,
-            cosine_s=self.cosine_s,
-        )
-
-    def to_text_config(self) -> TextConfig:
-        return TextConfig(
-            vocab_path=self.text_vocab_path,
-            merges_path=self.text_merges_path,
-            tokenizer_type=self.tokenizer_type,
-            max_len=self.text_max_len,
-        )
-
-    def to_vae_config(self) -> VAEConfig:
-        return VAEConfig(
-            mode=self.mode,
-            latent_channels=self.latent_channels,
-            latent_downsample_factor=self.latent_downsample_factor,
-            latent_cache=self.latent_cache,
-            latent_cache_dir=self.latent_cache_dir,
-            latent_cache_sharded=self.latent_cache_sharded,
-            latent_cache_index=self.latent_cache_index,
-            latent_dtype=self.latent_dtype,
-            latent_precompute=self.latent_precompute,
-            latent_cache_fallback=self.latent_cache_fallback,
-            latent_cache_strict=self.latent_cache_strict,
-            latent_shard_cache_size=self.latent_shard_cache_size,
-            vae_pretrained=self.vae_pretrained,
-            vae_freeze=self.vae_freeze,
-            vae_scaling_factor=self.vae_scaling_factor,
-        )
-
-    def to_perf_config(self) -> PerfConfig:
-        return PerfConfig(
-            tf32=self.tf32,
-            cudnn_benchmark=self.cudnn_benchmark,
-            channels_last=self.channels_last,
-            enable_flash_sdp=self.enable_flash_sdp,
-            enable_mem_efficient_sdp=self.enable_mem_efficient_sdp,
-            enable_math_sdp=self.enable_math_sdp,
-        )
-
-    def to_eval_config(self) -> EvalConfig:
-        return EvalConfig(
-            eval_prompts_file=self.eval_prompts_file,
-            eval_every=self.eval_every,
-            eval_seed=self.eval_seed,
-            eval_sampler=self.eval_sampler,
-            eval_steps=self.eval_steps,
-            eval_cfg=self.eval_cfg,
-            eval_n=self.eval_n,
-        )
-
-    def to_curriculum_config(self) -> CurriculumConfig:
-        return CurriculumConfig(
-            curriculum_enabled=self.curriculum_enabled,
-            curriculum_steps=self.curriculum_steps,
-            curriculum_require_one_person=self.curriculum_require_one_person,
-            curriculum_prefer_solo=self.curriculum_prefer_solo,
-            curriculum_exclude_multi=self.curriculum_exclude_multi,
-            curriculum_solo_weight=self.curriculum_solo_weight,
-            curriculum_non_solo_weight=self.curriculum_non_solo_weight,
-        )
-
-    def to_io_config(self) -> IOConfig:
-        return IOConfig(
-            out_dir=self.out_dir,
-            ckpt_keep_last=self.ckpt_keep_last,
-            resume_ckpt=self.resume_ckpt,
-        )

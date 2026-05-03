@@ -28,6 +28,7 @@ class ModelConfig:
     grad_checkpointing: bool
     checkpoint_resblocks: bool
     checkpoint_attention: bool
+    checkpoint_text_encoder: bool
     checkpoint_downsample: bool
     zero_init_residual: bool
     use_text_conditioning: bool
