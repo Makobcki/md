@@ -1,0 +1,3 @@
+replace the background with a neon city at night
+add a small red backpack to the character
+remove the object from the table and keep lighting consistent
