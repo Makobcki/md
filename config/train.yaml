@@ -9,32 +9,35 @@ objective: rectified_flow
 prediction_type: flow_velocity
 
 # Dataset root used by smoke/tiny/dev MMDiT profiles.
-data_root: ./data/dataset/pixso_512
+data_root: ./data/dataset
 image_dir: images
 meta_dir: ""
-tags_dir: ""
+tags_dir: prompts
 # To train from prompt metadata instead of captions, set:
-# text_field: prompt
+text_field: prompt
 # text_fields: [prompt, caption, text]
 min_tag_count: 0
 out_dir: ./runs/mmdit_base
 eval_prompts_file: ./data/eval_prompts/mmdit_core.txt
 
 model:
-  hidden_dim: 1024
-  depth: 24
-  num_heads: 16
-  mlp_ratio: 4.0
+  hidden_dim: 576
+  depth: 8
+  num_heads: 9
+  mlp_ratio: 3.0
+
   qk_norm: true
   rms_norm: true
   swiglu: true
   adaln_zero: true
   pos_embed: rope_2d
-  double_stream_blocks: 16
-  single_stream_blocks: 8
-  dropout: 0.0
+
+  double_stream_blocks: 6
+  single_stream_blocks: 2
+
+  dropout: 0.05
   attn_dropout: 0.0
-  gradient_checkpointing: true
+  gradient_checkpointing: false
 
 text:
   enabled: true
@@ -66,13 +69,13 @@ img2img:
   mask_conditioning: true
 
 training:
-  batch_size: 2
-  grad_accum_steps: 32
+  batch_size: 4
+  grad_accum_steps: 16
   lr: 1.0e-4
   weight_decay: 0.01
   optimizer: adamw
-  warmup_steps: 3000
-  max_steps: 300000
+  warmup_steps: 1000
+  max_steps: 60000
   ema_decay: 0.9999
   grad_clip_norm: 1.0
   amp: true
@@ -108,7 +111,7 @@ eval_steps: 28
 eval_cfg: 4.5
 
 vae:
-  pretrained: ./vae_sd_mse
+  pretrained: stabilityai/sd-vae-ft-mse
   freeze: true
   scaling_factor: 0.18215
 
@@ -127,7 +130,7 @@ prepare_text:
   dtype: auto
 
 prepare_latents:
-  batch_size: 16
+  batch_size: 8
   num_workers: 4
   device: auto
   overwrite: false
