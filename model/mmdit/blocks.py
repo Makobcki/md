@@ -66,6 +66,8 @@ class MMDiTDoubleBlock(nn.Module):
         txt: torch.Tensor,
         cond: torch.Tensor,
         txt_mask: Optional[torch.Tensor],
+        rope_grid_hw: Optional[tuple[int, int]] = None,
+        use_rope: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         img_shift, img_scale, img_gate_attn, img_mlp_shift, img_mlp_scale, img_gate_mlp = self.img_adaln(cond)
         txt_shift, txt_scale, txt_gate_attn, txt_mlp_shift, txt_mlp_scale, txt_gate_mlp = self.txt_adaln(cond)
@@ -82,7 +84,15 @@ class MMDiTDoubleBlock(nn.Module):
         if txt_mask is not None:
             img_mask = torch.ones(img.shape[:2], device=img.device, dtype=torch.bool)
             joint_mask = torch.cat([txt_mask.to(device=img.device, dtype=torch.bool), img_mask], dim=1)
-        out = self.attn(q, k, v, joint_mask)
+        out = self.attn(
+            q,
+            k,
+            v,
+            joint_mask,
+            rope_grid_hw=rope_grid_hw if use_rope else None,
+            rope_start=txt.shape[1],
+            rope_length=img.shape[1],
+        )
         out_txt, out_img = out[:, : txt.shape[1]], out[:, txt.shape[1] :]
 
         txt = txt + txt_gate_attn.unsqueeze(1) * self.txt_out(out_txt)
@@ -119,6 +129,8 @@ class MMDiTSingleBlock(nn.Module):
         txt: torch.Tensor,
         cond: torch.Tensor,
         txt_mask: Optional[torch.Tensor],
+        rope_grid_hw: Optional[tuple[int, int]] = None,
+        use_rope: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         x = torch.cat([txt, img], dim=1)
         shift, scale, gate_attn, mlp_shift, mlp_scale, gate_mlp = self.adaln(cond)
@@ -128,7 +140,17 @@ class MMDiTSingleBlock(nn.Module):
         if txt_mask is not None:
             img_mask = torch.ones(img.shape[:2], device=img.device, dtype=torch.bool)
             joint_mask = torch.cat([txt_mask.to(device=img.device, dtype=torch.bool), img_mask], dim=1)
-        x = x + gate_attn.unsqueeze(1) * self.out(self.attn(q, k, v, joint_mask))
+        x = x + gate_attn.unsqueeze(1) * self.out(
+            self.attn(
+                q,
+                k,
+                v,
+                joint_mask,
+                rope_grid_hw=rope_grid_hw if use_rope else None,
+                rope_start=txt.shape[1],
+                rope_length=img.shape[1],
+            )
+        )
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), mlp_shift, mlp_scale))
         return x[:, txt.shape[1] :], x[:, : txt.shape[1]]
 

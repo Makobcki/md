@@ -1,7 +1,21 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import nn
+
+
+class FP32LayerNorm(nn.LayerNorm):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        dtype = x.dtype
+        y = F.layer_norm(
+            x.float(),
+            self.normalized_shape,
+            self.weight.float() if self.weight is not None else None,
+            self.bias.float() if self.bias is not None else None,
+            self.eps,
+        )
+        return y.to(dtype=dtype)
 
 
 class RMSNorm(nn.Module):
@@ -34,7 +48,7 @@ class AdaLNZero(nn.Module):
 def build_norm(hidden_dim: int, *, rms_norm: bool) -> nn.Module:
     if rms_norm:
         return RMSNorm(hidden_dim)
-    return nn.LayerNorm(hidden_dim)
+    return FP32LayerNorm(hidden_dim)
 
 
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
