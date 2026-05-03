@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -42,7 +44,7 @@ def run_mmdit_eval_sampling(
     shift: float,
     use_amp: bool,
     amp_dtype: torch.dtype,
-) -> None:
+) -> list[dict]:
     if eval_steps <= 0:
         raise RuntimeError("eval_steps must be positive.")
     if eval_n <= 0:
@@ -64,6 +66,8 @@ def run_mmdit_eval_sampling(
         model.eval()
         uncond = text_encoder([""])
 
+        events: list[dict] = []
+        output_records: list[dict] = []
         for prompt_idx, prompt in enumerate(prompts):
             cond = text_encoder([prompt])
             samples = []
@@ -86,7 +90,44 @@ def run_mmdit_eval_sampling(
                     )
                     x = vae.decode(z)
                 samples.append(x.cpu())
-            save_image_grid(torch.cat(samples, dim=0), eval_dir / f"prompt_{prompt_idx:02d}.png", nrow=eval_n)
+            path = eval_dir / f"prompt_{prompt_idx:02d}.png"
+            save_image_grid(torch.cat(samples, dim=0), path, nrow=eval_n)
+            record = {
+                "prompt_index": int(prompt_idx),
+                "prompt": str(prompt),
+                "sampler": str(eval_sampler),
+                "steps": int(eval_steps),
+                "cfg": float(eval_cfg),
+                "seed": int(eval_seed) + prompt_idx * eval_n,
+                "path": str(path),
+            }
+            output_records.append(record)
+            events.append(
+                {
+                    "type": "sample",
+                    "step": int(step),
+                    "prompt_set": "eval_prompts_file",
+                    "sampler": str(eval_sampler),
+                    "steps": int(eval_steps),
+                    "cfg": float(eval_cfg),
+                    "seed": int(eval_seed) + prompt_idx * eval_n,
+                    "path": str(path.relative_to(out_dir)),
+                }
+            )
+        metadata = {
+            "version": 1,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "step": int(step),
+            "prompt_set": "eval_prompts_file",
+            "sampler": str(eval_sampler),
+            "steps": int(eval_steps),
+            "cfg": float(eval_cfg),
+            "seed": int(eval_seed),
+            "shift": float(shift),
+            "outputs": output_records,
+        }
+        (eval_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        return events
     finally:
         if swapped_ema:
             ema.restore(model)
