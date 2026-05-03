@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from .norms import RMSNorm
+from .pos_embed import apply_2d_rope
 
 
 class JointAttention(nn.Module):
@@ -29,9 +30,20 @@ class JointAttention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        rope_grid_hw: Optional[tuple[int, int]] = None,
+        rope_start: int = 0,
+        rope_length: int = 0,
     ) -> torch.Tensor:
         qh = self.q_norm(self._shape(q))
         kh = self.k_norm(self._shape(k))
+        if rope_grid_hw is not None and rope_length > 0:
+            qh, kh = apply_2d_rope(
+                qh,
+                kh,
+                grid_hw=rope_grid_hw,
+                start=rope_start,
+                length=rope_length,
+            )
         vh = self._shape(v)
         attn_mask = None
         if mask is not None:
