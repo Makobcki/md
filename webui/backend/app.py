@@ -171,6 +171,7 @@ class SampleArgs(BaseModel):
     prompt: str = ""
     neg_prompt: str = ""
     cfg: float = Field(default=5.0, ge=0.0, le=30.0)
+    shift: Optional[float] = Field(default=None, gt=0.0, le=100.0)
     sampler: Literal["flow_euler", "flow_heun"] = "flow_heun"
     seed: Optional[int] = 42
     device: Literal["auto", "cpu", "cuda"] = "cuda"
@@ -205,6 +206,12 @@ class SampleArgs(BaseModel):
             data.pop("device")
         if data.get("use-ema") is True:
             data.pop("use-ema", None)
+        return data
+
+    def to_sample_options_args(self) -> Dict[str, Any]:
+        data = self.model_dump(by_alias=False, exclude_none=True)
+        if data.get("device") == "auto":
+            data.pop("device")
         return data
 
 
@@ -489,10 +496,34 @@ def get_out_dir_summary() -> Dict[str, Any]:
     }
 
 
+def _sample_arg_specs() -> list[Dict[str, Any]]:
+    return [
+        {"name": "ckpt", "flags": ["--ckpt"], "type": "str", "default": None, "required": True, "help": "Checkpoint path", "choices": None},
+        {"name": "out", "flags": ["--out"], "type": "str", "default": "", "required": False, "help": "Optional output path. Defaults to this WebUI run samples directory.", "choices": None},
+        {"name": "task", "flags": ["--task"], "type": "str", "default": "txt2img", "required": False, "help": "Generation task", "choices": ["txt2img", "img2img", "inpaint", "control"]},
+        {"name": "sampler", "flags": ["--sampler"], "type": "str", "default": "flow_heun", "required": False, "help": "Flow sampler", "choices": ["flow_euler", "flow_heun"]},
+        {"name": "n", "flags": ["--n"], "type": "int", "default": 1, "required": False, "help": "Number of images", "choices": None},
+        {"name": "steps", "flags": ["--steps"], "type": "int", "default": 30, "required": False, "help": "Sampling steps", "choices": None},
+        {"name": "cfg", "flags": ["--cfg"], "type": "float", "default": 5.0, "required": False, "help": "Classifier-free guidance scale", "choices": None},
+        {"name": "shift", "flags": ["--shift"], "type": "float", "default": None, "required": False, "help": "Positive inference timestep shift override. Empty = checkpoint/config default.", "choices": None},
+        {"name": "seed", "flags": ["--seed"], "type": "int", "default": 42, "required": False, "help": "Base seed. Empty/null lets backend choose a random seed.", "choices": None},
+        {"name": "device", "flags": ["--device"], "type": "str", "default": "auto", "required": False, "help": "Runtime device", "choices": ["auto", "cuda", "cpu"]},
+        {"name": "prompt", "flags": ["--prompt"], "type": "str", "default": "", "required": False, "help": "Positive prompt", "choices": None},
+        {"name": "neg_prompt", "flags": ["--neg_prompt", "--negative-prompt"], "type": "str", "default": "", "required": False, "help": "Negative prompt. Empty uses cached empty prompt when available.", "choices": None},
+        {"name": "init-image", "flags": ["--init-image"], "type": "str", "default": "", "required": False, "help": "Input image for img2img/inpaint", "choices": None},
+        {"name": "strength", "flags": ["--strength"], "type": "float", "default": 1.0, "required": False, "help": "Img2img start strength in [0, 1]", "choices": None},
+        {"name": "mask", "flags": ["--mask"], "type": "str", "default": "", "required": False, "help": "Inpaint mask path", "choices": None},
+        {"name": "control-image", "flags": ["--control-image"], "type": "str", "default": "", "required": False, "help": "Control conditioning image path", "choices": None},
+        {"name": "control-strength", "flags": ["--control-strength"], "type": "float", "default": 1.0, "required": False, "help": "Control latent multiplier", "choices": None},
+        {"name": "latent-only", "flags": ["--latent-only"], "type": "bool", "default": False, "required": False, "help": "Write latent tensor instead of image", "choices": None},
+        {"name": "fake-vae", "flags": ["--fake-vae"], "type": "bool", "default": False, "required": False, "help": "Use deterministic fake VAE for smoke/sample tests", "choices": None},
+        {"name": "use-ema", "flags": ["--use-ema", "--no-ema"], "type": "bool", "default": True, "required": False, "help": "Use EMA weights from checkpoint when available", "choices": None},
+    ]
+
+
 @app.get("/api/sample/args")
 def get_sample_args() -> Dict[str, Any]:
-    sample_path = ROOT_DIR / "sample" / "cli.py"
-    return {"items": parse_argparse_args(sample_path)}
+    return {"items": _sample_arg_specs()}
 
 
 @app.get("/api/latents/args")
@@ -537,7 +568,7 @@ def stop_train(_: None = Depends(_require_token)) -> Dict[str, Any]:
 @app.post("/api/sample/start")
 def start_sample(req: SampleRequest, _: None = Depends(_require_token)) -> Dict[str, Any]:
     try:
-        run = job_manager.start_sample(req.args.to_cli_args())
+        run = job_manager.start_sample(req.args.to_sample_options_args())
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"run_id": run.run_id, "command": run.command, "output": run.output_path}
