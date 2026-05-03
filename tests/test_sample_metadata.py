@@ -1,75 +1,76 @@
 from __future__ import annotations
 
-import ast
+import json
+from argparse import Namespace
 from pathlib import Path
 
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def _sample_cli_source() -> str:
-    return (ROOT / "sample" / "cli.py").read_text(encoding="utf-8")
+from sample.cli import _metadata_sidecar_path, _sample_metadata, _write_sample_metadata
 
 
-def test_sample_cli_defines_metadata_sidecar_helpers() -> None:
-    tree = ast.parse(_sample_cli_source())
-    functions = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
-
-    assert "_metadata_sidecar_path" in functions
-    assert "_write_sample_metadata" in functions
-    assert "_sample_metadata" in functions
-
-
-def test_sample_cli_writes_metadata_next_to_image() -> None:
-    source = _sample_cli_source()
-
-    assert 'Path(image_path).with_suffix(".json")' in source
-    assert '"architecture": "mmdit_rf"' in source
-    assert '"objective": "rectified_flow"' in source
-    assert '"prompt": str(args.prompt)' in source
-    assert '"sampler": str(sampler)' in source
-    assert '"steps": int(args.steps)' in source
-    assert '"cfg": float(args.cfg)' in source
-    assert '"seed": int(seed)' in source
-    assert '"n": int(args.n)' in source
-    assert '"task": str(args.task)' in source
-    assert source.count("_write_sample_metadata(out, _sample_metadata") == 1
-
-
-def test_sample_metadata_helpers_write_json(tmp_path: Path) -> None:
-    from argparse import Namespace
-
-    source = _sample_cli_source()
-    tree = ast.parse(source)
-    helper_names = {"_metadata_sidecar_path", "_write_sample_metadata", "_sample_metadata"}
-    helper_defs = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in helper_names]
-    module = ast.Module(body=helper_defs, type_ignores=[])
-    ast.fix_missing_locations(module)
-    namespace = {"Path": Path, "json": __import__("json")}
-    exec(compile(module, "sample_cli_helpers", "exec"), namespace)
-
+def test_sample_metadata_helpers_write_reproducible_json(tmp_path: Path) -> None:
     out = tmp_path / "sample.png"
-    sidecar = namespace["_metadata_sidecar_path"](out)
+    sidecar = _metadata_sidecar_path(out)
     assert sidecar == tmp_path / "sample.json"
 
     args = Namespace(
         ckpt="./runs/mmdit_smoke/ckpt_final.pt",
         prompt="1girl, simple background",
-        neg_prompt="",
-        neg="low quality",
+        neg_prompt="low quality",
         steps=2,
         cfg=1,
         n=1,
         task="txt2img",
+        strength=1.0,
+        init_image="",
+        mask="",
+        latent_only=False,
+        fake_vae=False,
     )
-    built = Namespace(ckpt={"architecture": "mmdit_rf"}, cfg={})
-    metadata = namespace["_sample_metadata"](args, built, sampler="flow_heun", seed=42)
-    written = namespace["_write_sample_metadata"](out, metadata)
+    built = Namespace(
+        cfg={
+            "architecture": "mmdit_rf",
+            "objective": "rectified_flow",
+            "prediction_type": "flow_velocity",
+            "image_size": 512,
+            "latent_channels": 4,
+            "latent_downsample_factor": 8,
+            "hidden_dim": 64,
+            "depth": 1,
+            "num_heads": 4,
+            "vae_pretrained": "./vae_sd_mse",
+            "sampling_shift": 3.0,
+            "text": {"backend": "fake", "text_dim": 32, "pooled_dim": 32, "encoders": []},
+        },
+        image_channels=4,
+        h=512,
+        w=512,
+        latent_h=64,
+        latent_w=64,
+        checkpoint_step=123,
+        checkpoint_metadata={},
+        text_encoder=Namespace(metadata=lambda: {"backend": "fake", "encoders": [], "text_dim": 32, "pooled_dim": 32}),
+    )
+    metadata = _sample_metadata(args, built, sampler="flow_heun", seed=42)
+    written = _write_sample_metadata(out, metadata)
 
     assert written == sidecar
-    payload = written.read_text(encoding="utf-8")
-    assert payload.startswith("{\n")
-    assert '"architecture": "mmdit_rf"' in payload
-    assert '"objective": "rectified_flow"' in payload
-    assert '"sampler": "flow_heun"' in payload
-    assert '"task": "txt2img"' in payload
+    payload = json.loads(written.read_text(encoding="utf-8"))
+    assert payload["checkpoint_path"] == "./runs/mmdit_smoke/ckpt_final.pt"
+    assert payload["checkpoint_step"] == 123
+    assert payload["architecture"] == "mmdit_rf"
+    assert payload["objective"] == "rectified_flow"
+    assert payload["prediction_type"] == "flow_velocity"
+    assert payload["prompt"] == "1girl, simple background"
+    assert payload["negative_prompt"] == "low quality"
+    assert payload["sampler"] == "flow_heun"
+    assert payload["steps"] == 2
+    assert payload["cfg"] == 1.0
+    assert payload["seed"] == 42
+    assert payload["sampling_shift"] == 3.0
+    assert payload["image_size"] == [512, 512]
+    assert payload["latent_shape"] == [4, 64, 64]
+    assert payload["model_config"]["hidden_dim"] == 64
+    assert payload["model_config"]["depth"] == 1
+    assert payload["model_config"]["num_heads"] == 4
+    assert payload["vae_config"]["pretrained"] == "./vae_sd_mse"
+    assert payload["text_encoder_config"] == {"backend": "fake", "encoders": [], "text_dim": 32, "pooled_dim": 32}
