@@ -5,11 +5,6 @@ from typing import Optional
 
 import torch
 
-try:
-    from diffusers import AutoencoderKL
-except Exception:
-    AutoencoderKL = None
-
 
 @dataclass(frozen=True)
 class VAEConfig:
@@ -30,8 +25,10 @@ class VAEWrapper:
     ) -> None:
         if not pretrained:
             raise RuntimeError("VAE pretrained path/name is required for latent diffusion.")
-        if AutoencoderKL is None:
-            raise RuntimeError("diffusers is required for VAEWrapper. Please install diffusers.")
+        try:
+            from diffusers import AutoencoderKL
+        except Exception as exc:
+            raise RuntimeError("diffusers is required for VAEWrapper. Please install diffusers.") from exc
         self.cfg = VAEConfig(pretrained=pretrained, freeze=bool(freeze), scaling_factor=float(scaling_factor))
         self.device = device
         self.dtype = dtype

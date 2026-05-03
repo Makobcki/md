@@ -4,15 +4,13 @@ import random
 import json
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import torch
 from torch.utils.data import Dataset
 
 import numpy as np
 from PIL import Image
-
-from diffusion.text import BPETokenizer
 
 from .types import LatentCacheMetadata, LatentShardLocation
 
@@ -126,7 +124,7 @@ class ImageTextDataset(Dataset):
     def __init__(
         self,
         entries: List[dict],
-        tokenizer: Optional[BPETokenizer],
+        tokenizer: Optional[Any],
         cond_drop_prob: float,
         token_drop_prob: float = 0.0,
         tag_drop_prob: float = 0.0,
@@ -347,14 +345,18 @@ class ImageTextDataset(Dataset):
 
     def _entry_text_fingerprint(self, entry: dict) -> str:
         payload = {
+            "text": entry.get("text", "") or "",
+            "text_source": entry.get("text_source", "") or "",
             "caption": entry.get("caption", "") or "",
+            "prompt": entry.get("prompt", "") or "",
             "tags_primary": list(entry.get("tags_primary", [])),
             "tags_gender": list(entry.get("tags_gender", [])),
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
     def _build_text(self, entry: dict, rng: random.Random | None = None) -> str:
-        cap = entry.get("caption", "") or ""
+        cap = entry.get("text", "") or entry.get("prompt", "") or entry.get("caption", "") or ""
+        text_source = str(entry.get("text_source", "") or "")
         tags_primary = list(entry.get("tags_primary", []))
         tags_gender = list(entry.get("tags_gender", []))
 
@@ -367,6 +369,9 @@ class ImageTextDataset(Dataset):
             tags_gender = []
 
         if cap:
+            # Prompt metadata is usually already a complete training condition; keep it exact.
+            if text_source == "prompt":
+                return str(cap).strip()
             ids_cap, mask_cap = self.tokenizer.encode(cap)
             cap_len = int(mask_cap.sum().item()) - 2  # exclude BOS/EOS
             extra_tags = tags_primary[:5] if cap_len < 40 else []

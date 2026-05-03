@@ -4,10 +4,12 @@ import asyncio
 import json
 import os
 import signal
+import contextlib
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -15,8 +17,16 @@ from typing import Any, Dict, List, Optional
 
 from config.train import TrainConfig
 from diffusion.events import format_event_line
+from sample.api import SampleOptions, run_sample
 from .services import config_service
 from .services.atomic import atomic_write_json, atomic_write_text
+
+
+METRIC_EVENT_TYPES = {"metric", "progress", "train", "eval", "sample"}
+
+
+def is_metric_event(event: dict | None) -> bool:
+    return isinstance(event, dict) and event.get("type") in METRIC_EVENT_TYPES
 
 
 @dataclass
@@ -47,6 +57,8 @@ class JobManager:
         self.ws_manager = ws_manager
         self.lock = threading.Lock()
         self.process: Optional[subprocess.Popen] = None
+        self.worker_thread: Optional[threading.Thread] = None
+        self.metric_tailers: Dict[str, tuple[threading.Event, threading.Thread]] = {}
         self.current_run_id: Optional[str] = None
         self.runs: Dict[str, RunRecord] = {}
         self.loop: Optional[asyncio.AbstractEventLoop] = None
@@ -137,18 +149,45 @@ class JobManager:
             raise KeyError(run_id)
         return self.runs[run_id]
 
+    def _has_active_job_locked(self) -> bool:
+        if not self.current_run_id:
+            return False
+        run = self.runs.get(self.current_run_id)
+        if run is None:
+            self.current_run_id = None
+            return False
+        if self.process is not None:
+            return True
+        if self.worker_thread is not None and self.worker_thread.is_alive():
+            return True
+        if run.pid and self._pid_alive(run.pid):
+            return True
+        return run.status in {"queued", "running", "stopping"}
+
+    def _ensure_no_active_job_locked(self) -> None:
+        if self._has_active_job_locked():
+            raise RuntimeError("Another job is running.")
+
     def get_status(self) -> Dict[str, Any]:
         if not self.current_run_id:
             return {"active": False}
         run = self.runs[self.current_run_id]
-        if run.pid and not self._pid_alive(run.pid) and self.process is None:
-            run.status = "failed"
-            run.exit_code = -1
-            run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-            run.pid = None
-            self.current_run_id = None
-            self._save_state()
-            return {"active": False}
+        if self.process is None and (self.worker_thread is None or not self.worker_thread.is_alive()):
+            if run.pid and not self._pid_alive(run.pid):
+                run.status = "failed"
+                run.exit_code = -1
+                run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                run.pid = None
+                self.current_run_id = None
+                self._save_state()
+                return {"active": False}
+            if run.status in {"queued", "running", "stopping"}:
+                run.status = "failed"
+                run.exit_code = -1
+                run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                self.current_run_id = None
+                self._save_state()
+                return {"active": False}
         return {"active": True, "run": asdict(run)}
 
     def list_checkpoints(self) -> List[str]:
@@ -159,6 +198,65 @@ class JobManager:
         if not out_dir.exists():
             return []
         return sorted([str(p) for p in out_dir.rglob("*.pt")])
+
+    def _emit_metric_line_from_file(self, run: RunRecord, line: str) -> None:
+        event = self._parse_event_line(line)
+        if event is not None and is_metric_event(event):
+            self.ws_manager.send_from_thread(run.run_id, "metrics", json.dumps(event, ensure_ascii=False))
+
+    def _start_metrics_tailer(self, run: RunRecord) -> None:
+        if not run.metrics_path:
+            return
+        existing = self.metric_tailers.get(run.run_id)
+        if existing is not None and existing[1].is_alive():
+            return
+        stop_event = threading.Event()
+
+        def _tail() -> None:
+            path = Path(run.metrics_path or "")
+            position = 0
+
+            def _drain_available() -> None:
+                nonlocal position
+                if not path.exists():
+                    return
+                try:
+                    with path.open("r", encoding="utf-8") as f:
+                        f.seek(position)
+                        while True:
+                            line = f.readline()
+                            if not line:
+                                position = f.tell()
+                                return
+                            position = f.tell()
+                            self._emit_metric_line_from_file(run, line.rstrip("\n"))
+                except OSError:
+                    return
+
+            while not stop_event.is_set():
+                _drain_available()
+                stop_event.wait(0.25)
+            # One final drain after the process exits so events flushed by the
+            # training-side async event writer are not missed.
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                before = position
+                _drain_available()
+                if position == before:
+                    break
+                time.sleep(0.05)
+
+        thread = threading.Thread(target=_tail, name=f"metrics-tail-{run.run_id}", daemon=True)
+        self.metric_tailers[run.run_id] = (stop_event, thread)
+        thread.start()
+
+    def _stop_metrics_tailer(self, run_id: str) -> None:
+        item = self.metric_tailers.pop(run_id, None)
+        if item is None:
+            return
+        stop_event, thread = item
+        stop_event.set()
+        thread.join(timeout=3.0)
 
     def _start_process(self, run: RunRecord, env: Dict[str, str]) -> None:
         run_dir = Path(run.run_dir)
@@ -186,6 +284,7 @@ class JobManager:
         run.pid = proc.pid
         run.started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         self._save_state()
+        self._start_metrics_tailer(run)
 
         def _reader(stream, stream_name: str) -> None:
             for line in iter(stream.readline, ""):
@@ -205,10 +304,6 @@ class JobManager:
                     "line": log_line,
                 }, ensure_ascii=False))
 
-                if stream_name == "stdout" and event is not None:
-                    if event.get("type") == "metric":
-                        self.ws_manager.send_from_thread(run.run_id, "metrics", line)
-
         stdout_thread = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
         stderr_thread = threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True)
         stdout_thread.start()
@@ -218,6 +313,7 @@ class JobManager:
             proc.wait()
             stdout_thread.join(timeout=1)
             stderr_thread.join(timeout=1)
+            self._stop_metrics_tailer(run.run_id)
             stdout_f.close()
             stderr_f.close()
             run.exit_code = proc.returncode
@@ -242,12 +338,7 @@ class JobManager:
 
     def start_train(self, resume: Optional[str] = None) -> RunRecord:
         with self.lock:
-            if self.process is not None:
-                raise RuntimeError("Another job is running.")
-            if self.current_run_id:
-                run = self.runs[self.current_run_id]
-                if run.pid and self._pid_alive(run.pid):
-                    raise RuntimeError("Another job is running.")
+            self._ensure_no_active_job_locked()
             run_id = self._new_run_id()
             run_dir = self.runs_dir / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -303,32 +394,145 @@ class JobManager:
             self._start_process(run, env)
             return run
 
+    class _ThreadLogWriter:
+        def __init__(self, manager: "JobManager", run: RunRecord, stream_name: str, file_obj: Any) -> None:
+            self.manager = manager
+            self.run = run
+            self.stream_name = stream_name
+            self.file_obj = file_obj
+            self.buffer = ""
+
+        def write(self, data: str) -> int:
+            if not data:
+                return 0
+            self.buffer += data
+            while "\n" in self.buffer:
+                line, self.buffer = self.buffer.split("\n", 1)
+                self._emit(line.rstrip("\r"))
+            return len(data)
+
+        def flush(self) -> None:
+            if self.buffer:
+                self._emit(self.buffer.rstrip("\r"))
+                self.buffer = ""
+            self.file_obj.flush()
+
+        def _emit(self, line: str) -> None:
+            event = self.manager._parse_event_line(line)
+            log_line = format_event_line(event) if event is not None and event.get("type") else line
+            self.file_obj.write(log_line + "\n")
+            self.file_obj.flush()
+            self.manager.ws_manager.send_from_thread(
+                self.run.run_id,
+                "logs",
+                json.dumps({"type": "log", "stream": self.stream_name, "line": log_line}, ensure_ascii=False),
+            )
+            if self.stream_name == "stdout" and event is not None and is_metric_event(event):
+                self.manager.ws_manager.send_from_thread(self.run.run_id, "metrics", line)
+
+    @staticmethod
+    def _normalize_sample_args(args: Dict[str, Any]) -> Dict[str, Any]:
+        normalized: Dict[str, Any] = {}
+        aliases = {
+            "negative-prompt": "neg_prompt",
+            "neg-prompt": "neg_prompt",
+            "init-image": "init_image",
+            "control-image": "control_image",
+            "control-strength": "control_strength",
+            "latent-only": "latent_only",
+            "fake-vae": "fake_vae",
+            "use-ema": "use_ema",
+            "no-ema": "use_ema",
+        }
+        for key, value in args.items():
+            name = aliases.get(str(key), str(key).replace("-", "_"))
+            if str(key) == "no-ema":
+                value = not bool(value)
+            if value is None:
+                continue
+            if name == "device" and value == "auto":
+                continue
+            normalized[name] = value
+        return normalized
+
+    def _start_sample_thread(self, run: RunRecord, options: SampleOptions) -> None:
+        run_dir = Path(run.run_dir)
+        logs_dir = run_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        stdout_path = Path(run.log_stdout)
+        stderr_path = Path(run.log_stderr)
+        stdout_f = stdout_path.open("a", encoding="utf-8")
+        stderr_f = stderr_path.open("a", encoding="utf-8")
+
+        def _write_event(event: dict[str, object]) -> None:
+            line = json.dumps(event, ensure_ascii=False)
+            log_line = format_event_line(event) if event.get("type") else line
+            stdout_f.write(log_line + "\n")
+            stdout_f.flush()
+            self.ws_manager.send_from_thread(
+                run.run_id,
+                "logs",
+                json.dumps({"type": "log", "stream": "stdout", "line": log_line}, ensure_ascii=False),
+            )
+            if is_metric_event(event):
+                self.ws_manager.send_from_thread(run.run_id, "metrics", line)
+
+        def _worker() -> None:
+            exit_code = 0
+            try:
+                run_sample(options, event_callback=_write_event, quiet=True)
+            except Exception:
+                exit_code = 1
+                stderr_f.write(traceback.format_exc() + "\n")
+                stderr_f.flush()
+            finally:
+                stdout_f.close()
+                stderr_f.close()
+                with self.lock:
+                    run.exit_code = exit_code
+                    run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    run.pid = None
+                    if run.status == "stopping":
+                        run.status = "stopped"
+                    elif exit_code == 0:
+                        run.status = "done"
+                    else:
+                        run.status = "failed"
+                    if self.current_run_id == run.run_id:
+                        self.current_run_id = None
+                    self.worker_thread = None
+                    self._save_state()
+                self.ws_manager.send_from_thread(
+                    run.run_id,
+                    "logs",
+                    json.dumps({"type": "status", "status": run.status, "exit_code": exit_code}, ensure_ascii=False),
+                )
+
+        run.status = "running"
+        run.started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        self.current_run_id = run.run_id
+        thread = threading.Thread(target=_worker, name=f"sample-api-{run.run_id}", daemon=True)
+        self.worker_thread = thread
+        self._save_state()
+        thread.start()
+
     def start_sample(self, args: Dict[str, Any]) -> RunRecord:
         with self.lock:
-            if self.process is not None:
-                raise RuntimeError("Another job is running.")
-            if self.current_run_id:
-                run = self.runs[self.current_run_id]
-                if run.pid and self._pid_alive(run.pid):
-                    raise RuntimeError("Another job is running.")
+            self._ensure_no_active_job_locked()
             run_id = self._new_run_id()
             run_dir = self.runs_dir / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
             samples_dir = run_dir / "samples"
             samples_dir.mkdir(parents=True, exist_ok=True)
 
-            cmd = [
-                os.environ.get("PYTHON", sys.executable),
-                "-u",
-                "-m",
-                "sample.cli",
-            ]
-            output_path = args.get("out")
-            notes: Dict[str, Any] = {"args": args}
+            normalized_args = self._normalize_sample_args(dict(args))
+            output_path = normalized_args.get("out")
+            notes: Dict[str, Any] = {"args": normalized_args, "backend": "sample.api"}
             if not output_path:
-                output_path = samples_dir / "sample.png"
+                suffix = ".pt" if bool(normalized_args.get("latent_only")) else ".png"
+                output_path = samples_dir / f"sample{suffix}"
             else:
-                output_path = Path(output_path)
+                output_path = Path(str(output_path))
                 if output_path.is_absolute():
                     resolved = output_path.resolve()
                     if self._is_allowed_output_path(resolved):
@@ -338,21 +542,17 @@ class JobManager:
                         notes["warning"] = "output path outside repo; rewritten into run samples"
                 else:
                     output_path = samples_dir / output_path.name
-            args["out"] = str(output_path)
+            normalized_args["out"] = str(output_path)
 
-            for key, value in args.items():
-                flag = f"--{key}"
-                if isinstance(value, bool):
-                    if value:
-                        cmd.append(flag)
-                else:
-                    cmd.extend([flag, str(value)])
+            options = SampleOptions(**normalized_args)
+            options.validate()
+            command = ["sample.api.run_sample", json.dumps(normalized_args, ensure_ascii=False, sort_keys=True)]
 
             run = RunRecord(
                 run_id=run_id,
                 run_type="sample",
                 status="queued",
-                command=cmd,
+                command=command,
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                 pid=None,
                 started_at="",
@@ -368,27 +568,12 @@ class JobManager:
             )
             self.runs[run_id] = run
             self._save_state()
-            self._write_notes(run_dir, {"type": "sample", "args": args, "output": str(output_path), **notes})
-
-            env = os.environ.copy()
-            env["WEBUI"] = "1"
-            env["WEBUI_RUN_DIR"] = str(run_dir)
-            env["PYTHONUNBUFFERED"] = "1"
-
-            # чтобы импортировался локальный пакет repo_root/diffusion
-            repo_root_str = str(self.repo_root)
-            env["PYTHONPATH"] = repo_root_str + os.pathsep + env.get("PYTHONPATH", "")
-
-            self._start_process(run, env)
+            self._write_notes(run_dir, {"type": "sample", "args": normalized_args, "output": str(output_path), **notes})
+            self._start_sample_thread(run, options)
             return run
     def start_prepare_latents(self, args: Dict[str, Any]) -> RunRecord:
         with self.lock:
-            if self.process is not None:
-                raise RuntimeError("Another job is running.")
-            if self.current_run_id:
-                run = self.runs[self.current_run_id]
-                if run.pid and self._pid_alive(run.pid):
-                    raise RuntimeError("Another job is running.")
+            self._ensure_no_active_job_locked()
             run_id = self._new_run_id()
             run_dir = self.runs_dir / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -458,6 +643,11 @@ class JobManager:
 
         with self.lock:
             if self.process is None or self.current_run_id is None:
+                if self.current_run_id and self.worker_thread is not None and self.worker_thread.is_alive():
+                    run = self.runs[self.current_run_id]
+                    run.status = "stopping"
+                    self._save_state()
+                    return run
                 if self.current_run_id:
                     run = self.runs[self.current_run_id]
                     if run.pid and self._pid_alive(run.pid):

@@ -3,8 +3,16 @@ import { api, wsUrl, API_ORIGIN } from "../api.js";
 import useLogBuffer from "../hooks/useLogBuffer.js";
 import ArgField from "../components/ArgField.jsx";
 
-const quickFields = ["ckpt", "steps", "n", "seed"];
-const promptFields = ["prompt", "neg_prompt", "neg"];
+const quickFields = ["task", "ckpt", "steps", "n", "seed"];
+const promptFields = ["prompt", "neg_prompt"];
+const hiddenPathFields = new Set(["init-image", "mask", "control-image"]);
+
+const TASK_HELP = {
+  txt2img: "Text → image generation from prompt only.",
+  img2img: "Image → image generation. Upload an init image and adjust strength.",
+  inpaint: "Inpaint generation. Upload an image and draw the white mask over regions to regenerate.",
+  control: "Control generation with a control image.",
+};
 
 const toRunsUrl = (path) => {
   if (!path) return null;
@@ -13,6 +21,237 @@ const toRunsUrl = (path) => {
   if (idx === -1) return null;
   return `${API_ORIGIN}/runs/${path.slice(idx + marker.length)}`;
 };
+
+const absolutePreviewUrl = (value) => {
+  if (!value) return "";
+  if (/^blob:|^data:|^https?:/i.test(value)) return value;
+  if (String(value).startsWith("/")) return `${API_ORIGIN}${value}`;
+  return toRunsUrl(value) || "";
+};
+
+function TaskAssetCard({
+  title,
+  description,
+  previewUrl,
+  fileName,
+  pathValue,
+  onPick,
+  onClear,
+  disabled = false,
+  children = null,
+}) {
+  const inputRef = useRef(null);
+
+  return (
+    <div className="task-asset-card">
+      <div className="row task-asset-header">
+        <div>
+          <div className="card-title">{title}</div>
+          {description ? <div className="muted">{description}</div> : null}
+        </div>
+        <div className="row">
+          <button type="button" className="secondary" onClick={() => inputRef.current?.click()} disabled={disabled}>
+            Upload
+          </button>
+          {(previewUrl || pathValue) && (
+            <button type="button" className="secondary" onClick={onClear} disabled={disabled}>
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/bmp"
+        hidden
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) onPick(file);
+          event.target.value = "";
+        }}
+        disabled={disabled}
+      />
+      {previewUrl ? (
+        <div className="task-asset-preview">
+          <img src={previewUrl} alt={title} />
+        </div>
+      ) : (
+        <div className="task-asset-empty muted">No image selected</div>
+      )}
+      {fileName ? <div className="badge">{fileName}</div> : null}
+      {pathValue ? <div className="task-asset-path muted">{pathValue}</div> : null}
+      {children}
+    </div>
+  );
+}
+
+function MaskEditor({ imageUrl, value, onChange, disabled = false }) {
+  const imgRef = useRef(null);
+  const canvasRef = useRef(null);
+  const drawingRef = useRef(false);
+  const lastPointRef = useRef(null);
+  const [brushSize, setBrushSize] = useState(32);
+  const [eraseMode, setEraseMode] = useState(false);
+  const [imageAspect, setImageAspect] = useState(1);
+
+  const exportMask = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    onChange(canvas.toDataURL("image/png"));
+  };
+
+  const fillCanvas = (fillStyle) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.save();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = fillStyle;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.restore();
+  };
+
+  const setupCanvas = () => {
+    const img = imgRef.current;
+    const canvas = canvasRef.current;
+    if (!img || !canvas || !img.naturalWidth || !img.naturalHeight) return;
+    const sameSize = canvas.width === img.naturalWidth && canvas.height === img.naturalHeight;
+    if (!sameSize) {
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      fillCanvas("black");
+      onChange("");
+    }
+    setImageAspect(img.naturalWidth / img.naturalHeight);
+  };
+
+  useEffect(() => {
+    if (!imageUrl) {
+      onChange("");
+    }
+  }, [imageUrl, onChange]);
+
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return undefined;
+    if (img.complete) setupCanvas();
+    const onLoad = () => setupCanvas();
+    img.addEventListener("load", onLoad);
+    return () => img.removeEventListener("load", onLoad);
+  }, [imageUrl]);
+
+  const pointerPoint = (event) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      x: ((event.clientX - rect.left) / rect.width) * canvas.width,
+      y: ((event.clientY - rect.top) / rect.height) * canvas.height,
+    };
+  };
+
+  const drawSegment = (from, to) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !from || !to) return;
+    const ctx = canvas.getContext("2d");
+    ctx.save();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.strokeStyle = eraseMode ? "black" : "white";
+    ctx.fillStyle = eraseMode ? "black" : "white";
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = brushSize;
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(to.x, to.y, brushSize / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  };
+
+  const startDraw = (event) => {
+    if (disabled || !imageUrl) return;
+    const point = pointerPoint(event);
+    if (!point) return;
+    drawingRef.current = true;
+    lastPointRef.current = point;
+    drawSegment(point, point);
+  };
+
+  const moveDraw = (event) => {
+    if (!drawingRef.current || disabled) return;
+    const point = pointerPoint(event);
+    if (!point) return;
+    drawSegment(lastPointRef.current, point);
+    lastPointRef.current = point;
+  };
+
+  const stopDraw = () => {
+    if (!drawingRef.current) return;
+    drawingRef.current = false;
+    lastPointRef.current = null;
+    exportMask();
+  };
+
+  const clearMask = () => {
+    fillCanvas("black");
+    exportMask();
+  };
+
+  if (!imageUrl) {
+    return <div className="task-asset-empty muted">Upload an init image to start drawing an inpaint mask.</div>;
+  }
+
+  return (
+    <div className="mask-editor-block">
+      <div className="mask-editor-toolbar row">
+        <label className="mask-editor-brush">
+          Brush
+          <input
+            type="range"
+            min="4"
+            max="160"
+            step="1"
+            value={brushSize}
+            onChange={(event) => setBrushSize(Number(event.target.value))}
+            disabled={disabled}
+          />
+          <span>{brushSize}px</span>
+        </label>
+        <button type="button" className={`secondary mask-toggle ${eraseMode ? "active" : ""}`} onClick={() => setEraseMode((prev) => !prev)} disabled={disabled}>
+          {eraseMode ? "Erase" : "Paint mask"}
+        </button>
+        <button type="button" className="secondary" onClick={clearMask} disabled={disabled}>
+          Clear mask
+        </button>
+        {value ? <span className="badge">Mask ready</span> : <span className="badge">Mask empty</span>}
+      </div>
+      <div className="mask-editor-stage" style={{ aspectRatio: imageAspect || 1 }}>
+        <img ref={imgRef} src={imageUrl} alt="Init preview" draggable="false" />
+        <canvas
+          ref={canvasRef}
+          className="mask-editor-canvas"
+          onPointerDown={startDraw}
+          onPointerMove={moveDraw}
+          onPointerUp={stopDraw}
+          onPointerLeave={stopDraw}
+          onPointerCancel={stopDraw}
+        />
+      </div>
+      <div className="muted">Paint with white to regenerate those areas. Black regions stay preserved.</div>
+    </div>
+  );
+}
+
+async function dataUrlToFile(dataUrl, fileName) {
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  return new File([blob], fileName, { type: blob.type || "image/png" });
+}
 
 export default function GeneratePage() {
   const [argSpecs, setArgSpecs] = useState([]);
@@ -24,6 +263,14 @@ export default function GeneratePage() {
   const [error, setError] = useState("");
   const [metrics, setMetrics] = useState([]);
   const [textConditioningAvailable, setTextConditioningAvailable] = useState(true);
+  const [initFile, setInitFile] = useState(null);
+  const [initPreview, setInitPreview] = useState("");
+  const [controlFile, setControlFile] = useState(null);
+  const [controlPreview, setControlPreview] = useState("");
+  const [maskDataUrl, setMaskDataUrl] = useState("");
+  const [isUploadingAssets, setIsUploadingAssets] = useState(false);
+  const initBlobUrlRef = useRef("");
+  const controlBlobUrlRef = useRef("");
   const wasGeneratingRef = useRef(false);
   const promptRef = useRef(null);
   const negativeRef = useRef(null);
@@ -35,10 +282,7 @@ export default function GeneratePage() {
 
   useEffect(() => {
     const load = async () => {
-      const [argsData, ckptData] = await Promise.all([
-        api.getSampleArgs(),
-        api.listCheckpoints(),
-      ]);
+      const [argsData, ckptData] = await Promise.all([api.getSampleArgs(), api.listCheckpoints()]);
       setArgSpecs(argsData.items || []);
       setCheckpoints(ckptData.items || []);
 
@@ -156,8 +400,33 @@ export default function GeneratePage() {
     return () => ws.close();
   }, [runId]);
 
+  useEffect(() => {
+    return () => {
+      if (initBlobUrlRef.current) URL.revokeObjectURL(initBlobUrlRef.current);
+      if (controlBlobUrlRef.current) URL.revokeObjectURL(controlBlobUrlRef.current);
+    };
+  }, []);
+
   const handleChange = (name, value) => {
     setArgs((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const setLocalPreview = (kind, file) => {
+    const nextUrl = file ? URL.createObjectURL(file) : "";
+    if (kind === "init") {
+      if (initBlobUrlRef.current) URL.revokeObjectURL(initBlobUrlRef.current);
+      initBlobUrlRef.current = nextUrl;
+      setInitFile(file || null);
+      setInitPreview(nextUrl);
+      setArgs((prev) => ({ ...prev, "init-image": file ? "" : prev["init-image"] || "" }));
+      if (!file) setMaskDataUrl("");
+      return;
+    }
+    if (controlBlobUrlRef.current) URL.revokeObjectURL(controlBlobUrlRef.current);
+    controlBlobUrlRef.current = nextUrl;
+    setControlFile(file || null);
+    setControlPreview(nextUrl);
+    setArgs((prev) => ({ ...prev, "control-image": file ? "" : prev["control-image"] || "" }));
   };
 
   const resizePromptInput = (node) => {
@@ -166,14 +435,50 @@ export default function GeneratePage() {
     node.style.height = `${Math.min(node.scrollHeight, 96)}px`;
   };
 
+  const currentTask = args.task || "txt2img";
+  const needsInit = currentTask === "img2img" || currentTask === "inpaint";
+  const needsMask = currentTask === "inpaint";
+  const needsControl = currentTask === "control";
+
+  const uploadPendingAssets = async (payload) => {
+    const next = { ...payload };
+    if (needsInit && initFile) {
+      const uploaded = await api.uploadImage(initFile, currentTask === "inpaint" ? "inpaint-init" : "init");
+      next["init-image"] = uploaded.path;
+      setArgs((prev) => ({ ...prev, "init-image": uploaded.path }));
+    }
+    if (needsControl && controlFile) {
+      const uploaded = await api.uploadImage(controlFile, "control");
+      next["control-image"] = uploaded.path;
+      setArgs((prev) => ({ ...prev, "control-image": uploaded.path }));
+    }
+    if (needsMask && maskDataUrl) {
+      const maskFile = await dataUrlToFile(maskDataUrl, "inpaint-mask.png");
+      const uploaded = await api.uploadImage(maskFile, "inpaint-mask");
+      next.mask = uploaded.path;
+      setArgs((prev) => ({ ...prev, mask: uploaded.path }));
+    }
+    return next;
+  };
+
   const handleStart = async () => {
     setError("");
+    setIsUploadingAssets(true);
     try {
-      const payload = { ...args };
+      let payload = { ...args };
       if (!textConditioningAvailable) {
         payload.prompt = "";
         payload.neg_prompt = "";
-        payload.neg = "";
+      }
+      payload = await uploadPendingAssets(payload);
+      if (needsInit && !payload["init-image"]) {
+        throw new Error(currentTask === "inpaint" ? "Для inpaint нужно загрузить init image." : "Для img2img нужно загрузить init image.");
+      }
+      if (needsMask && !payload.mask) {
+        throw new Error("Для inpaint нужно нарисовать или указать mask.");
+      }
+      if (needsControl && !payload["control-image"]) {
+        throw new Error("Для control generation нужно загрузить control image.");
       }
       const resp = await api.startSample(payload);
       setRunId(resp.run_id);
@@ -181,6 +486,8 @@ export default function GeneratePage() {
       setMetrics([]);
     } catch (err) {
       setError(err.message);
+    } finally {
+      setIsUploadingAssets(false);
     }
   };
 
@@ -207,7 +514,7 @@ export default function GeneratePage() {
       : "";
 
   const negativeSpec = useMemo(
-    () => argSpecs.find((spec) => spec.name === "neg_prompt") || argSpecs.find((spec) => spec.name === "neg"),
+    () => argSpecs.find((spec) => spec.name === "neg_prompt"),
     [argSpecs]
   );
   const quickSpecs = useMemo(
@@ -220,7 +527,8 @@ export default function GeneratePage() {
         (spec) =>
           !quickFields.includes(spec.name) &&
           !promptFields.includes(spec.name) &&
-          spec.name !== "out"
+          spec.name !== "out" &&
+          !hiddenPathFields.has(spec.name)
       ),
     [argSpecs]
   );
@@ -234,7 +542,7 @@ export default function GeneratePage() {
     wasGeneratingRef.current = false;
     refreshSamples().catch((err) => console.warn("failed to refresh samples", err));
     const timer = setTimeout(() => {
-      setArgs((prev) => ({ ...prev, prompt: "", neg_prompt: "", neg: "" }));
+      setArgs((prev) => ({ ...prev, prompt: "", neg_prompt: "" }));
     }, 900);
     return () => clearTimeout(timer);
   }, [isGenerating]);
@@ -251,6 +559,9 @@ export default function GeneratePage() {
     resizePromptInput(promptRef.current);
     resizePromptInput(negativeRef.current);
   }, [args.prompt, args[negativeSpec?.name || "neg_prompt"]]);
+
+  const initPreviewUrl = absolutePreviewUrl(initPreview || args["init-image"]);
+  const controlPreviewUrl = absolutePreviewUrl(controlPreview || args["control-image"]);
 
   return (
     <div className="page generate-page">
@@ -273,6 +584,59 @@ export default function GeneratePage() {
                 />
               ))}
             </div>
+
+            <div className="task-hint muted">{TASK_HELP[currentTask] || ""}</div>
+
+            {(needsInit || needsControl) && (
+              <div className="settings-section task-assets-grid">
+                {needsInit && (
+                  <TaskAssetCard
+                    title="Init image"
+                    description="Source image used for img2img / inpaint."
+                    previewUrl={initPreviewUrl}
+                    fileName={initFile?.name || ""}
+                    pathValue={args["init-image"] || ""}
+                    onPick={(file) => setLocalPreview("init", file)}
+                    onClear={() => {
+                      if (initBlobUrlRef.current) URL.revokeObjectURL(initBlobUrlRef.current);
+                      initBlobUrlRef.current = "";
+                      setInitFile(null);
+                      setInitPreview("");
+                      setMaskDataUrl("");
+                      setArgs((prev) => ({ ...prev, "init-image": "", mask: "" }));
+                    }}
+                    disabled={status.active || isUploadingAssets}
+                  >
+                    {needsMask ? (
+                      <MaskEditor
+                        imageUrl={initPreviewUrl}
+                        value={maskDataUrl}
+                        onChange={setMaskDataUrl}
+                        disabled={status.active || isUploadingAssets}
+                      />
+                    ) : null}
+                  </TaskAssetCard>
+                )}
+                {needsControl && (
+                  <TaskAssetCard
+                    title="Control image"
+                    description="Conditioning image for control generation."
+                    previewUrl={controlPreviewUrl}
+                    fileName={controlFile?.name || ""}
+                    pathValue={args["control-image"] || ""}
+                    onPick={(file) => setLocalPreview("control", file)}
+                    onClear={() => {
+                      if (controlBlobUrlRef.current) URL.revokeObjectURL(controlBlobUrlRef.current);
+                      controlBlobUrlRef.current = "";
+                      setControlFile(null);
+                      setControlPreview("");
+                      setArgs((prev) => ({ ...prev, "control-image": "" }));
+                    }}
+                    disabled={status.active || isUploadingAssets}
+                  />
+                )}
+              </div>
+            )}
 
             <div className="settings-section">
               <div className="flat-grid">
@@ -321,7 +685,7 @@ export default function GeneratePage() {
                     resizePromptInput(event.target);
                   }}
                   onKeyDown={handlePromptKeyDown}
-                  disabled={!textConditioningAvailable || Boolean(blockingRunType)}
+                  disabled={!textConditioningAvailable || Boolean(blockingRunType) || isUploadingAssets}
                   placeholder="Prompt"
                   rows={1}
                 />
@@ -335,7 +699,7 @@ export default function GeneratePage() {
                     resizePromptInput(event.target);
                   }}
                   onKeyDown={handlePromptKeyDown}
-                  disabled={!textConditioningAvailable || Boolean(blockingRunType)}
+                  disabled={!textConditioningAvailable || Boolean(blockingRunType) || isUploadingAssets}
                   placeholder="Negative prompt"
                   rows={1}
                 />
@@ -347,9 +711,9 @@ export default function GeneratePage() {
               type="button"
               className={`generate-action ${isGenerating ? "stop" : ""}`}
               onClick={isGenerating ? handleStop : handleStart}
-              disabled={status.active && !isGenerating}
+              disabled={(status.active && !isGenerating) || isUploadingAssets}
               aria-label={isGenerating ? "Stop generation" : "Start generation"}
-              title={isGenerating ? "Stop" : "Start"}
+              title={isGenerating ? "Stop" : isUploadingAssets ? "Uploading assets" : "Start"}
             >
               {isGenerating ? (
                 <svg viewBox="0 -960 960 960" aria-hidden="true">

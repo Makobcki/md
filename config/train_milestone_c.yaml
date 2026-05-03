@@ -1,0 +1,111 @@
+architecture: mmdit_rf
+objective: rectified_flow
+prediction_type: flow_velocity
+mode: latent
+image_size: 512
+latent_channels: 4
+latent_downsample_factor: 8
+latent_patch_size: 2
+text_preset: clip_l_t5_base
+
+data_root: ./data/dataset/pixso_512
+image_dir: images
+meta_dir: ""
+tags_dir: ""
+out_dir: ./runs/milestone_c
+
+dataset_limit: 0
+
+model:
+  hidden_dim: 1024
+  depth: 24
+  num_heads: 16
+  mlp_ratio: 4.0
+  qk_norm: true
+  rms_norm: true
+  swiglu: true
+  adaln_zero: true
+  pos_embed: rope_2d
+  double_stream_blocks: 16
+  single_stream_blocks: 8
+  dropout: 0.0
+  attn_dropout: 0.0
+  gradient_checkpointing: true
+
+conditioning:
+  cfg_drop_prob: 0.15
+  token_drop_prob: 0.0
+  caption_drop_prob: 0.0
+  tag_drop_prob: 0.0
+
+training:
+  batch_size: 2
+  grad_accum_steps: 32
+  max_steps: 300000
+  lr: 1.0e-4
+  weight_decay: 0.01
+  optimizer: adamw
+  warmup_steps: 3000
+  log_every: 50
+  save_every: 2000
+  val_every: 500
+  val_batches: 8
+  amp: true
+  amp_dtype: bf16
+  tf32: true
+  compile: false
+
+performance:
+  flash_sdp: true
+  mem_efficient_sdp: true
+  math_sdp: false
+
+inpaint:
+  mask_min_area: 0.05
+  mask_max_area: 0.60
+  mask_modes:
+    rectangle: 0.5
+    brush: 0.3
+    random_blocks: 0.2
+  loss_mask_weight: 1.0
+  loss_unmask_weight: 0.1
+
+flow:
+  timestep_sampling: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  loss_weighting: none
+  train_t_min: 0.0
+  train_t_max: 1.0
+
+sampling:
+  sampler: flow_heun
+  steps: 28
+  cfg_scale: 4.5
+  shift: 3.0
+
+eval_every: 500
+eval_steps: 28
+eval_cfg: 4.5
+eval_n: 1
+
+vae:
+  pretrained: ./vae_sd_mse
+  freeze: true
+  scaling_factor: 0.18215
+
+cache:
+  latent_cache: true
+  text_cache: true
+  auto_prepare: true
+  rebuild_if_stale: false
+  sharded: true
+  dtype: bf16
+  strict: true
+  validate_on_start: true
+
+dataset_tasks:
+  txt2img: 1.0
+  img2img: 0.0
+  inpaint: 0.0
+  control: 0.0

@@ -2,10 +2,14 @@
 .idea/
 webui/frontend/node_modules/
 webui/frontend/dist/
-data/
+data/dataset/
+data/*.py
+data_loader/raw/
+samples/
 runs/
 webui_runs/
 vae_sd_mse/
+md-dev/
 *.egg-info/
 .codex
 report.md

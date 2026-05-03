@@ -1,205 +1,190 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, Tuple
 
 import torch
 
-from diffusion.config import TrainConfig
-from diffusion.diffusion import Diffusion, DiffusionConfig
-from diffusion.model import UNet, UNetConfig
-from text_enc import BPETokenizer
-from text_enc.build import build_tokenizer_from_dict
+from config.train import TrainConfig
 from diffusion.utils import EMA, load_ckpt
 from diffusion.vae import VAEWrapper
+from model.mmdit import MMDiTConfig, MMDiTFlowModel
+from model.text.pretrained import FrozenTextEncoderBundle
+from model.text.conditioning import TextConditioning
+from model.text.cache import TextCache
+from train.checkpoint_mmdit import validate_mmdit_checkpoint_compatibility
+
+
+class FakeVAE(torch.nn.Module):
+    """Small deterministic VAE replacement for smoke tests and fake sampling.
+
+    ``encode`` maps image tensors to the configured latent shape by adaptive
+    average pooling and channel pad/truncate. ``decode`` maps latents to a
+    visible RGB tensor in [0, 1]. It is not a training component.
+    """
+
+    def __init__(self, *, latent_channels: int, latent_h: int, latent_w: int) -> None:
+        super().__init__()
+        self.latent_channels = int(latent_channels)
+        self.latent_h = int(latent_h)
+        self.latent_w = int(latent_w)
+
+    @torch.no_grad()
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        z = torch.nn.functional.adaptive_avg_pool2d(x, (self.latent_h, self.latent_w))
+        if z.shape[1] > self.latent_channels:
+            z = z[:, : self.latent_channels]
+        elif z.shape[1] < self.latent_channels:
+            pad = torch.zeros(
+                z.shape[0],
+                self.latent_channels - z.shape[1],
+                z.shape[2],
+                z.shape[3],
+                device=z.device,
+                dtype=z.dtype,
+            )
+            z = torch.cat([z, pad], dim=1)
+        return z
+
+    @torch.no_grad()
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        x = z[:, :3] if z.shape[1] >= 3 else z.repeat(1, 3, 1, 1)[:, :3]
+        return torch.sigmoid(x.float())
 
 
 @dataclass(frozen=True)
 class Built:
     ckpt: Dict[str, Any]
     cfg: Dict[str, Any]
-    use_text_conditioning: bool
-    self_conditioning: bool
-    diffusion: Diffusion
-    model: UNet
-    tokenizer: Optional[BPETokenizer]
+    model: torch.nn.Module
+    text_encoder: FrozenTextEncoderBundle
+    empty_text: TextConditioning | None
+    empty_text_source: str
     mode: str
     image_channels: int
     h: int
     w: int
-    latent_h: Optional[int]
-    latent_w: Optional[int]
-    vae: Optional[VAEWrapper]
+    latent_h: int
+    latent_w: int
+    vae: torch.nn.Module | VAEWrapper | None
+    checkpoint_step: int
+    checkpoint_metadata: dict[str, Any]
+
+
+def _metadata_from_ckpt(ck: Dict[str, Any]) -> dict[str, Any]:
+    meta = ck.get("metadata")
+    return meta if isinstance(meta, dict) else {}
 
 
 def load_checkpoint_and_cfg(ckpt_path: str, device: torch.device) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     ck = load_ckpt(ckpt_path, device)
     cfg = TrainConfig.from_dict(ck["cfg"]).to_dict()
+    validate_mmdit_checkpoint_compatibility(ck, cfg)
     return ck, cfg
 
 
-def resolve_flags(ck: Dict[str, Any], cfg: Dict[str, Any]) -> Tuple[bool, bool]:
-    use_text_conditioning = bool(cfg.get("use_text_conditioning", True))
-    meta_flag = ck.get("meta", {}).get("use_text_conditioning")
-    if isinstance(meta_flag, bool):
-        use_text_conditioning = meta_flag
-
-    self_conditioning = bool(cfg.get("self_conditioning", False))
-    meta_self = ck.get("meta", {}).get("self_conditioning")
-    if isinstance(meta_self, bool):
-        self_conditioning = meta_self
-
-    return use_text_conditioning, self_conditioning
-
-
-def build_diffusion(cfg: Dict[str, Any], device: torch.device) -> Diffusion:
-    return Diffusion(
-        DiffusionConfig(
-            timesteps=int(cfg.get("timesteps", 1000)),
-            beta_start=float(cfg.get("beta_start", 1e-4)),
-            beta_end=float(cfg.get("beta_end", 2e-2)),
-            prediction_type=str(cfg.get("prediction_type", "v")),
-            noise_schedule=str(cfg.get("noise_schedule", "linear")),
-            cosine_s=float(cfg.get("cosine_s", 0.008)),
-        ),
-        device=device,
-    )
-
-
-def build_tokenizer(cfg: Dict[str, Any]) -> BPETokenizer:
-    tokenizer, _text_cfg = build_tokenizer_from_dict(cfg)
-    return tokenizer
-
-
-def build_unet_config(
+def build_vae(
     cfg: Dict[str, Any],
-    image_channels: int,
-    tokenizer: Optional[BPETokenizer],
-    use_text_conditioning: bool,
-    self_conditioning: bool,
-) -> UNetConfig:
-    return UNetConfig(
-        image_channels=image_channels,
-        base_channels=int(cfg.get("base_channels", 64)),
-        channel_mults=tuple(cfg.get("channel_mults", [1, 2, 3, 4])),
-        num_res_blocks=int(cfg.get("num_res_blocks", 2)),
-        dropout=float(cfg.get("dropout", 0.1)),
-        attn_resolutions=tuple(cfg.get("attn_resolutions", [32, 16])),
-        cross_attn_resolutions=tuple(cfg.get("cross_attn_resolutions", [])),
-        attn_heads=int(cfg.get("attn_heads", 4)),
-        attn_head_dim=int(cfg.get("attn_head_dim", 32)),
-        self_attn_type=str(cfg.get("self_attn_type", "global")),
-        self_attn_window_size=int(cfg.get("self_attn_window_size", 8)),
-        cross_attn_dim=int(cfg.get("cross_attn_dim", 0)),
-        mid_blocks=int(cfg.get("mid_blocks", 1)),
-        vocab_size=len(tokenizer.vocab) if tokenizer is not None else 0,
-        text_dim=int(cfg.get("text_dim", 256)),
-        text_layers=int(cfg.get("text_layers", 4)),
-        text_heads=int(cfg.get("text_heads", 4)),
-        text_max_len=int(cfg.get("text_max_len", 64)),
-        text_spatial_conditioning=bool(cfg.get("text_spatial_conditioning", False)),
-        use_text_conditioning=use_text_conditioning,
-        use_scale_shift_norm=bool(cfg.get("use_scale_shift_norm", False)),
-        self_conditioning=self_conditioning,
-        zero_init_residual=bool(cfg.get("zero_init_residual", False)),
-    )
-
-
-def build_model(
-    ck: Dict[str, Any],
-    unet_cfg: UNetConfig,
     device: torch.device,
-    channels_last: bool,
-) -> UNet:
-    if channels_last:
-        model = UNet(unet_cfg).to(device, memory_format=torch.channels_last)
-    else:
-        model = UNet(unet_cfg).to(device)
+    *,
+    latent_h: int,
+    latent_w: int,
+    latent_only: bool = False,
+    fake_vae: bool = False,
+) -> torch.nn.Module | VAEWrapper | None:
+    vae_section = cfg.get("vae", {}) if isinstance(cfg.get("vae", {}), dict) else {}
+    backend = str(vae_section.get("backend", cfg.get("vae_backend", ""))).lower()
+    if latent_only:
+        return None
+    if fake_vae or backend == "fake" or str(cfg.get("vae_pretrained", vae_section.get("pretrained", ""))).lower() == "fake":
+        return FakeVAE(
+            latent_channels=int(cfg.get("latent_channels", 4)),
+            latent_h=int(latent_h),
+            latent_w=int(latent_w),
+        ).to(device)
 
-    model.load_state_dict(ck["model"], strict=True)
-
-    if "ema" in ck:
-        ema = EMA(model)
-        ema.shadow = ck["ema"]
-        ema.copy_to(model)
-
-    model.eval()
-    return model
-
-
-def build_vae_if_needed(cfg: Dict[str, Any], device: torch.device) -> VAEWrapper:
-    vae_pretrained = str(cfg.get("vae_pretrained", ""))
+    vae_pretrained = str(cfg.get("vae_pretrained", vae_section.get("pretrained", "")))
     if not vae_pretrained:
-        raise RuntimeError("latent mode requires vae_pretrained in checkpoint config.")
+        raise RuntimeError("MMDiT RF image sampling requires vae_pretrained, --fake-vae, or --latent-only.")
 
     amp_dtype = str(cfg.get("amp_dtype", "")).lower()
     dtype = torch.bfloat16 if amp_dtype == "bf16" else torch.float16
-
     return VAEWrapper(
         pretrained=vae_pretrained,
         freeze=True,
-        scaling_factor=float(cfg.get("vae_scaling_factor", 0.18215)),
+        scaling_factor=float(cfg.get("vae_scaling_factor", vae_section.get("scaling_factor", 0.18215))),
         device=device,
         dtype=dtype,
     )
 
 
-def resolve_shapes(cfg: Dict[str, Any], mode: str) -> Tuple[int, int, Optional[int], Optional[int]]:
+def resolve_shapes(cfg: Dict[str, Any]) -> Tuple[int, int, int, int]:
     h = int(cfg.get("image_size", 512))
     w = int(cfg.get("image_size", 512))
-
-    if mode != "latent":
-        return h, w, None, None
-
     downsample = int(cfg.get("latent_downsample_factor", 8))
     if h % downsample != 0 or w % downsample != 0:
         raise RuntimeError("image_size must be divisible by latent_downsample_factor.")
     return h, w, h // downsample, w // downsample
 
 
-def build_all(ckpt_path: str, device: torch.device) -> Built:
+def _load_empty_text_from_cache(cfg: Dict[str, Any], device: torch.device, dtype: torch.dtype) -> tuple[TextConditioning | None, str]:
+    root = cfg.get("data_root")
+    cache_dir = cfg.get("text_cache_dir", ".cache/text")
+    if not root or not bool(cfg.get("text_cache", True)):
+        return None, "encoder"
+    cache = TextCache(Path(str(root)) / str(cache_dir), shard_cache_size=int(cfg.get("text_shard_cache_size", 2)))
+    if not cache.empty_prompt_path.exists():
+        return None, "encoder"
+    empty = cache.load_empty().to(device=device, dtype=dtype)
+    return empty, "text_cache/empty_prompt"
+
+
+def build_all(
+    ckpt_path: str,
+    device: torch.device,
+    *,
+    latent_only: bool = False,
+    fake_vae: bool = False,
+    use_ema: bool = True,
+) -> Built:
     ck, cfg = load_checkpoint_and_cfg(ckpt_path, device)
-    use_text_conditioning, self_conditioning = resolve_flags(ck, cfg)
+    architecture = str(ck.get("architecture", cfg.get("architecture", "")))
+    if architecture != "mmdit_rf":
+        raise RuntimeError("Only architecture=mmdit_rf checkpoints are supported.")
+    if str(cfg.get("mode", "latent")) != "latent":
+        raise RuntimeError("MMDiT RF sampling requires latent mode.")
 
-    diffusion = build_diffusion(cfg, device)
+    model = MMDiTFlowModel(MMDiTConfig.from_dict(cfg)).to(device)
+    model.load_state_dict(ck["model"], strict=True)
+    if use_ema and "ema" in ck and isinstance(ck["ema"], dict):
+        ema = EMA(model)
+        ema.shadow = {k: v.to(device) for k, v in ck["ema"].items()}
+        ema.copy_to(model)
+    model.eval()
 
-    tokenizer: Optional[BPETokenizer] = None
-    if use_text_conditioning:
-        tokenizer = build_tokenizer(cfg)
-
-    mode = str(cfg.get("mode", "pixel"))
-    image_channels = 3 if mode == "pixel" else int(cfg.get("latent_channels", 4))
-
-    unet_cfg = build_unet_config(
-        cfg=cfg,
-        image_channels=image_channels,
-        tokenizer=tokenizer,
-        use_text_conditioning=use_text_conditioning,
-        self_conditioning=self_conditioning,
+    h, w, latent_h, latent_w = resolve_shapes(cfg)
+    text_dtype = torch.bfloat16 if str(cfg.get("amp_dtype", "bf16")) == "bf16" else torch.float16
+    text_encoder = FrozenTextEncoderBundle.from_config(
+        cfg,
+        device=device,
+        dtype=text_dtype,
     )
-
-    channels_last = bool(cfg.get("channels_last", True))
-    model = build_model(ck, unet_cfg, device, channels_last=channels_last)
-
-    h, w, latent_h, latent_w = resolve_shapes(cfg, mode)
-
-    vae: Optional[VAEWrapper] = None
-    if mode == "latent":
-        vae = build_vae_if_needed(cfg, device)
-
+    empty_text, empty_text_source = _load_empty_text_from_cache(cfg, device, text_dtype)
     return Built(
         ckpt=ck,
         cfg=cfg,
-        use_text_conditioning=use_text_conditioning,
-        self_conditioning=self_conditioning,
-        diffusion=diffusion,
         model=model,
-        tokenizer=tokenizer,
-        mode=mode,
-        image_channels=image_channels,
+        text_encoder=text_encoder,
+        empty_text=empty_text,
+        empty_text_source=empty_text_source,
+        mode="latent",
+        image_channels=int(cfg.get("latent_channels", 4)),
         h=h,
         w=w,
         latent_h=latent_h,
         latent_w=latent_w,
-        vae=vae,
+        vae=build_vae(cfg, device, latent_h=latent_h, latent_w=latent_w, latent_only=latent_only, fake_vae=fake_vae),
+        checkpoint_step=int(ck.get("step", _metadata_from_ckpt(ck).get("step", 0)) or 0),
+        checkpoint_metadata=_metadata_from_ckpt(ck),
     )

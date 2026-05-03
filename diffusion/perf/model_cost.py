@@ -1,136 +1,189 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Iterable
-
-import torch
-
-from model.unet.unet import UNet, UNetConfig
+from typing import Any
 
 
 @dataclass(frozen=True)
-class AttentionCostProfile:
-    self_blocks: int
-    cross_blocks: int
-    self_estimated_flops: int
-    cross_estimated_flops: int
-    max_self_score_memory_bytes: int
-    max_cross_score_memory_bytes: int
+class ModelCostProfile:
+    """Lightweight static cost profile for the MMDiT rectified-flow model.
+
+    The profile intentionally uses config-level arithmetic only.  It is meant for
+    dry-run diagnostics and tests, not for exact profiler-grade FLOP accounting.
+    """
+
+    hidden_dim: int
+    num_heads: int
+    head_dim: int
+    depth: int
+    double_stream_blocks: int
+    single_stream_blocks: int
+    attention_sites: int
+    double_stream_attention_sites: int
+    single_stream_attention_sites: int
+    latent_channels: int
+    latent_patch_size: int
+    latent_height: int
+    latent_width: int
+    image_tokens: int
+    text_tokens: int
+    total_tokens: int
+    estimated_attention_score_elements: int
+    estimated_attention_flops: int
+    estimated_mlp_flops: int
+    estimated_total_flops: int
+
+    def to_dict(self) -> dict[str, int]:
+        return asdict(self)
+
+    def __getitem__(self, key: str) -> int:
+        aliases = {
+            "num_attention_sites": "attention_sites",
+            "attention_blocks": "attention_sites",
+            "num_attention_blocks": "attention_sites",
+            "total_attention_sites": "attention_sites",
+        }
+        return self.to_dict()[aliases.get(key, key)]
+
+    @property
+    def num_attention_sites(self) -> int:
+        return self.attention_sites
+
+    @property
+    def attention_blocks(self) -> int:
+        return self.attention_sites
+
+    @property
+    def num_attention_blocks(self) -> int:
+        return self.attention_sites
+
+    @property
+    def total_attention_sites(self) -> int:
+        return self.attention_sites
 
 
-def _count_params(module: torch.nn.Module, *, trainable_only: bool = False) -> int:
-    return sum(p.numel() for p in module.parameters() if (p.requires_grad or not trainable_only))
+def _read_config_value(cfg: Any, *names: str, default: Any = None) -> Any:
+    if isinstance(cfg, dict):
+        model = cfg.get("model", {}) if isinstance(cfg.get("model", {}), dict) else {}
+        for name in names:
+            if name in cfg:
+                return cfg[name]
+            if name in model:
+                return model[name]
+        return default
+    for name in names:
+        if hasattr(cfg, name):
+            return getattr(cfg, name)
+    return default
 
 
-def _contains(resolutions: Iterable[int], value: int) -> bool:
-    return int(value) in {int(r) for r in resolutions}
-
-
-def _self_attention_enabled(placement: str, stage: str) -> bool:
-    if placement == "all":
-        return True
-    if placement == "mid_down":
-        return stage in {"down", "mid"}
-    if placement == "mid_only":
-        return stage == "mid"
-    return False
-
-
-def _attention_flops(batch: int, heads: int, query_tokens: int, key_tokens: int, head_dim: int) -> int:
-    # QK^T and AV; multiply-add counted as two FLOPs.
-    return int(4 * batch * heads * query_tokens * key_tokens * head_dim)
-
-
-def _score_memory_bytes(batch: int, heads: int, query_tokens: int, key_tokens: int, dtype_bytes: int) -> int:
-    return int(batch * heads * query_tokens * key_tokens * dtype_bytes)
-
-
-def _iter_unet_attention_sites(cfg: UNetConfig, latent_side: int):
-    resolutions = [max(int(latent_side) // (2**level), 1) for level in range(len(cfg.channel_mults))]
-    for res in resolutions:
-        for _ in range(int(cfg.num_res_blocks)):
-            yield "down", res
-    mid_res = resolutions[-1]
-    yield "mid", mid_res
-    for _ in range(max(int(cfg.mid_blocks) - 1, 0)):
-        yield "mid", mid_res
-    for res in reversed(resolutions):
-        for _ in range(int(cfg.num_res_blocks)):
-            yield "up", res
+def _parse_latent_hw(
+    *,
+    latent_hw: tuple[int, int] | None,
+    image_size: int | tuple[int, int] | None,
+    latent_downsample_factor: int,
+) -> tuple[int, int]:
+    if latent_hw is not None:
+        h, w = latent_hw
+        return int(h), int(w)
+    if image_size is None:
+        return 64, 64
+    if isinstance(image_size, int):
+        h = w = image_size
+    else:
+        h, w = image_size
+    return int(h) // int(latent_downsample_factor), int(w) // int(latent_downsample_factor)
 
 
 def build_model_cost_profile(
+    cfg: Any,
     *,
-    model: UNet,
-    cfg: UNetConfig,
-    image_size: int,
-    mode: str,
-    latent_downsample_factor: int,
-    batch_size: int,
-    text_tokens: int,
-    dtype: torch.dtype,
-) -> dict:
-    side = int(image_size)
-    if str(mode) == "latent":
-        side = side // int(latent_downsample_factor)
-    dtype_bytes = 2 if dtype in {torch.float16, torch.bfloat16} else 4
+    latent_hw: tuple[int, int] | None = None,
+    image_size: int | tuple[int, int] | None = None,
+    text_tokens: int | None = None,
+    latent_downsample_factor: int = 8,
+) -> ModelCostProfile:
+    """Build a deterministic static MMDiT cost profile from a config/model.
 
-    self_blocks = 0
-    cross_blocks = 0
-    self_flops = 0
-    cross_flops = 0
-    max_self_score_memory = 0
-    max_cross_score_memory = 0
+    Args:
+        cfg: ``MMDiTConfig``, ``TrainConfig``/resolved dict, or an object with
+            compatible attributes.  If a model instance is passed, its ``.cfg``
+            attribute is used when present.
+        latent_hw: Latent spatial size ``(H, W)``.  Defaults to ``64x64``.
+        image_size: Pixel image size used to derive latent size when
+            ``latent_hw`` is not supplied.
+        text_tokens: Number of text tokens.  If omitted, it is inferred from the
+            text config when available and otherwise defaults to ``0``.
+        latent_downsample_factor: Pixel-to-latent downsample factor used with
+            ``image_size``.
+    """
 
-    for stage, res in _iter_unet_attention_sites(cfg, side):
-        query_tokens = int(res) * int(res)
-        if _contains(cfg.attn_resolutions, res) and _self_attention_enabled(cfg.attention_placement, stage):
-            self_blocks += 1
-            block_flops = _attention_flops(
-                int(batch_size),
-                int(cfg.attn_heads),
-                query_tokens,
-                query_tokens,
-                int(cfg.attn_head_dim),
-            )
-            self_flops += block_flops
-            max_self_score_memory = max(
-                max_self_score_memory,
-                _score_memory_bytes(int(batch_size), int(cfg.attn_heads), query_tokens, query_tokens, dtype_bytes),
-            )
+    cfg_obj = getattr(cfg, "cfg", cfg)
+    hidden_dim = int(_read_config_value(cfg_obj, "hidden_dim", default=1024))
+    num_heads = int(_read_config_value(cfg_obj, "num_heads", default=16))
+    depth = int(_read_config_value(cfg_obj, "depth", default=24))
+    double_blocks = int(_read_config_value(cfg_obj, "double_stream_blocks", default=16))
+    single_blocks = int(_read_config_value(cfg_obj, "single_stream_blocks", default=8))
+    latent_channels = int(_read_config_value(cfg_obj, "latent_channels", default=4))
+    patch_size = int(_read_config_value(cfg_obj, "patch_size", "latent_patch_size", default=2))
+    mlp_ratio = float(_read_config_value(cfg_obj, "mlp_ratio", default=4.0))
 
-        cross_resolutions = tuple(cfg.cross_attn_resolutions) or tuple(cfg.attn_resolutions)
-        if bool(cfg.use_text_conditioning) and _contains(cross_resolutions, res):
-            cross_blocks += 1
-            key_tokens = int(text_tokens)
-            cross_flops += _attention_flops(
-                int(batch_size),
-                int(cfg.attn_heads),
-                query_tokens,
-                key_tokens,
-                int(cfg.attn_head_dim),
-            )
-            max_cross_score_memory = max(
-                max_cross_score_memory,
-                _score_memory_bytes(int(batch_size), int(cfg.attn_heads), query_tokens, key_tokens, dtype_bytes),
-            )
+    if text_tokens is None:
+        text_cfg = cfg_obj.get("text", {}) if isinstance(cfg_obj, dict) else getattr(cfg_obj, "text", {})
+        if isinstance(text_cfg, dict):
+            max_lengths = [int(e.get("max_length", 0)) for e in text_cfg.get("encoders", []) if isinstance(e, dict)]
+            text_tokens = sum(max_lengths) if max_lengths else int(text_cfg.get("max_length", 0))
+        else:
+            text_tokens = int(getattr(text_cfg, "max_length", 0)) if text_cfg is not None else 0
+    text_tokens = int(text_tokens)
 
-    attention = AttentionCostProfile(
-        self_blocks=self_blocks,
-        cross_blocks=cross_blocks,
-        self_estimated_flops=self_flops,
-        cross_estimated_flops=cross_flops,
-        max_self_score_memory_bytes=max_self_score_memory,
-        max_cross_score_memory_bytes=max_cross_score_memory,
+    latent_h, latent_w = _parse_latent_hw(
+        latent_hw=latent_hw,
+        image_size=image_size,
+        latent_downsample_factor=latent_downsample_factor,
     )
-    text_params = _count_params(model.text_enc) if model.text_enc is not None else 0
-    return {
-        "total_params": int(_count_params(model)),
-        "trainable_params": int(_count_params(model, trainable_only=True)),
-        "unet_params": int(_count_params(model) - text_params),
-        "text_encoder_params": int(text_params),
-        "latent_or_image_side": int(side),
-        "batch_size": int(batch_size),
-        "dtype": str(dtype).replace("torch.", ""),
-        "attention": asdict(attention),
-    }
+    if patch_size <= 0:
+        raise ValueError("latent_patch_size/patch_size must be positive.")
+    if latent_h % patch_size != 0 or latent_w % patch_size != 0:
+        raise ValueError(
+            f"latent size {(latent_h, latent_w)} must be divisible by patch size {patch_size}."
+        )
+    if num_heads <= 0 or hidden_dim % num_heads != 0:
+        raise ValueError("hidden_dim must be divisible by num_heads.")
+
+    image_tokens = (latent_h // patch_size) * (latent_w // patch_size)
+    total_tokens = image_tokens + text_tokens
+    attention_sites = double_blocks + single_blocks
+    head_dim = hidden_dim // num_heads
+
+    # Approximate per-sample attention/MLP cost. This is intentionally coarse but
+    # stable and useful for relative comparisons in dry-run output.
+    double_score_elems = double_blocks * num_heads * total_tokens * total_tokens
+    single_score_elems = single_blocks * num_heads * total_tokens * total_tokens
+    attention_score_elements = int(double_score_elems + single_score_elems)
+    attention_flops = int(2 * attention_score_elements * head_dim)
+    mlp_hidden = int(hidden_dim * mlp_ratio)
+    mlp_flops = int(attention_sites * total_tokens * 2 * hidden_dim * mlp_hidden)
+
+    return ModelCostProfile(
+        hidden_dim=hidden_dim,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        depth=depth,
+        double_stream_blocks=double_blocks,
+        single_stream_blocks=single_blocks,
+        attention_sites=attention_sites,
+        double_stream_attention_sites=double_blocks,
+        single_stream_attention_sites=single_blocks,
+        latent_channels=latent_channels,
+        latent_patch_size=patch_size,
+        latent_height=latent_h,
+        latent_width=latent_w,
+        image_tokens=image_tokens,
+        text_tokens=text_tokens,
+        total_tokens=total_tokens,
+        estimated_attention_score_elements=attention_score_elements,
+        estimated_attention_flops=attention_flops,
+        estimated_mlp_flops=mlp_flops,
+        estimated_total_flops=attention_flops + mlp_flops,
+    )

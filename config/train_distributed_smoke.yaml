@@ -1,0 +1,107 @@
+# Smoke-scale config for accelerate/DDP launch validation.
+architecture: mmdit_rf
+objective: rectified_flow
+prediction_type: flow_velocity
+mode: latent
+image_size: 512
+latent_channels: 4
+latent_downsample_factor: 8
+latent_patch_size: 2
+
+data_root: ./data/dataset/pixso_512
+image_dir: images
+meta_dir: ""
+tags_dir: ""
+out_dir: ./runs/mmdit_distributed_smoke
+dataset_limit: 2
+
+model:
+  hidden_dim: 64
+  depth: 1
+  num_heads: 4
+  double_stream_blocks: 1
+  single_stream_blocks: 0
+  gradient_checkpointing: false
+
+text:
+  encoders:
+    - name: clip_l
+      model_name: openai/clip-vit-large-patch14
+      max_length: 77
+      trainable: false
+      cache: true
+  text_dim: 1024
+  pooled_dim: 1024
+
+training:
+  batch_size: 1
+  grad_accum_steps: 1
+  lr: 1.0e-4
+  weight_decay: 0.01
+  optimizer: adamw
+  warmup_steps: 0
+  max_steps: 4
+  log_every: 1
+  save_every: 4
+  val_every: 0
+  val_batches: 0
+  amp: true
+  amp_dtype: bf16
+  tf32: true
+  compile: false
+
+distributed:
+  backend: accelerate
+  save_on_rank0_only: true
+  metrics_aggregation: true
+  find_unused_parameters: false
+  gradient_as_bucket_view: true
+
+fsdp:
+  enabled: false
+
+flow:
+  timestep_sampling: uniform
+  loss_weighting: none
+
+sampling:
+  sampler: flow_heun
+  steps: 2
+  cfg_scale: 1.0
+  shift: 3.0
+
+eval_every: 0
+eval_steps: 2
+eval_cfg: 1.0
+eval_n: 1
+
+vae:
+  pretrained: ./vae_sd_mse
+  freeze: true
+  scaling_factor: 0.18215
+
+cache:
+  latent_cache: true
+  text_cache: true
+  auto_prepare: true
+  rebuild_if_stale: false
+  sharded: true
+  dtype: bf16
+
+prepare_text:
+  batch_size: 1
+  shard_size: 16
+  device: auto
+  dtype: auto
+
+prepare_latents:
+  batch_size: 1
+  num_workers: 0
+  device: auto
+  overwrite: false
+
+dataset_tasks:
+  txt2img: 1.0
+  img2img: 0.0
+  inpaint: 0.0
+  control: 0.0

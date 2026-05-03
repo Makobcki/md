@@ -20,24 +20,43 @@ def test_train_yaml_defaults_disable_compile_and_nonfinite_grad_fail() -> None:
     assert cfg.fail_on_nonfinite_grad is False
 
 
-def test_train_config_accepts_legacy_model_fields() -> None:
-    cfg = TrainConfig.from_dict({
-        "base_channels": 16,
-        "channel_mults": [1],
-        "attn_resolutions": [8],
-    })
+def test_train_config_accepts_main_yaml() -> None:
+    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train.yaml"))
 
-    assert cfg.self_attn_type == "global"
-    assert cfg.attention_placement == "all"
-    assert cfg.cross_attn_resolutions == ()
-    assert cfg.mid_blocks == 1
-    assert cfg.checkpoint_attention is False
-    assert cfg.checkpoint_downsample is False
-    assert cfg.optimizer == "adamw"
-    assert cfg.self_cond_interval == 1
+    assert cfg.architecture == "mmdit_rf"
+    assert cfg.objective == "rectified_flow"
+    assert cfg.prediction_type == "flow_velocity"
+    assert cfg.hidden_dim == 1024
+    assert cfg.pos_embed == "rope_2d"
+    assert cfg.eval_sampler == "flow_heun"
 
 
-def test_train_config_accepts_image_only_alias() -> None:
-    cfg = TrainConfig.from_dict({"image_only": True})
+def test_train_config_accepts_dev_yaml() -> None:
+    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_dev.yaml"))
 
-    assert cfg.images_only is True
+    assert cfg.architecture == "mmdit_rf"
+    assert cfg.objective == "rectified_flow"
+    assert cfg.hidden_dim == 512
+    assert cfg.depth == 8
+    assert cfg.batch_size == 1
+    assert cfg.save_every == 1000
+
+
+def test_train_config_accepts_mmdit_smoke_yaml() -> None:
+    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_smoke.yaml"))
+
+    assert cfg.architecture == "mmdit_rf"
+    assert cfg.hidden_dim == 64
+    assert cfg.depth == 1
+    assert cfg.dataset_limit == 1
+    assert cfg.eval_every == 0
+
+
+def test_prepare_text_cache_cpu_defaults_to_fp32() -> None:
+    import torch
+
+    from scripts.prepare_text_cache import _resolve_prepare_dtype
+
+    assert _resolve_prepare_dtype(None, "bf16", torch.device("cpu")) is torch.float32
+    assert _resolve_prepare_dtype("bf16", "fp32", torch.device("cpu")) is torch.bfloat16
+    assert _resolve_prepare_dtype(None, "bf16", torch.device("cuda")) is torch.bfloat16

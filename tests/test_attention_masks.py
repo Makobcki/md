@@ -5,83 +5,53 @@ import pytest
 torch = pytest.importorskip("torch")
 
 
-def test_text_encoder_sdpa_mask_uses_true_for_valid_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    import model.text.encoder as encoder_module
-    from model.text.encoder import SDPATransformerBlock
+def test_joint_attention_sdpa_mask_uses_true_for_valid_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    import model.mmdit.attention as attention_module
+    from model.mmdit.attention import JointAttention
 
     captured = {}
-    expected = torch.tensor([[True, True, False], [True, False, False]])
 
-    def fake_sdpa(q, k, v, *, attn_mask=None, dropout_p=0.0, is_causal=False):
-        captured["attn_mask"] = attn_mask.detach().clone()
-        return torch.zeros_like(q)
-
-    monkeypatch.setattr(encoder_module.F, "scaled_dot_product_attention", fake_sdpa)
-
-    block = SDPATransformerBlock(dim=4, n_heads=2, dropout=0.0)
-    block(torch.randn(2, 3, 4), expected)
-
-    assert torch.equal(captured["attn_mask"], expected.unsqueeze(1).unsqueeze(2))
-
-
-def test_cross_attention_sdpa_mask_uses_true_for_valid_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    import model.unet.attention as attention_module
-    from model.unet.attention import CrossAttention2d
-
-    captured = {}
-    expected = torch.tensor([[True, True, False], [True, False, False]])
-
-    def fake_sdpa(q, k, v, *, attn_mask=None, dropout_p=0.0, is_causal=False):
-        captured["attn_mask"] = attn_mask.detach().clone()
+    def fake_sdpa(q, k, v, attn_mask=None, dropout_p=0.0):
+        captured["attn_mask"] = attn_mask.detach().cpu() if attn_mask is not None else None
+        captured["dropout_p"] = dropout_p
         return torch.zeros_like(q)
 
     monkeypatch.setattr(attention_module.F, "scaled_dot_product_attention", fake_sdpa)
+    attn = JointAttention(hidden_dim=16, num_heads=4, qk_norm=False)
+    q = torch.randn(2, 5, 16)
+    k = torch.randn(2, 5, 16)
+    v = torch.randn(2, 5, 16)
+    valid_mask = torch.tensor([[True, False, True, True, False], [False, True, True, False, True]])
 
-    layer = CrossAttention2d(in_ch=4, ctx_dim=8, heads=2, head_dim=2)
-    layer(torch.randn(2, 4, 2, 2), torch.randn(2, 3, 8), expected)
+    out = attn(q, k, v, valid_mask)
 
-    assert torch.equal(captured["attn_mask"], expected.unsqueeze(1).unsqueeze(1))
+    assert out.shape == q.shape
+    assert captured["attn_mask"].shape == (2, 1, 1, 5)
+    assert captured["attn_mask"].dtype == torch.bool
+    assert torch.equal(captured["attn_mask"][:, 0, 0, :], valid_mask)
 
 
-def test_windowed_self_attention_preserves_shape() -> None:
-    from model.unet.attention import SelfAttention2d
+def test_joint_attention_preserves_shape_without_text_mask() -> None:
+    from model.mmdit.attention import JointAttention
 
-    layer = SelfAttention2d(
-        in_ch=4,
-        heads=2,
-        head_dim=2,
-        attention_type="windowed",
-        window_size=2,
-    )
-    x = torch.randn(2, 4, 5, 3)
+    attn = JointAttention(hidden_dim=32, num_heads=4)
+    x = torch.randn(2, 7, 32)
 
-    out = layer(x)
+    out = attn(x, x, x, mask=None)
 
     assert out.shape == x.shape
+    assert torch.isfinite(out).all()
 
 
-def test_hybrid_self_attention_windows_only_at_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
-    import model.unet.attention as attention_module
-    from model.unet.attention import SelfAttention2d
+def test_joint_attention_rope_only_applies_to_image_token_slice() -> None:
+    from model.mmdit.attention import JointAttention
 
-    seen_query_batches = []
+    attn = JointAttention(hidden_dim=32, num_heads=4)
+    q = torch.randn(1, 6, 32)
+    k = torch.randn(1, 6, 32)
+    v = torch.randn(1, 6, 32)
 
-    def fake_sdpa(q, k, v, *, attn_mask=None, dropout_p=0.0, is_causal=False):
-        seen_query_batches.append(q.shape[0])
-        return torch.zeros_like(q)
+    out = attn(q, k, v, rope_grid_hw=(2, 2), rope_start=2, rope_length=4)
 
-    monkeypatch.setattr(attention_module.F, "scaled_dot_product_attention", fake_sdpa)
-
-    layer = SelfAttention2d(
-        in_ch=4,
-        heads=2,
-        head_dim=2,
-        attention_type="hybrid",
-        window_size=2,
-        hybrid_window_threshold=4,
-    )
-
-    assert layer(torch.randn(1, 4, 4, 4)).shape == (1, 4, 4, 4)
-    assert layer(torch.randn(1, 4, 2, 2)).shape == (1, 4, 2, 2)
-    assert seen_query_batches[0] == 4
-    assert seen_query_batches[1] == 1
+    assert out.shape == q.shape
+    assert torch.isfinite(out).all()

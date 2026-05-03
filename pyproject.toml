@@ -5,21 +5,26 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "md-diffusion"
 version = "0.1.0"
-description = "Text-conditioned latent and pixel diffusion training, sampling, and WebUI tooling."
+description = "MMDiT rectified-flow latent image model training and sampling."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "accelerate>=1.13.0",
+    "einops>=0.8.0",
     "numpy>=1.26",
     "pillow",
+    "protobuf>=4.25",
     "pyyaml>=6.0.1",
+    "safetensors>=0.4.5",
+    "sentencepiece>=0.2.0",
+    "transformers>=4.46.0",
     "tqdm",
     "websockets>=16.0",
 ]
 
 [project.optional-dependencies]
 ml = [
-    "diffusers",
+    "diffusers>=0.32.0",
     "torch",
     "torchvision",
 ]
@@ -34,12 +39,17 @@ dev = [
 ]
 all = [
     "diffusers",
+    "einops>=0.8.0",
     "fastapi>=0.110.0",
     "httpx>=0.27.0",
+    "protobuf>=4.25",
     "pydantic>=2.6.1",
     "pytest>=8.2.0",
+    "safetensors>=0.4.5",
+    "sentencepiece>=0.2.0",
     "torch",
     "torchvision",
+    "transformers>=4.46.0",
     "uvicorn>=0.27.1",
 ]
 
@@ -48,6 +58,10 @@ md-webui = "main:main"
 md-train = "train.cli:main"
 md-sample = "sample.cli:main"
 md-prepare-latents = "scripts.prepare_latents:main"
+md-prepare-text-cache = "scripts.prepare_text_cache:main"
+md-prepare-training-cache = "scripts.prepare_training_cache:main"
+md-eval = "train.eval_cli:main"
+md-cache-validate = "scripts.validate_cache:main"
 
 [tool.setuptools]
 py-modules = ["main"]
@@ -63,7 +77,6 @@ include = [
     "sample*",
     "samplers*",
     "scripts*",
-    "text_enc*",
     "tg_bot*",
     "train*",
     "webui*",

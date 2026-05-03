@@ -5,6 +5,19 @@ import LineChart from "../components/LineChart.jsx";
 import YamlEditor from "../components/YamlEditor.jsx";
 import useLogBuffer from "../hooks/useLogBuffer.js";
 import StatusPill from "../components/StatusPill.jsx";
+import {
+  formatStep,
+  isMetricEvent,
+  latestMetricWithLoss,
+  mergeMetricEvents,
+  metricChartData,
+  metricElapsed,
+  metricEta,
+  metricLoss,
+  metricSecondsPerStep,
+  metricStep,
+  metricThroughput,
+} from "../utils/metrics.js";
 
 export default function TrainPage() {
   const [config, setConfig] = useState("");
@@ -19,6 +32,7 @@ export default function TrainPage() {
   const [saving, setSaving] = useState(false);
 
   const saveTimeoutRef = useRef(null);
+  const metricOffsetRef = useRef(0);
   const logKey = runId ? `train:logs:${runId}` : "train:logs:idle";
   const { lines: logLines, appendLines, replaceLines, clear: clearLogs } = useLogBuffer(logKey, {
     maxLines: 10000,
@@ -63,7 +77,7 @@ export default function TrainPage() {
       }
     };
     loadLogs();
-    const timer = setInterval(loadLogs, 1000);
+    const timer = setInterval(loadLogs, 5000);
     return () => {
       cancelled = true;
       clearInterval(timer);
@@ -73,18 +87,28 @@ export default function TrainPage() {
   useEffect(() => {
     if (!runId) return;
     let cancelled = false;
+    metricOffsetRef.current = 0;
+    setMetrics([]);
     const loadMetrics = async () => {
       try {
-        const data = await api.getRunMetrics(runId);
-        if (!cancelled) {
-          setMetrics(data.items || []);
+        const data = await api.getRunMetrics(runId, {
+          offset: metricOffsetRef.current,
+          limit: 2000,
+        });
+        if (cancelled) return;
+        const items = data.items || [];
+        if (Number.isFinite(data.next_offset)) {
+          metricOffsetRef.current = data.next_offset;
+        }
+        if (items.length > 0) {
+          setMetrics((prev) => mergeMetricEvents(prev, items, 1000));
         }
       } catch (err) {
         console.warn("failed to load metrics", err);
       }
     };
     loadMetrics();
-    const timer = setInterval(loadMetrics, 3000);
+    const timer = setInterval(loadMetrics, 500);
     return () => {
       cancelled = true;
       clearInterval(timer);
@@ -109,8 +133,8 @@ export default function TrainPage() {
     ws.onmessage = (event) => {
       try {
         const metric = JSON.parse(event.data);
-        if (metric.type === "metric") {
-          setMetrics((prev) => [...prev.slice(-200), metric]);
+        if (isMetricEvent(metric)) {
+          setMetrics((prev) => mergeMetricEvents(prev, [metric], 1000));
         }
       } catch (err) {
         console.warn(err);
@@ -160,6 +184,7 @@ export default function TrainPage() {
       const resp = await api.startTrain(payload);
       setRunId(resp.run_id);
       setCommand(resp.command);
+      metricOffsetRef.current = 0;
       clearLogs();
       setMetrics([]);
     } catch (err) {
@@ -176,9 +201,10 @@ export default function TrainPage() {
     }
   };
 
-  const lastMetric = metrics[metrics.length - 1];
+  const lastMetric = latestMetricWithLoss(metrics);
+  const chartData = metricChartData(metrics);
   const progressMax = lastMetric?.max_steps || 0;
-  const progressValue = lastMetric?.step ?? 0;
+  const progressValue = metricStep(lastMetric) ?? 0;
   const activeRun = status.active ? status.run : null;
   const activeRunType = activeRun?.run_type;
 
@@ -226,9 +252,12 @@ export default function TrainPage() {
               </button>
             </div>
             {status.active && progressMax ? (
-              <div className="progress">
-                <span style={{ width: `${Math.min(100, (progressValue / progressMax) * 100)}%` }} />
-              </div>
+              <>
+                <div className="progress">
+                  <span style={{ width: `${Math.min(100, (progressValue / progressMax) * 100)}%` }} />
+                </div>
+                <div className="muted">step {formatStep(lastMetric)}</div>
+              </>
             ) : null}
             <div className="row">
               <label>Resume checkpoint</label>
@@ -249,24 +278,28 @@ export default function TrainPage() {
             {lastMetric && (
               <div className="grid train-metrics-grid">
                 <div>
+                  <div className="muted">step</div>
+                  <div>{formatStep(lastMetric)}</div>
+                </div>
+                <div>
                   <div className="muted">elapsed</div>
-                  <div>{Math.round(lastMetric.elapsed_sec)}s</div>
+                  <div>{metricElapsed(lastMetric)}</div>
                 </div>
                 <div>
                   <div className="muted">ETA</div>
-                  <div>{lastMetric.eta_h?.toFixed(2)}h</div>
+                  <div>{metricEta(lastMetric)}</div>
                 </div>
                 <div>
                   <div className="muted">s/step</div>
-                  <div>{lastMetric.sec_per_step?.toFixed(3)}</div>
+                  <div>{Number.isFinite(metricSecondsPerStep(lastMetric)) ? metricSecondsPerStep(lastMetric).toFixed(3) : "—"}</div>
                 </div>
                 <div>
-                  <div className="muted">img/s</div>
-                  <div>{lastMetric.img_per_sec?.toFixed(2)}</div>
+                  <div className="muted">samples/s</div>
+                  <div>{Number.isFinite(metricThroughput(lastMetric)) ? metricThroughput(lastMetric).toFixed(2) : "—"}</div>
                 </div>
                 <div>
-                  <div className="muted">VRAM</div>
-                  <div>{lastMetric.peak_mem_mb?.toFixed(0)} MB</div>
+                  <div className="muted">loss</div>
+                  <div>{Number.isFinite(metricLoss(lastMetric)) ? metricLoss(lastMetric).toFixed(4) : "—"}</div>
                 </div>
               </div>
             )}
@@ -275,9 +308,9 @@ export default function TrainPage() {
           <div className="card">
             <div className="card-header">
               <h2 className="card-title">Loss vs Step</h2>
-              <span className="muted">avg log_every</span>
+              <span className="muted">{lastMetric ? `step ${formatStep(lastMetric)}` : "avg log_every"}</span>
             </div>
-            <LineChart data={metrics.map((m) => ({ step: m.step, loss: m.loss }))} />
+            <LineChart data={chartData} />
           </div>
 
           <div className="card">

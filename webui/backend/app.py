@@ -7,8 +7,11 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Literal, Optional
+import re
+import shutil
+import uuid
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -20,6 +23,7 @@ from .services import config_service
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 RUNS_DIR = Path(os.environ.get("WEBUI_RUNS_DIR", ROOT_DIR / "webui_runs"))
+UPLOADS_DIR = RUNS_DIR / "_uploads"
 
 
 class WSManager:
@@ -63,6 +67,7 @@ job_manager = JobManager(ROOT_DIR, ws_manager, RUNS_DIR)
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     job_manager.set_loop(asyncio.get_running_loop())
     yield
 
@@ -120,6 +125,19 @@ async def _require_ws_token(websocket: WebSocket) -> bool:
     return False
 
 
+def _safe_upload_name(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(name or "upload").name).strip(".-")
+    return cleaned or "upload"
+
+
+def _upload_relative_url(path: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(RUNS_DIR.resolve())
+    except Exception as exc:
+        raise ValueError("upload path must be inside runs dir") from exc
+    return f"/runs/{rel.as_posix()}"
+
+
 def _configured_allowed_roots() -> list[Path]:
     roots = [ROOT_DIR, RUNS_DIR]
     try:
@@ -162,28 +180,54 @@ def _bounded_path(value: str | None, *, required: bool = False) -> str | None:
 
 
 class SampleArgs(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     ckpt: str
     out: Optional[str] = None
     n: int = Field(default=8, ge=1, le=64)
     steps: int = Field(default=30, ge=1, le=500)
     prompt: str = ""
-    neg: str = ""
     neg_prompt: str = ""
     cfg: float = Field(default=5.0, ge=0.0, le=30.0)
-    sampler: Literal["ddim", "diffusion", "euler", "heun", "dpm_solver"] = "ddim"
+    shift: Optional[float] = Field(default=None, gt=0.0, le=100.0)
+    sampler: Literal["flow_euler", "flow_heun"] = "flow_heun"
     seed: Optional[int] = 42
     device: Literal["auto", "cpu", "cuda"] = "cuda"
+    task: Literal["txt2img", "img2img", "inpaint", "control"] = "txt2img"
+    init_image: str = Field(default="", alias="init-image")
+    strength: float = Field(default=1.0, ge=0.0, le=1.0)
+    mask: str = ""
+    control_image: str = Field(default="", alias="control-image")
+    control_strength: float = Field(default=1.0, ge=0.0, alias="control-strength")
+    latent_only: bool = Field(default=False, alias="latent-only")
+    fake_vae: bool = Field(default=False, alias="fake-vae")
+    use_ema: bool = Field(default=True, alias="use-ema")
 
     @model_validator(mode="after")
     def _validate_paths(self) -> "SampleArgs":
         self.ckpt = _bounded_path(self.ckpt, required=True) or self.ckpt
         self.out = _bounded_path(self.out)
+        self.init_image = _bounded_path(self.init_image) or ""
+        self.mask = _bounded_path(self.mask) or ""
+        self.control_image = _bounded_path(self.control_image) or ""
+        if self.task in {"img2img", "inpaint"} and not self.init_image:
+            raise ValueError(f"task={self.task} requires init-image")
+        if self.task == "inpaint" and not self.mask:
+            raise ValueError("task=inpaint requires mask")
+        if self.task == "control" and not self.control_image:
+            raise ValueError("task=control requires control-image")
         return self
 
     def to_cli_args(self) -> Dict[str, Any]:
-        data = self.model_dump(exclude_none=True)
+        data = self.model_dump(by_alias=True, exclude_none=True)
+        if data.get("device") == "auto":
+            data.pop("device")
+        if data.get("use-ema") is True:
+            data.pop("use-ema", None)
+        return data
+
+    def to_sample_options_args(self) -> Dict[str, Any]:
+        data = self.model_dump(by_alias=False, exclude_none=True)
         if data.get("device") == "auto":
             data.pop("device")
         return data
@@ -470,10 +514,34 @@ def get_out_dir_summary() -> Dict[str, Any]:
     }
 
 
+def _sample_arg_specs() -> list[Dict[str, Any]]:
+    return [
+        {"name": "ckpt", "flags": ["--ckpt"], "type": "str", "default": None, "required": True, "help": "Checkpoint path", "choices": None},
+        {"name": "out", "flags": ["--out"], "type": "str", "default": "", "required": False, "help": "Optional output path. Defaults to this WebUI run samples directory.", "choices": None},
+        {"name": "task", "flags": ["--task"], "type": "str", "default": "txt2img", "required": False, "help": "Generation task", "choices": ["txt2img", "img2img", "inpaint", "control"]},
+        {"name": "sampler", "flags": ["--sampler"], "type": "str", "default": "flow_heun", "required": False, "help": "Flow sampler", "choices": ["flow_euler", "flow_heun"]},
+        {"name": "n", "flags": ["--n"], "type": "int", "default": 1, "required": False, "help": "Number of images", "choices": None},
+        {"name": "steps", "flags": ["--steps"], "type": "int", "default": 30, "required": False, "help": "Sampling steps", "choices": None},
+        {"name": "cfg", "flags": ["--cfg"], "type": "float", "default": 5.0, "required": False, "help": "Classifier-free guidance scale", "choices": None},
+        {"name": "shift", "flags": ["--shift"], "type": "float", "default": None, "required": False, "help": "Positive inference timestep shift override. Empty = checkpoint/config default.", "choices": None},
+        {"name": "seed", "flags": ["--seed"], "type": "int", "default": 42, "required": False, "help": "Base seed. Empty/null lets backend choose a random seed.", "choices": None},
+        {"name": "device", "flags": ["--device"], "type": "str", "default": "auto", "required": False, "help": "Runtime device", "choices": ["auto", "cuda", "cpu"]},
+        {"name": "prompt", "flags": ["--prompt"], "type": "str", "default": "", "required": False, "help": "Positive prompt", "choices": None},
+        {"name": "neg_prompt", "flags": ["--neg_prompt", "--negative-prompt"], "type": "str", "default": "", "required": False, "help": "Negative prompt. Empty uses cached empty prompt when available.", "choices": None},
+        {"name": "init-image", "flags": ["--init-image"], "type": "str", "default": "", "required": False, "help": "Input image for img2img/inpaint", "choices": None},
+        {"name": "strength", "flags": ["--strength"], "type": "float", "default": 1.0, "required": False, "help": "Img2img start strength in [0, 1]", "choices": None},
+        {"name": "mask", "flags": ["--mask"], "type": "str", "default": "", "required": False, "help": "Inpaint mask path", "choices": None},
+        {"name": "control-image", "flags": ["--control-image"], "type": "str", "default": "", "required": False, "help": "Control conditioning image path", "choices": None},
+        {"name": "control-strength", "flags": ["--control-strength"], "type": "float", "default": 1.0, "required": False, "help": "Control latent multiplier", "choices": None},
+        {"name": "latent-only", "flags": ["--latent-only"], "type": "bool", "default": False, "required": False, "help": "Write latent tensor instead of image", "choices": None},
+        {"name": "fake-vae", "flags": ["--fake-vae"], "type": "bool", "default": False, "required": False, "help": "Use deterministic fake VAE for smoke/sample tests", "choices": None},
+        {"name": "use-ema", "flags": ["--use-ema", "--no-ema"], "type": "bool", "default": True, "required": False, "help": "Use EMA weights from checkpoint when available", "choices": None},
+    ]
+
+
 @app.get("/api/sample/args")
 def get_sample_args() -> Dict[str, Any]:
-    sample_path = ROOT_DIR / "sample" / "cli.py"
-    return {"items": parse_argparse_args(sample_path)}
+    return {"items": _sample_arg_specs()}
 
 
 @app.get("/api/latents/args")
@@ -497,6 +565,42 @@ def list_samples(
     return {"items": items[offset:offset + limit], "offset": offset, "total": len(items)}
 
 
+@app.post("/api/uploads/image")
+async def upload_image(
+    file: UploadFile = File(...),
+    kind: str = Form(default="image"),
+    _: None = Depends(_require_token),
+) -> Dict[str, Any]:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="file is required")
+    content_type = (file.content_type or "").lower()
+    ext = Path(file.filename).suffix.lower()
+    allowed_exts = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+    allowed_types = {"image/png", "image/jpeg", "image/webp", "image/bmp"}
+    if ext not in allowed_exts and content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="unsupported image format")
+    safe_kind = re.sub(r"[^A-Za-z0-9_-]+", "-", kind or "image").strip("-") or "image"
+    safe_name = _safe_upload_name(file.filename)
+    out_dir = UPLOADS_DIR / safe_kind
+    out_dir.mkdir(parents=True, exist_ok=True)
+    suffix = ext or ".png"
+    out_path = out_dir / f"{uuid.uuid4().hex[:12]}_{Path(safe_name).stem}{suffix}"
+    try:
+        with out_path.open("wb") as f:
+            shutil.copyfileobj(file.file, f)
+    finally:
+        await file.close()
+    return {
+        "ok": True,
+        "path": str(out_path.resolve()),
+        "url": _upload_relative_url(out_path),
+        "name": safe_name,
+        "kind": safe_kind,
+        "content_type": file.content_type or "",
+        "size": out_path.stat().st_size,
+    }
+
+
 @app.post("/api/train/start")
 def start_train(req: TrainRequest | None = None, _: None = Depends(_require_token)) -> Dict[str, Any]:
     try:
@@ -518,7 +622,7 @@ def stop_train(_: None = Depends(_require_token)) -> Dict[str, Any]:
 @app.post("/api/sample/start")
 def start_sample(req: SampleRequest, _: None = Depends(_require_token)) -> Dict[str, Any]:
     try:
-        run = job_manager.start_sample(req.args.to_cli_args())
+        run = job_manager.start_sample(req.args.to_sample_options_args())
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"run_id": run.run_id, "command": run.command, "output": run.output_path}

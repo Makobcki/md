@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("torch")
-pytest.importorskip("torchvision")
 
 from train.eval import _resolve_eval_prompts
 
