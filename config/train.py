@@ -682,6 +682,13 @@ class TrainConfig:
             raise ValueError("double_stream_blocks + single_stream_blocks must equal depth.")
         if self.pos_embed not in {"rope_2d", "sincos_2d", "none"}:
             raise ValueError("pos_embed must be one of: rope_2d, sincos_2d, none.")
+        if self.rope_scaling not in {"none", "linear", "ntk"}:
+            raise ValueError("rope_scaling must be one of: none, linear, ntk.")
+        rope_base_grid = tuple(self.rope_base_grid_hw)
+        if len(rope_base_grid) != 2 or any(int(v) <= 0 for v in rope_base_grid):
+            raise ValueError("rope_base_grid_hw must contain two positive integers.")
+        if self.rope_theta <= 0:
+            raise ValueError("rope_theta must be positive.")
         if self.text_dim <= 0 or self.pooled_dim <= 0:
             raise ValueError("text_dim and pooled_dim must be positive.")
 
@@ -693,16 +700,34 @@ class TrainConfig:
             raise ValueError("dataset_tasks weights must be non-negative.")
         if sum(float(v) for v in self.dataset_tasks.values()) <= 0:
             raise ValueError("dataset_tasks must have at least one positive weight.")
+        for name, lo, hi in (
+            ("img2img", float(self.img2img_strength_min), float(self.img2img_strength_max)),
+            ("inpaint", float(self.inpaint_strength_min), float(self.inpaint_strength_max)),
+        ):
+            if lo < 0.0 or hi > 1.0 or lo > hi:
+                raise ValueError(f"{name} strength range must satisfy 0 <= strength_min <= strength_max <= 1.")
         if float(self.dataset_tasks.get("control", 0.0)) > 0 and not bool(self.control_enabled):
             raise ValueError("dataset_tasks.control is reserved unless control.enabled=true.")
         if self.control_strength < 0:
             raise ValueError("control_strength must be non-negative.")
         if self.control_num_streams <= 0:
             raise ValueError("control_num_streams must be positive.")
+        allowed_control_types = {"none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"}
+        unknown_control_types = sorted(set(self.control_types) - allowed_control_types)
+        if unknown_control_types:
+            raise ValueError("control_types contains unsupported type(s): " + ", ".join(unknown_control_types))
         if any(not isinstance(v, bool) for v in self.control_types.values()):
             raise ValueError("control_types values must be boolean.")
         if bool(self.control_enabled) and not any(bool(v) for v in self.control_types.values()):
             raise ValueError("control.enabled=true requires at least one enabled control type.")
+        if self.control_adapter_ratio <= 0:
+            raise ValueError("control_adapter_ratio must be positive.")
+        if self.coarse_patch_size <= 0:
+            raise ValueError("coarse_patch_size must be positive.")
+        if int(self.latent_downsample_factor) > 0:
+            base_latent_side = int(self.image_size) // int(self.latent_downsample_factor)
+            if bool(self.hierarchical_tokens_enabled) and base_latent_side % int(self.coarse_patch_size) != 0:
+                raise ValueError("base latent size must be divisible by coarse_patch_size when hierarchical tokens are enabled.")
 
         if not (0.0 <= float(self.inpaint_mask_min_area) <= float(self.inpaint_mask_max_area) <= 1.0):
             raise ValueError("inpaint mask area must satisfy 0 <= min <= max <= 1.")
@@ -735,6 +760,12 @@ class TrainConfig:
             raise ValueError("flow_timestep_shift must be positive.")
         if self.flow_loss_weighting not in {"none"}:
             raise ValueError("flow_loss_weighting must be 'none'.")
+        if self.x0_aux_weight < 0:
+            raise ValueError("x0_aux_weight must be non-negative.")
+        if self.attention_schedule not in {"full", "hybrid"}:
+            raise ValueError("attention_schedule must be full or hybrid.")
+        if self.early_joint_blocks < 0 or self.late_joint_blocks < 0:
+            raise ValueError("early/late joint blocks must be non-negative.")
         if self.sampling_sampler not in {"flow_euler", "flow_heun"}:
             raise ValueError("sampling_sampler must be one of: flow_euler, flow_heun.")
         if self.sampling_steps <= 0:
