@@ -214,8 +214,51 @@ def _cfg_value(cfg: dict, key: str) -> Any:
         return cfg.get("vae_scaling_factor", cfg.get("vae", {}).get("scaling_factor"))
     if key in {"text_dim", "pooled_dim"}:
         return cfg.get(key, cfg.get("text", {}).get(key))
-    return cfg.get(key, cfg.get("model", {}).get(key))
 
+    model = cfg.get("model", {}) if isinstance(cfg.get("model", {}), dict) else {}
+    text = cfg.get("text", {}) if isinstance(cfg.get("text", {}), dict) else {}
+    control = cfg.get("control", {}) if isinstance(cfg.get("control", {}), dict) else {}
+    rope = model.get("rope", {}) if isinstance(model.get("rope", {}), dict) else {}
+    hierarchical = model.get("hierarchical", {}) if isinstance(model.get("hierarchical", {}), dict) else {}
+    resampler = text.get("resampler", {}) if isinstance(text.get("resampler", {}), dict) else {}
+    loss = cfg.get("loss", {}) if isinstance(cfg.get("loss", {}), dict) else {}
+
+    nested_stage_a = {
+        "rope_scaling": rope.get("scaling"),
+        "rope_base_grid_hw": rope.get("base_grid"),
+        "rope_theta": rope.get("theta"),
+        "hierarchical_tokens_enabled": hierarchical.get("enabled"),
+        "coarse_patch_size": hierarchical.get("coarse_patch_size"),
+        "text_resampler_enabled": resampler.get("enabled"),
+        "text_resampler_num_tokens": resampler.get("num_tokens"),
+        "text_resampler_depth": resampler.get("depth"),
+        "text_resampler_mlp_ratio": resampler.get("mlp_ratio"),
+        "x0_aux_weight": loss.get("x0_aux_weight"),
+        "control_type_embed": control.get("type_embed"),
+        "control_adapter": control.get("adapter"),
+        "control_adapter_ratio": control.get("adapter_ratio"),
+    }
+    if key in nested_stage_a and nested_stage_a[key] is not None:
+        return nested_stage_a[key]
+    return cfg.get(key, model.get(key))
+
+
+
+def _normalize_compat_value(key: str, value: Any) -> Any:
+    if key == "rope_base_grid_hw" and value is not None:
+        seq = list(value)
+        if len(seq) != 2:
+            return value
+        return (int(seq[0]), int(seq[1]))
+    if key in {
+        "rope_theta",
+        "text_resampler_mlp_ratio",
+        "x0_aux_weight",
+        "control_adapter_ratio",
+        "vae_scaling_factor",
+    } and value is not None:
+        return float(value)
+    return value
 
 def _raise_mismatch(key: str, ck_value: Any, cfg_value: Any) -> None:
     raise RuntimeError(
