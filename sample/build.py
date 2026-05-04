@@ -119,13 +119,58 @@ def build_vae(
     )
 
 
-def resolve_shapes(cfg: Dict[str, Any]) -> Tuple[int, int, int, int]:
-    h = int(cfg.get("image_size", 512))
-    w = int(cfg.get("image_size", 512))
+def _nested_model_int(cfg: Dict[str, Any], key: str, default: int) -> int:
+    model = cfg.get("model", {}) if isinstance(cfg.get("model", {}), dict) else {}
+    if key in cfg:
+        return int(cfg[key])
+    if key in model:
+        return int(model[key])
+    conditioning = model.get("conditioning_tokens", {}) if isinstance(model.get("conditioning_tokens", {}), dict) else {}
+    if key in conditioning:
+        return int(conditioning[key])
+    hierarchical = model.get("hierarchical", {}) if isinstance(model.get("hierarchical", {}), dict) else {}
+    if key == "coarse_patch_size" and "coarse_patch_size" in hierarchical:
+        return int(hierarchical["coarse_patch_size"])
+    return int(default)
+
+
+def _nested_model_bool(cfg: Dict[str, Any], key: str, default: bool = False) -> bool:
+    model = cfg.get("model", {}) if isinstance(cfg.get("model", {}), dict) else {}
+    if key in cfg:
+        return bool(cfg[key])
+    if key in model:
+        return bool(model[key])
+    hierarchical = model.get("hierarchical", {}) if isinstance(model.get("hierarchical", {}), dict) else {}
+    if key == "hierarchical_tokens_enabled" and "enabled" in hierarchical:
+        return bool(hierarchical["enabled"])
+    return bool(default)
+
+
+def resolve_shapes(cfg: Dict[str, Any], *, width: int | None = None, height: int | None = None) -> Tuple[int, int, int, int]:
+    h = int(height if height is not None else cfg.get("height", cfg.get("image_size", 512)))
+    w = int(width if width is not None else cfg.get("width", cfg.get("image_size", 512)))
     downsample = int(cfg.get("latent_downsample_factor", 8))
     if h % downsample != 0 or w % downsample != 0:
         raise RuntimeError("image_size must be divisible by latent_downsample_factor.")
-    return h, w, h // downsample, w // downsample
+    latent_h, latent_w = h // downsample, w // downsample
+    patch_size = _nested_model_int(cfg, "patch_size", int(cfg.get("latent_patch_size", 2)))
+    patch_sizes = {
+        int(cfg.get("latent_patch_size", patch_size)),
+        patch_size,
+        _nested_model_int(cfg, "source_patch_size", patch_size),
+        _nested_model_int(cfg, "mask_patch_size", patch_size),
+        _nested_model_int(cfg, "control_patch_size", patch_size),
+    }
+    if _nested_model_bool(cfg, "hierarchical_tokens_enabled", False):
+        patch_sizes.add(_nested_model_int(cfg, "coarse_patch_size", 4))
+    for size in sorted(patch_sizes):
+        if size <= 0:
+            raise RuntimeError("latent patch sizes must be positive.")
+        if latent_h % size != 0 or latent_w % size != 0:
+            raise RuntimeError(
+                f"requested latent shape {(latent_h, latent_w)} must be divisible by Stage D patch size {size}."
+            )
+    return h, w, latent_h, latent_w
 
 
 def _load_empty_text_from_cache(cfg: Dict[str, Any], device: torch.device, dtype: torch.dtype) -> tuple[TextConditioning | None, str]:
@@ -147,6 +192,8 @@ def build_all(
     latent_only: bool = False,
     fake_vae: bool = False,
     use_ema: bool = True,
+    width: int | None = None,
+    height: int | None = None,
 ) -> Built:
     ck, cfg = load_checkpoint_and_cfg(ckpt_path, device)
     architecture = str(ck.get("architecture", cfg.get("architecture", "")))
@@ -163,7 +210,7 @@ def build_all(
         ema.copy_to(model)
     model.eval()
 
-    h, w, latent_h, latent_w = resolve_shapes(cfg)
+    h, w, latent_h, latent_w = resolve_shapes(cfg, width=width, height=height)
     text_dtype = torch.bfloat16 if str(cfg.get("amp_dtype", "bf16")) == "bf16" else torch.float16
     text_encoder = FrozenTextEncoderBundle.from_config(
         cfg,
