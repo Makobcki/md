@@ -68,11 +68,39 @@ class MMDiTConfig:
             raise ValueError("double_stream_blocks + single_stream_blocks must equal depth.")
         if self.pos_embed not in {"rope_2d", "sincos_2d", "none"}:
             raise ValueError("pos_embed must be one of: rope_2d, sincos_2d, none.")
+        if self.rope_scaling not in {"none", "linear", "ntk"}:
+            raise ValueError("rope_scaling must be one of: none, linear, ntk.")
+        if len(self.rope_base_grid_hw) != 2 or self.rope_base_grid_hw[0] <= 0 or self.rope_base_grid_hw[1] <= 0:
+            raise ValueError("rope_base_grid_hw must contain two positive integers.")
+        if self.rope_theta <= 0:
+            raise ValueError("rope_theta must be positive.")
+        if self.text_resampler_num_tokens <= 0 or self.text_resampler_depth <= 0:
+            raise ValueError("text resampler num_tokens/depth must be positive.")
+        if self.attention_schedule not in {"full", "hybrid"}:
+            raise ValueError("attention_schedule must be full or hybrid.")
+        if self.early_joint_blocks < 0 or self.late_joint_blocks < 0:
+            raise ValueError("joint block counts must be non-negative.")
+        for name, value in {"source_patch_size": self.source_patch_size, "mask_patch_size": self.mask_patch_size, "control_patch_size": self.control_patch_size}.items():
+            if value <= 0:
+                raise ValueError(f"{name} must be positive.")
+        if self.control_adapter_ratio <= 0:
+            raise ValueError("control_adapter_ratio must be positive.")
+        if self.coarse_patch_size <= 0:
+            raise ValueError("coarse_patch_size must be positive.")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MMDiTConfig":
         model = data.get("model", data)
         text = data.get("text", {})
+        rope_cfg = model.get("rope", {}) if isinstance(model.get("rope", {}), dict) else {}
+        raw_base_grid = rope_cfg.get("base_grid", model.get("rope_base_grid_hw", data.get("rope_base_grid_hw", (32, 32))))
+        if isinstance(raw_base_grid, int):
+            base_grid = (int(raw_base_grid), int(raw_base_grid))
+        else:
+            seq = list(raw_base_grid)
+            if len(seq) != 2:
+                raise ValueError("rope base_grid must contain two values.")
+            base_grid = (int(seq[0]), int(seq[1]))
         kwargs = {
             "latent_channels": int(data.get("latent_channels", model.get("latent_channels", 4))),
             "patch_size": int(data.get("latent_patch_size", model.get("patch_size", 2))),
