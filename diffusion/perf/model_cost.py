@@ -26,8 +26,15 @@ class ModelCostProfile:
     latent_height: int
     latent_width: int
     image_tokens: int
+    coarse_tokens: int
     text_tokens: int
+    effective_text_tokens: int
+    source_tokens: int
+    mask_tokens: int
+    control_tokens: int
     total_tokens: int
+    joint_attention_sites: int
+    image_only_attention_sites: int
     estimated_attention_score_elements: int
     estimated_attention_flops: int
     estimated_mlp_flops: int
@@ -136,6 +143,10 @@ def build_model_cost_profile(
         else:
             text_tokens = int(getattr(text_cfg, "max_length", 0)) if text_cfg is not None else 0
     text_tokens = int(text_tokens)
+    text_cfg = cfg_obj.get("text", {}) if isinstance(cfg_obj, dict) else getattr(cfg_obj, "text", {})
+    resampler = text_cfg.get("resampler", {}) if isinstance(text_cfg, dict) else {}
+    resampler_enabled = bool(resampler.get("enabled", _read_config_value(cfg_obj, "text_resampler_enabled", default=False))) if isinstance(resampler, dict) else bool(_read_config_value(cfg_obj, "text_resampler_enabled", default=False))
+    effective_text_tokens = int(resampler.get("num_tokens", _read_config_value(cfg_obj, "text_resampler_num_tokens", default=128))) if resampler_enabled and isinstance(resampler, dict) else text_tokens
 
     latent_h, latent_w = _parse_latent_hw(
         latent_hw=latent_hw,
@@ -152,15 +163,34 @@ def build_model_cost_profile(
         raise ValueError("hidden_dim must be divisible by num_heads.")
 
     image_tokens = (latent_h // patch_size) * (latent_w // patch_size)
-    total_tokens = image_tokens + text_tokens
+    hierarchical_enabled = bool(_read_config_value(cfg_obj, "hierarchical_tokens_enabled", default=False))
+    coarse_patch = int(_read_config_value(cfg_obj, "coarse_patch_size", default=4))
+    coarse_tokens = (latent_h // coarse_patch) * (latent_w // coarse_patch) if hierarchical_enabled and coarse_patch > 0 else 0
+    source_patch = int(_read_config_value(cfg_obj, "source_patch_size", default=patch_size))
+    mask_patch = int(_read_config_value(cfg_obj, "mask_patch_size", default=patch_size))
+    control_patch = int(_read_config_value(cfg_obj, "control_patch_size", default=patch_size))
+    mask_as_source_channel = bool(_read_config_value(cfg_obj, "mask_as_source_channel", default=False))
+    source_tokens = (latent_h // source_patch) * (latent_w // source_patch) if source_patch > 0 else 0
+    mask_tokens = 0 if mask_as_source_channel else ((latent_h // mask_patch) * (latent_w // mask_patch) if mask_patch > 0 else 0)
+    control_tokens = (latent_h // control_patch) * (latent_w // control_patch) if control_patch > 0 else 0
+    # Base profile reports txt2img total tokens; condition token fields show img2img/inpaint/control expansion separately.
+    total_image_tokens = image_tokens + coarse_tokens
+    total_tokens = total_image_tokens + effective_text_tokens
     attention_sites = double_blocks + single_blocks
+    schedule = str(_read_config_value(cfg_obj, "attention_schedule", default="full"))
+    if schedule == "hybrid":
+        joint_attention_sites = min(attention_sites, int(_read_config_value(cfg_obj, "early_joint_blocks", default=0)) + int(_read_config_value(cfg_obj, "late_joint_blocks", default=0)))
+    else:
+        joint_attention_sites = attention_sites
+    image_only_attention_sites = attention_sites - joint_attention_sites
     head_dim = hidden_dim // num_heads
 
     # Approximate per-sample attention/MLP cost. This is intentionally coarse but
     # stable and useful for relative comparisons in dry-run output.
-    double_score_elems = double_blocks * num_heads * total_tokens * total_tokens
-    single_score_elems = single_blocks * num_heads * total_tokens * total_tokens
-    attention_score_elements = int(double_score_elems + single_score_elems)
+    attention_score_elements = int(
+        joint_attention_sites * num_heads * total_tokens * total_tokens
+        + image_only_attention_sites * num_heads * total_image_tokens * total_image_tokens
+    )
     attention_flops = int(2 * attention_score_elements * head_dim)
     mlp_hidden = int(hidden_dim * mlp_ratio)
     mlp_flops = int(attention_sites * total_tokens * 2 * hidden_dim * mlp_hidden)
@@ -180,8 +210,15 @@ def build_model_cost_profile(
         latent_height=latent_h,
         latent_width=latent_w,
         image_tokens=image_tokens,
+        coarse_tokens=coarse_tokens,
         text_tokens=text_tokens,
+        effective_text_tokens=effective_text_tokens,
+        source_tokens=source_tokens,
+        mask_tokens=mask_tokens,
+        control_tokens=control_tokens,
         total_tokens=total_tokens,
+        joint_attention_sites=joint_attention_sites,
+        image_only_attention_sites=image_only_attention_sites,
         estimated_attention_score_elements=attention_score_elements,
         estimated_attention_flops=attention_flops,
         estimated_mlp_flops=mlp_flops,
