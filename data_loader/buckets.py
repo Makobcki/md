@@ -19,14 +19,25 @@ class AspectRatioBucket:
         return self.height, self.width
 
 
+def _normalize_patch_sizes(value: int | Sequence[int]) -> tuple[int, ...]:
+    if isinstance(value, int):
+        sizes = (int(value),)
+    else:
+        sizes = tuple(int(v) for v in value)
+    if not sizes or any(v <= 0 for v in sizes):
+        raise ValueError("latent_patch_size must contain positive integer value(s)")
+    return tuple(dict.fromkeys(sizes))
+
+
 def validate_buckets(
     buckets: Sequence[AspectRatioBucket],
     *,
     latent_downsample_factor: int = 8,
-    latent_patch_size: int = 2,
+    latent_patch_size: int | Sequence[int] = 2,
 ) -> list[AspectRatioBucket]:
     if not buckets:
         raise ValueError("at least one aspect ratio bucket is required")
+    patch_sizes = _normalize_patch_sizes(latent_patch_size)
     out: list[AspectRatioBucket] = []
     seen: set[tuple[int, int]] = set()
     for bucket in buckets:
@@ -36,8 +47,12 @@ def validate_buckets(
             raise ValueError("bucket dimensions must be divisible by latent_downsample_factor")
         latent_w = bucket.width // latent_downsample_factor
         latent_h = bucket.height // latent_downsample_factor
-        if latent_w % latent_patch_size != 0 or latent_h % latent_patch_size != 0:
-            raise ValueError("bucket latent grid must be divisible by latent_patch_size")
+        for patch_size in patch_sizes:
+            if latent_w % patch_size != 0 or latent_h % patch_size != 0:
+                raise ValueError(
+                    "bucket latent grid must be divisible by all requested latent_patch_size value(s); "
+                    f"got latent={(latent_h, latent_w)} patch_size={patch_size}"
+                )
         key = (bucket.width, bucket.height)
         if key in seen:
             continue

@@ -49,3 +49,19 @@ def test_bucket_batch_sampler_keeps_same_bucket_per_batch() -> None:
     for batch in sampler:
         containing = [key for key, indices in groups.items() if set(batch).issubset(indices)]
         assert len(containing) == 1
+
+
+def test_bucket_validation_accepts_all_stage_d_patch_sizes() -> None:
+    buckets = validate_buckets(
+        [AspectRatioBucket(640, 384)],
+        latent_downsample_factor=8,
+        latent_patch_size=[2, 4, 8],
+    )
+    assert [(b.width, b.height) for b in buckets] == [(640, 384)]
+
+    with pytest.raises(ValueError, match="all requested latent_patch_size"):
+        validate_buckets(
+            [AspectRatioBucket(672, 384)],
+            latent_downsample_factor=8,
+            latent_patch_size=[2, 4, 8],
+        )
