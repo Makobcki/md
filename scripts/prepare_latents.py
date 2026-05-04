@@ -21,9 +21,13 @@ from tqdm import tqdm
 from config.train import TrainConfig
 from data_loader import (
     DataConfig,
+    AspectBucketBatchSampler,
+    assign_bucket,
     build_or_load_index,
     latent_cache_path,
     load_image_tensor,
+    parse_buckets,
+    validate_buckets,
 )
 from diffusion.events import EventBus, JsonlFileSink, StdoutJsonSink
 from diffusion.utils import build_run_metadata
@@ -329,32 +333,48 @@ class _LatentPrepDataset(Dataset):
         *,
         limit: Optional[int] = None,
         decode_backend: str = "auto",
+        buckets: Optional[list[Any]] = None,
     ) -> None:
         self.entries = entries[:limit] if limit is not None else entries
         self.decode_backend = decode_backend
+        self.buckets = buckets
 
     def __len__(self) -> int:
         return len(self.entries)
+
+    def _target_size_for_entry(self, entry: dict) -> tuple[int, int] | None:
+        if not self.buckets:
+            return None
+        width = int(entry.get("width", entry.get("image_width", 0)) or 0)
+        height = int(entry.get("height", entry.get("image_height", 0)) or 0)
+        if width <= 0 or height <= 0:
+            size = entry.get("size")
+            if isinstance(size, (list, tuple)) and len(size) == 2:
+                width, height = int(size[0]), int(size[1])
+        bucket = assign_bucket(width, height, self.buckets)
+        return int(bucket.width), int(bucket.height)
 
     def __getitem__(self, idx: int) -> dict:
         entry = self.entries[idx]
         md5 = entry.get("md5", "")
         path = entry.get("img", "")
+        target_size = self._target_size_for_entry(entry)
         start = time.perf_counter()
         try:
-            x = _load_image_tensor(path, backend=self.decode_backend)
+            x = _load_image_tensor(path, backend=self.decode_backend, target_size=target_size)
             elapsed_ms = (time.perf_counter() - start) * 1000.0
-            return {"md5": md5, "x": x, "error": None, "decode_ms": elapsed_ms}
+            return {"md5": md5, "x": x, "error": None, "decode_ms": elapsed_ms, "target_size": target_size}
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
-            return {"md5": md5, "x": None, "error": str(e), "decode_ms": elapsed_ms}
-
+            return {"md5": md5, "x": None, "error": str(e), "decode_ms": elapsed_ms, "target_size": target_size}
 
 def _collate_items(batch: list[dict]) -> list[dict]:
     return batch
 
 
-def _load_image_tensor(path: str, *, backend: str) -> torch.Tensor:
+def _load_image_tensor(path: str, *, backend: str, target_size: tuple[int, int] | None = None) -> torch.Tensor:
+    if target_size is not None:
+        return _load_image_tensor_pil(path, target_size=target_size)
     if backend == "pil":
         return load_image_tensor(path)
     if backend == "torchvision":
@@ -365,6 +385,19 @@ def _load_image_tensor(path: str, *, backend: str) -> torch.Tensor:
         except Exception:
             return load_image_tensor(path)
     raise ValueError(f"Unknown decode backend: {backend}")
+
+
+def _load_image_tensor_pil(path: str, *, target_size: tuple[int, int]) -> torch.Tensor:
+    from PIL import Image
+
+    width, height = target_size
+    with Image.open(path) as im:
+        im = im.convert("RGB")
+        if im.size != (width, height):
+            im = im.resize((width, height), Image.Resampling.LANCZOS)
+        arr = np.asarray(im, dtype=np.float32) / 255.0
+    x = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+    return x * 2.0 - 1.0
 
 
 def _load_image_tensor_torchvision(path: str) -> torch.Tensor:
@@ -563,6 +596,22 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
             f"and min_tag_count={cfg.min_tag_count}."
         )
 
+    buckets = None
+    if bool(cfg.aspect_buckets_enabled):
+        patch_sizes = [int(cfg.latent_patch_size), int(cfg.source_patch_size), int(cfg.mask_patch_size), int(cfg.control_patch_size)]
+        if bool(cfg.hierarchical_tokens_enabled):
+            patch_sizes.append(int(cfg.coarse_patch_size))
+        buckets = validate_buckets(
+            parse_buckets(cfg.aspect_buckets),
+            latent_downsample_factor=int(cfg.latent_downsample_factor),
+            latent_patch_size=patch_sizes,
+        )
+        if int(options.shard_size) > 0:
+            raise RuntimeError(
+                "aspect bucket latent preparation currently requires non-sharded latent cache; "
+                "set cache.sharded=false or latent_prepare_shard_size=0."
+            )
+
     if options.device == "auto":
         device_str = "cuda" if torch.cuda.is_available() else "cpu"
     else:
@@ -582,18 +631,31 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
         train_entries,
         limit=options.limit,
         decode_backend=str(options.decode_backend),
+        buckets=buckets,
     )
-    dl = DataLoader(
-        dataset,
-        batch_size=int(options.batch_size),
-        num_workers=int(options.num_workers),
-        pin_memory=bool(options.pin_memory),
-        prefetch_factor=int(options.prefetch_factor)
-        if int(options.num_workers) > 0
-        else None,
-        shuffle=False,
-        collate_fn=_collate_items,
-    )
+    dl_common = {
+        "num_workers": int(options.num_workers),
+        "pin_memory": bool(options.pin_memory),
+        "prefetch_factor": int(options.prefetch_factor) if int(options.num_workers) > 0 else None,
+        "collate_fn": _collate_items,
+    }
+    if buckets is not None:
+        batch_sampler = AspectBucketBatchSampler(
+            dataset.entries,
+            buckets,
+            batch_size=int(options.batch_size),
+            shuffle=False,
+            seed=int(cfg.seed),
+            drop_last=False,
+        )
+        dl = DataLoader(dataset, batch_sampler=batch_sampler, **dl_common)
+    else:
+        dl = DataLoader(
+            dataset,
+            batch_size=int(options.batch_size),
+            shuffle=False,
+            **dl_common,
+        )
 
     if options.queue_size <= 0:
         raise RuntimeError("--queue-size must be positive.")
@@ -978,6 +1040,10 @@ def _validate_latent_tensor(z: torch.Tensor, cfg: TrainConfig) -> None:
         raise RuntimeError(
             f"latent_channels mismatch: {z.shape[0]} != {cfg.latent_channels}"
         )
+    if bool(getattr(cfg, "aspect_buckets_enabled", False)):
+        if z.shape[-2] <= 0 or z.shape[-1] <= 0:
+            raise RuntimeError("latent spatial dimensions must be positive")
+        return
     h = int(cfg.image_size) // int(cfg.latent_downsample_factor)
     w = int(cfg.image_size) // int(cfg.latent_downsample_factor)
     if z.shape[-2:] != (h, w):

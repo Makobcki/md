@@ -530,7 +530,7 @@ class TrainConfig:
     inpaint_loss_unmask_weight: float = 0.1
 
     control_enabled: bool = False
-    control_types: Dict[str, bool] = field(default_factory=lambda: {"canny": True, "depth": False, "pose": False})
+    control_types: Dict[str, bool] = field(default_factory=lambda: {"image": True, "canny": True, "depth": False, "pose": False, "lineart": False, "normal": False})
     control_strength: float = 1.0
     control_num_streams: int = 1
 
@@ -597,6 +597,8 @@ class TrainConfig:
             raise ValueError("latent_dtype must be 'fp16' or 'bf16'.")
         if self.latent_cache_sharded and not self.latent_cache:
             raise ValueError("latent_cache_sharded requires latent_cache=true.")
+        if bool(self.aspect_buckets_enabled) and bool(self.latent_cache_sharded):
+            raise ValueError("aspect_buckets_enabled currently requires cache.sharded=false because buckets produce variable latent shapes.")
         if self.latent_shard_cache_size <= 0:
             raise ValueError("latent_shard_cache_size must be positive.")
         if self.text_shard_cache_size <= 0:
@@ -621,6 +623,22 @@ class TrainConfig:
             raise ValueError("batch_size and grad_accum_steps must be positive.")
         if self.dataset_limit < 0:
             raise ValueError("dataset_limit must be non-negative.")
+        if self.aspect_buckets_enabled:
+            from data_loader.buckets import parse_buckets, validate_buckets
+
+            patch_sizes = [
+                int(self.latent_patch_size),
+                int(self.source_patch_size),
+                int(self.mask_patch_size),
+                int(self.control_patch_size),
+            ]
+            if bool(self.hierarchical_tokens_enabled):
+                patch_sizes.append(int(self.coarse_patch_size))
+            validate_buckets(
+                parse_buckets(self.aspect_buckets),
+                latent_downsample_factor=int(self.latent_downsample_factor),
+                latent_patch_size=patch_sizes,
+            )
         if self.val_every < 0 or self.val_batches < 0:
             raise ValueError("validation cadence and batch counts must be non-negative.")
         if self.amp_dtype not in {"fp16", "bf16"}:
