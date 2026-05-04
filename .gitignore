@@ -14,3 +14,4 @@ md-dev/
 .codex
 report.md
 **__pycache__/
+webui/frontend/.vite/
