@@ -41,9 +41,36 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.stack((-x2, x1), dim=-1).flatten(-2)
 
 
-def _axis_rope_angles(length: int, dim: int, *, device: torch.device) -> torch.Tensor:
+def _axis_rope_scale(length: int, base_length: int | None, scaling: str) -> float:
+    if base_length is None or base_length <= 0 or scaling == "none":
+        return 1.0
+    return max(float(length) / float(base_length), 1.0)
+
+
+def _ntk_theta(theta: float, scale: float, dim: int) -> float:
+    if scale <= 1.0 or dim <= 2:
+        return float(theta)
+    # Dynamic-NTK style base expansion for extrapolating longer 2D grids while
+    # preserving the original frequency layout at or below the base resolution.
+    exponent = float(dim) / max(float(dim - 2), 1.0)
+    return float(theta) * (float(scale) ** exponent)
+
+
+def _axis_rope_angles(
+    length: int,
+    dim: int,
+    *,
+    device: torch.device,
+    base_length: int | None = None,
+    scaling: str = "none",
+    theta: float = 10000.0,
+) -> torch.Tensor:
+    scale = _axis_rope_scale(length, base_length, scaling)
     idx = torch.arange(length, device=device, dtype=torch.float32)
-    inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / max(dim, 1)))
+    if scaling == "linear" and scale > 1.0:
+        idx = idx / scale
+    theta_eff = _ntk_theta(theta, scale, dim) if scaling == "ntk" else float(theta)
+    inv_freq = 1.0 / (theta_eff ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / max(dim, 1)))
     freqs = torch.einsum("n,d->nd", idx, inv_freq)
     return torch.repeat_interleave(freqs, 2, dim=-1)
 
@@ -54,19 +81,25 @@ def _build_2d_rope_angles(
     chunks: int,
     *,
     device: torch.device,
+    base_grid_hw: tuple[int, int] | None = None,
+    scaling: str = "none",
+    theta: float = 10000.0,
 ) -> tuple[torch.Tensor, int]:
     """Return repeated 2D RoPE angles as [chunks * H * W, rope_dim].
 
-    The first half of rope_dim receives y positions, the second half receives x
-    positions. Any non-divisible head tail remains unrotated by the caller.
+    `base_grid_hw` and `scaling` make the rotary frequencies stable when the
+    model is trained at one latent grid and sampled/evaluated at another. The
+    default behavior is identical to the original fixed-theta RoPE path.
     """
     h, w = grid_hw
     rope_dim = (head_dim // 4) * 4
     if rope_dim <= 0:
         return torch.empty(chunks * h * w, 0, device=device), 0
     axis_dim = rope_dim // 2
-    y = _axis_rope_angles(h, axis_dim, device=device)
-    x = _axis_rope_angles(w, axis_dim, device=device)
+    base_h = base_grid_hw[0] if base_grid_hw is not None else None
+    base_w = base_grid_hw[1] if base_grid_hw is not None else None
+    y = _axis_rope_angles(h, axis_dim, device=device, base_length=base_h, scaling=scaling, theta=theta)
+    x = _axis_rope_angles(w, axis_dim, device=device, base_length=base_w, scaling=scaling, theta=theta)
     yy = y[:, None, :].expand(h, w, axis_dim)
     xx = x[None, :, :].expand(h, w, axis_dim)
     angles = torch.cat([yy, xx], dim=-1).reshape(h * w, rope_dim)
@@ -82,6 +115,9 @@ def apply_2d_rope(
     grid_hw: tuple[int, int],
     start: int,
     length: int,
+    base_grid_hw: tuple[int, int] | None = None,
+    scaling: str = "none",
+    theta: float = 10000.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply 2D rotary embedding to a slice of shaped q/k tensors.
 
@@ -90,16 +126,29 @@ def apply_2d_rope(
         grid_hw: latent patch grid for one image-like token stream
         start: token start offset in the joint sequence
         length: number of image-like tokens; can contain repeated grid chunks
+        base_grid_hw: training/base grid used for RoPE extrapolation
+        scaling: one of none/linear/ntk
+        theta: rotary base frequency
     """
     if length <= 0:
         return q, k
+    if scaling not in {"none", "linear", "ntk"}:
+        raise ValueError("rope scaling must be one of: none, linear, ntk.")
     h, w = grid_hw
     grid_tokens = h * w
     if grid_tokens <= 0 or length % grid_tokens != 0:
         raise ValueError(
             f"RoPE image token length must be a multiple of grid tokens; got length={length}, grid={grid_hw}."
         )
-    angles, rope_dim = _build_2d_rope_angles(grid_hw, q.shape[-1], length // grid_tokens, device=q.device)
+    angles, rope_dim = _build_2d_rope_angles(
+        grid_hw,
+        q.shape[-1],
+        length // grid_tokens,
+        device=q.device,
+        base_grid_hw=base_grid_hw,
+        scaling=scaling,
+        theta=theta,
+    )
     if rope_dim <= 0:
         return q, k
     end = start + length
@@ -114,3 +163,45 @@ def apply_2d_rope(
         return torch.cat([x[:, :, :start], x_slice, x[:, :, end:]], dim=2)
 
     return _apply(q), _apply(k)
+
+
+def apply_2d_rope_sections(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    *,
+    sections: tuple[tuple[int, int, int, int], ...] | tuple[tuple[int, int, int, int, int, int], ...],
+    base_grid_hw: tuple[int, int] | None = None,
+    scaling: str = "none",
+    theta: float = 10000.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply 2D RoPE to multiple image-like token sections.
+
+    Each section is either ``(start, length, grid_h, grid_w)`` or
+    ``(start, length, grid_h, grid_w, base_h, base_w)``. This is used by
+    Stage D where target/source/mask/control/coarse streams can have different
+    patch sizes, therefore one global image grid is no longer sufficient.
+    """
+    if scaling not in {"none", "linear", "ntk"}:
+        raise ValueError("rope scaling must be one of: none, linear, ntk.")
+    for section in sections:
+        if len(section) == 4:
+            start, length, grid_h, grid_w = section
+            section_base = base_grid_hw
+        elif len(section) == 6:
+            start, length, grid_h, grid_w, base_h, base_w = section
+            section_base = (int(base_h), int(base_w))
+        else:
+            raise ValueError("RoPE section must have 4 or 6 integer values.")
+        if int(length) <= 0:
+            continue
+        q, k = apply_2d_rope(
+            q,
+            k,
+            grid_hw=(int(grid_h), int(grid_w)),
+            start=int(start),
+            length=int(length),
+            base_grid_hw=section_base,
+            scaling=scaling,
+            theta=theta,
+        )
+    return q, k

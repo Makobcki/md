@@ -57,6 +57,7 @@ class ConditionBatch:
     source_latent: Optional[torch.Tensor] = None
     mask: Optional[torch.Tensor] = None
     control_latents: Optional[torch.Tensor] = None
+    control_type: Optional[torch.Tensor] = None
     task: TaskName | str = "txt2img"
     strength: Optional[torch.Tensor] = None
 
@@ -68,5 +69,8 @@ class TrainBatch:
     source_latent: Optional[torch.Tensor] = None
     mask: Optional[torch.Tensor] = None
     control_latents: Optional[torch.Tensor] = None
+    control_type: Optional[torch.Tensor] = None
     task: str | list[str] = "txt2img"
+    strength: Optional[torch.Tensor] = None
+    control_strength: Optional[torch.Tensor] = None
     metadata: dict | None = None
