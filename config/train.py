@@ -97,15 +97,51 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
             "swiglu",
             "adaln_zero",
             "pos_embed",
+            "rope_scaling",
+            "rope_base_grid_hw",
+            "rope_theta",
             "double_stream_blocks",
             "single_stream_blocks",
             "dropout",
             "attn_dropout",
             "gradient_checkpointing",
             "zero_init_final",
+            "attention_schedule",
+            "early_joint_blocks",
+            "late_joint_blocks",
+            "source_patch_size",
+            "mask_patch_size",
+            "control_patch_size",
+            "mask_as_source_channel",
+            "conditioning_rope",
+            "strength_embed",
+            "control_type_embed",
+            "control_adapter",
+            "control_adapter_ratio",
+            "hierarchical_tokens_enabled",
+            "coarse_patch_size",
         ):
             if key in model and key not in flat:
                 flat[key] = model[key]
+        rope = model.get("rope")
+        if isinstance(rope, dict):
+            mapping = {
+                "scaling": "rope_scaling",
+                "base_grid": "rope_base_grid_hw",
+                "theta": "rope_theta",
+            }
+            for src, dst in mapping.items():
+                if src in rope and dst not in flat:
+                    flat[dst] = rope[src]
+        hierarchical = model.get("hierarchical")
+        if isinstance(hierarchical, dict):
+            mapping = {
+                "enabled": "hierarchical_tokens_enabled",
+                "coarse_patch_size": "coarse_patch_size",
+            }
+            for src, dst in mapping.items():
+                if src in hierarchical and dst not in flat:
+                    flat[dst] = hierarchical[src]
     text = data.get("text")
     if isinstance(text, dict):
         for key in ("text_dim", "pooled_dim"):
@@ -113,6 +149,17 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
                 flat[key] = text[key]
         if "cache" in text and "text_cache" not in flat:
             flat["text_cache"] = text["cache"]
+        resampler = text.get("resampler")
+        if isinstance(resampler, dict):
+            mapping = {
+                "enabled": "text_resampler_enabled",
+                "num_tokens": "text_resampler_num_tokens",
+                "depth": "text_resampler_depth",
+                "mlp_ratio": "text_resampler_mlp_ratio",
+            }
+            for src, dst in mapping.items():
+                if src in resampler and dst not in flat:
+                    flat[dst] = resampler[src]
 
     dataset = data.get("dataset")
     if isinstance(dataset, dict):
@@ -128,10 +175,22 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
             "require_512": "require_512",
             "val_ratio": "val_ratio",
             "dataset_limit": "dataset_limit",
+            "aspect_buckets_enabled": "aspect_buckets_enabled",
+            "aspect_buckets": "aspect_buckets",
         }
         for src, dst in mapping.items():
             if src in dataset and dst not in flat:
                 flat[dst] = dataset[src]
+
+    img2img = data.get("img2img")
+    if isinstance(img2img, dict):
+        mapping = {
+            "strength_min": "img2img_strength_min",
+            "strength_max": "img2img_strength_max",
+        }
+        for src, dst in mapping.items():
+            if src in img2img and dst not in flat:
+                flat[dst] = img2img[src]
 
     inpaint = data.get("inpaint")
     if isinstance(inpaint, dict):
@@ -141,6 +200,8 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
             "mask_modes": "inpaint_mask_modes",
             "loss_mask_weight": "inpaint_loss_mask_weight",
             "loss_unmask_weight": "inpaint_loss_unmask_weight",
+            "strength_min": "inpaint_strength_min",
+            "strength_max": "inpaint_strength_max",
         }
         for src, dst in mapping.items():
             if src in inpaint and dst not in flat:
@@ -165,10 +226,28 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
             "types": "control_types",
             "strength": "control_strength",
             "num_streams": "control_num_streams",
+            "type_embed": "control_type_embed",
+            "adapter": "control_adapter",
+            "adapter_ratio": "control_adapter_ratio",
         }
         for src, dst in mapping.items():
             if src in control and dst not in flat:
                 flat[dst] = control[src]
+
+    hierarchical = data.get("hierarchical")
+    if isinstance(hierarchical, dict):
+        mapping = {
+            "enabled": "hierarchical_tokens_enabled",
+            "coarse_patch_size": "coarse_patch_size",
+        }
+        for src, dst in mapping.items():
+            if src in hierarchical and dst not in flat:
+                flat[dst] = hierarchical[src]
+
+    loss = data.get("loss")
+    if isinstance(loss, dict):
+        if "x0_aux_weight" in loss and "x0_aux_weight" not in flat:
+            flat["x0_aux_weight"] = loss["x0_aux_weight"]
 
     flow = data.get("flow")
     if isinstance(flow, dict):
@@ -303,9 +382,15 @@ class TrainConfig:
     cache_dir: str = ".cache"
     failed_list: str = "failed/md5.txt"
     dataset_limit: int = 0
+    aspect_buckets_enabled: bool = False
+    aspect_buckets: list[Any] = field(default_factory=list)
     dataset_tasks: Dict[str, float] = field(
         default_factory=lambda: {"txt2img": 1.0, "img2img": 0.0, "inpaint": 0.0, "control": 0.0}
     )
+    img2img_strength_min: float = 1.0
+    img2img_strength_max: float = 1.0
+    inpaint_strength_min: float = 1.0
+    inpaint_strength_max: float = 1.0
 
     seed: int = 42
     out_dir: str = "./runs/danbooru_512"
@@ -388,12 +473,36 @@ class TrainConfig:
     swiglu: bool = True
     adaln_zero: bool = True
     pos_embed: str = "rope_2d"
+    rope_scaling: str = "none"
+    rope_base_grid_hw: tuple[int, int] = (32, 32)
+    rope_theta: float = 10000.0
     double_stream_blocks: int = 16
     single_stream_blocks: int = 8
     dropout: float = 0.0
     attn_dropout: float = 0.0
     gradient_checkpointing: bool = True
     zero_init_final: bool = True
+    attention_schedule: str = "full"
+    early_joint_blocks: int = 0
+    late_joint_blocks: int = 0
+    source_patch_size: int = 2
+    mask_patch_size: int = 2
+    control_patch_size: int = 2
+    mask_as_source_channel: bool = False
+    conditioning_rope: bool = True
+    strength_embed: bool = False
+    control_type_embed: bool = False
+    control_adapter: bool = False
+    control_adapter_ratio: float = 0.25
+    hierarchical_tokens_enabled: bool = False
+    coarse_patch_size: int = 4
+
+    text_resampler_enabled: bool = False
+    text_resampler_num_tokens: int = 128
+    text_resampler_depth: int = 2
+    text_resampler_mlp_ratio: float = 4.0
+
+    x0_aux_weight: float = 0.0
 
     text_preset: str = ""
     text_dim: int = 1024

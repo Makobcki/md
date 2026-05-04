@@ -24,23 +24,54 @@ def _ff_params(hidden_dim: int, mlp_ratio: float, *, swiglu: bool) -> int:
 
 
 def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
+    """Analytical MMDiT parameter estimate used by CLI dry-run.
+
+    Keep this in sync with ``train.runner._estimate_mmdit_params_from_config``
+    so the lightweight ``--dry-run`` path reports Stage A architecture changes
+    such as the text resampler and hybrid image-only blocks.
+    """
     d = int(cfg.hidden_dim)
     c = int(cfg.latent_channels)
     p = int(cfg.latent_patch_size)
+    sp = int(getattr(cfg, "source_patch_size", p))
+    mp = int(getattr(cfg, "mask_patch_size", p))
+    cp = int(getattr(cfg, "control_patch_size", p))
+    coarse_p = int(getattr(cfg, "coarse_patch_size", 4))
     out_patch = c * p * p
     head_dim = d // int(cfg.num_heads)
     total = 0
-    total += 3 * (c * p * p * d + d)
-    total += 1 * (1 * p * p * d + d)
+    total += c * p * p * d + d
+    total += c * sp * sp * d + d
+    total += (c + 1) * sp * sp * d + d
+    total += 1 * mp * mp * d + d
+    total += c * cp * cp * d + d
+    total += c * coarse_p * coarse_p * d + d
     total += 3 * _linear_params(int(cfg.text_dim), d)
     total += _linear_params(int(cfg.pooled_dim), d)
-    total += _linear_params(d, d * 4) + _linear_params(d * 4, d)
+    total += _linear_params(3, d) + _linear_params(d, d)
+    total += 9 * d
     total += 8 * d
     total += 5 * d
     total += _norm_params(d, rms_norm=bool(cfg.rms_norm))
+    if bool(getattr(cfg, "control_adapter", False)):
+        inner = max(1, int(d * float(getattr(cfg, "control_adapter_ratio", 0.25))))
+        total += _norm_params(d, rms_norm=True) + _linear_params(d, inner) + _linear_params(inner, d)
 
     qk_norm_params = 2 * head_dim if bool(cfg.qk_norm) else 0
     norm = _norm_params(d, rms_norm=bool(cfg.rms_norm))
+
+    if bool(getattr(cfg, "text_resampler_enabled", False)):
+        total += int(getattr(cfg, "text_resampler_num_tokens", 128)) * d
+        resampler_layer = 0
+        resampler_layer += 3 * norm
+        resampler_layer += _linear_params(d, d)
+        resampler_layer += _linear_params(d, 2 * d)
+        resampler_layer += qk_norm_params
+        resampler_layer += _linear_params(d, d)
+        resampler_layer += _ff_params(d, float(getattr(cfg, "text_resampler_mlp_ratio", 4.0)), swiglu=bool(cfg.swiglu))
+        total += int(getattr(cfg, "text_resampler_depth", 2)) * resampler_layer
+        total += norm
+
     double = 0
     double += 4 * norm
     double += 2 * _linear_params(d, 6 * d)
@@ -48,7 +79,6 @@ def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
     double += qk_norm_params
     double += 2 * _linear_params(d, d)
     double += 2 * _ff_params(d, float(cfg.mlp_ratio), swiglu=bool(cfg.swiglu))
-    total += int(cfg.double_stream_blocks) * double
 
     single = 0
     single += 2 * norm
@@ -57,7 +87,21 @@ def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
     single += qk_norm_params
     single += _linear_params(d, d)
     single += _ff_params(d, float(cfg.mlp_ratio), swiglu=bool(cfg.swiglu))
-    total += int(cfg.single_stream_blocks) * single
+
+    def block_mode(idx: int) -> str:
+        if str(getattr(cfg, "attention_schedule", "full")) != "hybrid":
+            return "joint"
+        early = int(getattr(cfg, "early_joint_blocks", 0))
+        late_start = max(int(cfg.depth) - int(getattr(cfg, "late_joint_blocks", 0)), early)
+        return "joint" if idx < early or idx >= late_start else "image_only"
+
+    for idx in range(int(cfg.depth)):
+        if block_mode(idx) == "image_only":
+            total += single
+        elif idx < int(cfg.double_stream_blocks):
+            total += double
+        else:
+            total += single
 
     total += 2 * d
     total += _linear_params(d, 2 * d)
@@ -97,7 +141,7 @@ def _main_impl() -> None:
     ap.add_argument(
         "--profile",
         default="",
-        choices=("", "smoke", "overfit", "dev", "base", "full", "milestone_a", "milestone_b", "milestone_c", "distributed_smoke", "fsdp_template"),
+        choices=("", "smoke", "overfit", "dev", "base", "full", "stage_a", "stage_b", "stage_c", "stage_d", "milestone_a", "milestone_b", "milestone_c", "distributed_smoke", "fsdp_template"),
         help="Convenience profile; ignored when --config is set.",
     )
     ap.add_argument("--resume", default="")
@@ -112,6 +156,10 @@ def _main_impl() -> None:
         "dev": "config/train_dev.yaml",
         "base": "config/train_base.yaml",
         "full": "config/train.yaml",
+        "stage_a": "config/train_stage_a.yaml",
+        "stage_b": "config/train_stage_b.yaml",
+        "stage_c": "config/train_stage_c.yaml",
+        "stage_d": "config/train_stage_d.yaml",
         "milestone_a": "config/train_milestone_a.yaml",
         "milestone_b": "config/train_milestone_b.yaml",
         "milestone_c": "config/train_milestone_c.yaml",
