@@ -121,21 +121,45 @@ def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
     d = int(cfg.hidden_dim)
     c = int(cfg.latent_channels)
     p = int(cfg.latent_patch_size)
+    sp = int(cfg.source_patch_size)
+    mp = int(cfg.mask_patch_size)
+    cp = int(cfg.control_patch_size)
+    coarse_p = int(getattr(cfg, "coarse_patch_size", 4))
     out_patch = c * p * p
     head_dim = d // int(cfg.num_heads)
     total = 0
-    # target/source/control patch emb plus mask patch emb
-    total += 3 * (c * p * p * d + d)
-    total += 1 * (1 * p * p * d + d)
+    # target/source/source+mask/mask/control patch embeddings
+    total += c * p * p * d + d
+    total += c * sp * sp * d + d
+    total += (c + 1) * sp * sp * d + d
+    total += 1 * mp * mp * d + d
+    total += c * cp * cp * d + d
+    total += c * coarse_p * coarse_p * d + d
     total += 3 * _linear_params(int(cfg.text_dim), d)
     total += _linear_params(int(cfg.pooled_dim), d)
-    total += _linear_params(d, d * 4) + _linear_params(d * 4, d)
-    total += 8 * d  # type embeddings
+    total += _linear_params(3, d) + _linear_params(d, d)  # strength/mask/control scalar MLP
+    total += 9 * d  # stream type embeddings
+    total += 8 * d  # control type embedding table
     total += 5 * d  # task embedding
     total += _norm_params(d, rms_norm=bool(cfg.rms_norm))
+    if bool(cfg.control_adapter):
+        inner = max(1, int(d * float(cfg.control_adapter_ratio)))
+        total += _norm_params(d, rms_norm=True) + _linear_params(d, inner) + _linear_params(inner, d)
 
     qk_norm_params = 2 * head_dim if bool(cfg.qk_norm) else 0
     norm = _norm_params(d, rms_norm=bool(cfg.rms_norm))
+
+    if bool(cfg.text_resampler_enabled):
+        total += int(cfg.text_resampler_num_tokens) * d
+        resampler_layer = 0
+        resampler_layer += 3 * norm
+        resampler_layer += _linear_params(d, d)
+        resampler_layer += _linear_params(d, 2 * d)
+        resampler_layer += qk_norm_params
+        resampler_layer += _linear_params(d, d)
+        resampler_layer += _ff_params(d, float(cfg.text_resampler_mlp_ratio), swiglu=bool(cfg.swiglu))
+        total += int(cfg.text_resampler_depth) * resampler_layer
+        total += norm
 
     double = 0
     double += 4 * norm
@@ -144,7 +168,6 @@ def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
     double += qk_norm_params
     double += 2 * _linear_params(d, d)
     double += 2 * _ff_params(d, float(cfg.mlp_ratio), swiglu=bool(cfg.swiglu))
-    total += int(cfg.double_stream_blocks) * double
 
     single = 0
     single += 2 * norm
@@ -153,13 +176,26 @@ def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
     single += qk_norm_params
     single += _linear_params(d, d)
     single += _ff_params(d, float(cfg.mlp_ratio), swiglu=bool(cfg.swiglu))
-    total += int(cfg.single_stream_blocks) * single
+
+    def mode(idx: int) -> str:
+        if str(cfg.attention_schedule) != "hybrid":
+            return "joint"
+        early = int(cfg.early_joint_blocks)
+        late_start = max(int(cfg.depth) - int(cfg.late_joint_blocks), early)
+        return "joint" if idx < early or idx >= late_start else "image_only"
+
+    for idx in range(int(cfg.depth)):
+        if mode(idx) == "image_only":
+            total += single
+        elif idx < int(cfg.double_stream_blocks):
+            total += double
+        else:
+            total += single
 
     total += 2 * d  # final LayerNorm
     total += _linear_params(d, 2 * d)
     total += _linear_params(d, out_patch)
     return int(total)
-
 
 def _build_optimizer(cfg: TrainConfig, model: torch.nn.Module, device: torch.device) -> torch.optim.Optimizer:
     name = str(cfg.optimizer)
@@ -480,22 +516,37 @@ class _MMDiTCachedDataset(torch.utils.data.Dataset):
         dataset_tasks: dict[str, float] | None = None,
         seed: int = 42,
         inpaint_config: InpaintMaskConfig | None = None,
+        img2img_strength_range: tuple[float, float] = (1.0, 1.0),
+        inpaint_strength_range: tuple[float, float] = (1.0, 1.0),
         control_enabled: bool = False,
         control_strength: float = 1.0,
         control_num_streams: int = 1,
+        control_types: dict[str, bool] | None = None,
     ) -> None:
         self.latent_ds = latent_ds
         self.text_cache = text_cache
         self.entries = latent_ds.entries
         self.seed = int(seed)
         self.inpaint_config = inpaint_config or InpaintMaskConfig()
+        self.img2img_strength_range = (float(img2img_strength_range[0]), float(img2img_strength_range[1]))
+        self.inpaint_strength_range = (float(inpaint_strength_range[0]), float(inpaint_strength_range[1]))
+        for name, (lo, hi) in {"img2img": self.img2img_strength_range, "inpaint": self.inpaint_strength_range}.items():
+            if lo < 0.0 or hi > 1.0 or lo > hi:
+                raise RuntimeError(f"MMDiT {name} strength range must satisfy 0 <= min <= max <= 1.")
         self.control_enabled = bool(control_enabled)
         self.control_strength = float(control_strength)
         self.control_num_streams = int(control_num_streams)
+        self.control_types = dict(control_types or {"latent_identity": True})
+        self.active_control_types = [name for name, enabled in self.control_types.items() if bool(enabled)]
         if self.control_strength < 0:
             raise RuntimeError("MMDiT control_strength must be non-negative.")
         if self.control_num_streams <= 0:
             raise RuntimeError("MMDiT control_num_streams must be positive.")
+        unknown_control = sorted(set(self.active_control_types) - set(_CONTROL_TYPE_TO_ID))
+        if unknown_control:
+            raise RuntimeError("MMDiT control_types contains unsupported type(s): " + ", ".join(unknown_control))
+        if self.control_enabled and not self.active_control_types:
+            raise RuntimeError("MMDiT control_enabled requires at least one active control type.")
         task_weights = dict(dataset_tasks or {"txt2img": 1.0})
         allowed_tasks = {"txt2img", "img2img", "inpaint", "control"}
         unknown = sorted(set(task_weights) - allowed_tasks)
@@ -529,6 +580,15 @@ class _MMDiTCachedDataset(torch.utils.data.Dataset):
             device=x0.device,
         )
 
+    def _random_strength(self, strength_range: tuple[float, float], *, idx: int, salt: int, dtype: torch.dtype) -> torch.Tensor:
+        lo, hi = float(strength_range[0]), float(strength_range[1])
+        if lo == hi:
+            return torch.tensor(lo, dtype=dtype)
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(self.seed + int(idx) * 7919 + int(salt))
+        value = lo + (hi - lo) * float(torch.rand((), generator=gen).item())
+        return torch.tensor(value, dtype=dtype)
+
     def __getitem__(self, idx: int) -> TrainBatch:
         raw = self.latent_ds[idx]
         x0 = raw[0] if isinstance(raw, tuple) else raw
@@ -537,23 +597,32 @@ class _MMDiTCachedDataset(torch.utils.data.Dataset):
         source_latent = None
         mask = None
         control_latents = None
+        control_type = None
+        strength = None
+        control_strength = None
         metadata = {"key": key, "task": task}
         if task == "img2img":
             source_latent = x0.clone()
+            strength = self._random_strength(self.img2img_strength_range, idx=idx, salt=1301, dtype=x0.dtype)
+            metadata["strength"] = float(strength.float().item())
         elif task == "inpaint":
             mask = self._random_mask(x0, idx=idx)
             source_latent = x0.clone()
+            strength = self._random_strength(self.inpaint_strength_range, idx=idx, salt=2609, dtype=x0.dtype)
+            metadata["strength"] = float(strength.float().item())
         elif task == "control":
-            # First-stage control preprocessing: use the encoded condition latent
-            # directly as a control stream. In cached training this is the
-            # already-encoded sample latent; later preprocessors can replace it
-            # with canny/depth/pose latents without touching the model API.
-            control = x0.clone() * self.control_strength
-            control_latents = control.unsqueeze(0).repeat(self.control_num_streams, 1, 1, 1)
+            control_strength = torch.tensor(float(self.control_strength), dtype=x0.dtype)
+            active = self.active_control_types or ["latent_identity"]
+            offset = int(idx) % len(active)
+            control_names = [active[(offset + i) % len(active)] for i in range(self.control_num_streams)]
+            control_type = torch.tensor([_CONTROL_TYPE_TO_ID[name] for name in control_names], dtype=torch.long)
+            control_items = [latent_control_preprocess(x0, name) for name in control_names]
+            control_latents = torch.stack(control_items, dim=0)
             metadata.update({
                 "control_strength": self.control_strength,
                 "control_num_streams": self.control_num_streams,
-                "control_preprocessing": "latent_identity",
+                "control_types": control_names,
+                "control_preprocessing": control_names[0] if len(set(control_names)) == 1 else "mixed",
             })
         elif task != "txt2img":
             raise RuntimeError(f"Unsupported MMDiT dataset task: {task}")
@@ -563,7 +632,10 @@ class _MMDiTCachedDataset(torch.utils.data.Dataset):
             source_latent=source_latent,
             mask=mask,
             control_latents=control_latents,
+            control_type=control_type,
             task=task,
+            strength=strength,
+            control_strength=control_strength,
             metadata=metadata,
         )
 
@@ -575,6 +647,7 @@ def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
     source_latent = None
     mask = None
     control_latents = None
+    control_type = None
     if has_source:
         source_latent = torch.stack(
             [
@@ -609,7 +682,19 @@ def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
                     control = torch.cat([control, pad], dim=0)
             control_items.append(control)
         control_latents = torch.stack(control_items, dim=0)
+        type_items = []
+        for item in batch:
+            if item.control_type is None:
+                ids = torch.zeros((max_controls,), dtype=torch.long)
+            else:
+                ids = item.control_type.to(dtype=torch.long).reshape(-1)
+                if ids.numel() < max_controls:
+                    ids = torch.cat([ids, torch.zeros((max_controls - ids.numel(),), dtype=torch.long)], dim=0)
+            type_items.append(ids[:max_controls])
+        control_type = torch.stack(type_items, dim=0)
     tasks = [item.task for item in batch]
+    strength = torch.stack([item.strength if item.strength is not None else torch.tensor(1.0 if item.task in {"img2img", "inpaint"} else 1.0, dtype=item.x0.dtype) for item in batch], dim=0)
+    control_strength = torch.stack([item.control_strength if item.control_strength is not None else torch.tensor(0.0, dtype=item.x0.dtype) for item in batch], dim=0)
     return TrainBatch(
         x0=torch.stack([item.x0 for item in batch], dim=0),
         text=TextConditioning(
@@ -634,11 +719,59 @@ def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
         source_latent=source_latent,
         mask=mask,
         control_latents=control_latents,
+        control_type=control_type,
         task=tasks if not all(task == tasks[0] for task in tasks) else tasks[0],
+        strength=strength,
+        control_strength=control_strength,
         metadata={
             "keys": [item.metadata.get("key") if item.metadata else None for item in batch],
             "tasks": tasks,
         },
+    )
+
+
+def _build_mmdit_dataloader(
+    ds: torch.utils.data.Dataset,
+    *,
+    cfg: TrainConfig,
+    shuffle: bool,
+    drop_last: bool,
+    seed: int,
+) -> DataLoader:
+    common = {
+        "num_workers": _resolve_num_workers(int(cfg.num_workers)),
+        "pin_memory": bool(cfg.pin_memory),
+        "persistent_workers": bool(cfg.persistent_workers) and int(cfg.num_workers) != 0,
+        "prefetch_factor": int(cfg.prefetch_factor) if int(cfg.num_workers) != 0 else None,
+        "collate_fn": _collate_mmdit,
+    }
+    if bool(cfg.aspect_buckets_enabled):
+        entries = getattr(ds, "entries", None)
+        if entries is None:
+            raise RuntimeError("aspect bucket sampling requires dataset entries metadata.")
+        patch_sizes = [int(cfg.latent_patch_size), int(cfg.source_patch_size), int(cfg.mask_patch_size), int(cfg.control_patch_size)]
+        if bool(cfg.hierarchical_tokens_enabled):
+            patch_sizes.append(int(cfg.coarse_patch_size))
+        buckets = validate_buckets(
+            parse_buckets(cfg.aspect_buckets),
+            latent_downsample_factor=int(cfg.latent_downsample_factor),
+            latent_patch_size=patch_sizes,
+        )
+        sampler = AspectBucketBatchSampler(
+            entries,
+            buckets,
+            batch_size=int(cfg.batch_size),
+            shuffle=shuffle,
+            seed=int(seed),
+            drop_last=drop_last,
+        )
+        return DataLoader(ds, batch_sampler=sampler, **common)
+    return DataLoader(
+        ds,
+        batch_size=int(cfg.batch_size),
+        shuffle=shuffle,
+        drop_last=drop_last,
+        **common,
     )
 
 
@@ -718,7 +851,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
     _ensure_mmdit_caches_ready(cfg, train_entries, device)
     latent_dtype = torch.bfloat16 if cfg.latent_dtype == "bf16" else torch.float16
     latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
-    latent_expected_meta = LatentCacheMetadata(
+    latent_expected_meta = None if bool(cfg.aspect_buckets_enabled) else LatentCacheMetadata(
         vae_pretrained=str(cfg.vae_pretrained),
         scaling_factor=float(cfg.vae_scaling_factor),
         latent_shape=(int(cfg.latent_channels), latent_side, latent_side),
@@ -759,22 +892,21 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
             mask_max_area=float(cfg.inpaint_mask_max_area),
             mask_modes=dict(cfg.inpaint_mask_modes),
         ),
+        img2img_strength_range=(float(cfg.img2img_strength_min), float(cfg.img2img_strength_max)),
+        inpaint_strength_range=(float(cfg.inpaint_strength_min), float(cfg.inpaint_strength_max)),
         control_enabled=bool(cfg.control_enabled),
         control_strength=float(cfg.control_strength),
         control_num_streams=int(cfg.control_num_streams),
+        control_types=dict(cfg.control_types),
     )
     if len(ds) == 0:
         raise RuntimeError("MMDiT dataset is empty after latent/text cache filtering.")
-    dl = DataLoader(
+    dl = _build_mmdit_dataloader(
         ds,
-        batch_size=int(cfg.batch_size),
+        cfg=cfg,
         shuffle=True,
-        num_workers=_resolve_num_workers(int(cfg.num_workers)),
-        pin_memory=bool(cfg.pin_memory),
         drop_last=True,
-        persistent_workers=bool(cfg.persistent_workers) and int(cfg.num_workers) != 0,
-        prefetch_factor=int(cfg.prefetch_factor) if int(cfg.num_workers) != 0 else None,
-        collate_fn=_collate_mmdit,
+        seed=int(cfg.seed),
     )
     dl_val = None
     if val_entries and int(cfg.val_every) > 0 and int(cfg.val_batches) > 0:
@@ -808,29 +940,27 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
                         flush=True,
                     )
             if val_text_ready:
-                dl_val = DataLoader(
-                    _MMDiTCachedDataset(
-                        val_latent_ds,
-                        text_cache,
-                        dataset_tasks={"txt2img": 1.0},
-                        seed=int(cfg.seed) + 17,
-                        inpaint_config=InpaintMaskConfig(
-                            mask_min_area=float(cfg.inpaint_mask_min_area),
-                            mask_max_area=float(cfg.inpaint_mask_max_area),
-                            mask_modes=dict(cfg.inpaint_mask_modes),
-                        ),
-                        control_enabled=bool(cfg.control_enabled),
-                        control_strength=float(cfg.control_strength),
-                        control_num_streams=int(cfg.control_num_streams),
+                val_ds = _MMDiTCachedDataset(
+                    val_latent_ds,
+                    text_cache,
+                    dataset_tasks={"txt2img": 1.0},
+                    seed=int(cfg.seed) + 17,
+                    inpaint_config=InpaintMaskConfig(
+                        mask_min_area=float(cfg.inpaint_mask_min_area),
+                        mask_max_area=float(cfg.inpaint_mask_max_area),
+                        mask_modes=dict(cfg.inpaint_mask_modes),
                     ),
-                    batch_size=int(cfg.batch_size),
+                    control_enabled=bool(cfg.control_enabled),
+                    control_strength=float(cfg.control_strength),
+                    control_num_streams=int(cfg.control_num_streams),
+                    control_types=dict(cfg.control_types),
+                )
+                dl_val = _build_mmdit_dataloader(
+                    val_ds,
+                    cfg=cfg,
                     shuffle=False,
-                    num_workers=_resolve_num_workers(int(cfg.num_workers)),
-                    pin_memory=bool(cfg.pin_memory),
                     drop_last=False,
-                    persistent_workers=bool(cfg.persistent_workers) and int(cfg.num_workers) != 0,
-                    prefetch_factor=int(cfg.prefetch_factor) if int(cfg.num_workers) != 0 else None,
-                    collate_fn=_collate_mmdit,
+                    seed=int(cfg.seed) + 17,
                 )
         elif val_entries:
             print(
@@ -850,6 +980,9 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
         swiglu=bool(cfg.swiglu),
         adaln_zero=bool(cfg.adaln_zero),
         pos_embed=str(cfg.pos_embed),
+        rope_scaling=str(cfg.rope_scaling),
+        rope_base_grid_hw=tuple(int(v) for v in cfg.rope_base_grid_hw),
+        rope_theta=float(cfg.rope_theta),
         double_stream_blocks=int(cfg.double_stream_blocks),
         single_stream_blocks=int(cfg.single_stream_blocks),
         dropout=float(cfg.dropout),
@@ -857,6 +990,26 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
         gradient_checkpointing=bool(cfg.gradient_checkpointing),
         text_dim=int(cfg.text_dim),
         pooled_dim=int(cfg.pooled_dim),
+        zero_init_final=bool(cfg.zero_init_final),
+        text_resampler_enabled=bool(cfg.text_resampler_enabled),
+        text_resampler_num_tokens=int(cfg.text_resampler_num_tokens),
+        text_resampler_depth=int(cfg.text_resampler_depth),
+        text_resampler_mlp_ratio=float(cfg.text_resampler_mlp_ratio),
+        attention_schedule=str(cfg.attention_schedule),
+        early_joint_blocks=int(cfg.early_joint_blocks),
+        late_joint_blocks=int(cfg.late_joint_blocks),
+        source_patch_size=int(cfg.source_patch_size),
+        mask_patch_size=int(cfg.mask_patch_size),
+        control_patch_size=int(cfg.control_patch_size),
+        mask_as_source_channel=bool(cfg.mask_as_source_channel),
+        conditioning_rope=bool(cfg.conditioning_rope),
+        strength_embed=bool(cfg.strength_embed),
+        control_type_embed=bool(cfg.control_type_embed),
+        control_adapter=bool(cfg.control_adapter),
+        control_adapter_ratio=float(cfg.control_adapter_ratio),
+        hierarchical_tokens_enabled=bool(cfg.hierarchical_tokens_enabled),
+        coarse_patch_size=int(cfg.coarse_patch_size),
+        x0_aux_weight=float(cfg.x0_aux_weight),
     )
     model = MMDiTFlowModel(mmdit_cfg).to(device)
     opt = _build_optimizer(cfg, model, device)

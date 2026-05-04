@@ -50,7 +50,10 @@ def _move_batch(batch: TrainBatch, device: torch.device) -> TrainBatch:
         control_latents=batch.control_latents.to(device=device, dtype=torch.float32)
         if batch.control_latents is not None
         else None,
+        control_type=batch.control_type.to(device=device, dtype=torch.long) if batch.control_type is not None else None,
         task=batch.task,
+        strength=batch.strength.to(device=device, dtype=torch.float32) if batch.strength is not None else None,
+        control_strength=batch.control_strength.to(device=device, dtype=torch.float32) if batch.control_strength is not None else None,
         metadata=batch.metadata,
     )
 
@@ -124,7 +127,10 @@ def _loss_and_bins(
             source_latent=batch.source_latent,
             mask=batch.mask,
             control_latents=batch.control_latents,
+            control_type=batch.control_type,
             task=batch.task,
+            strength=batch.strength,
+            control_strength=batch.control_strength,
         )
         _assert_finite("mmdit_pred", pred)
         per = _per_sample_flow_mse(
@@ -135,6 +141,11 @@ def _loss_and_bins(
             unmask_weight=float(inpaint_loss_unmask_weight),
         )
         loss = (per * train_tuple.weight.to(device=per.device, dtype=per.dtype)).mean()
+        if float(getattr(model.cfg, "x0_aux_weight", 0.0)) > 0:
+            t_view = train_tuple.t.to(device=pred.device, dtype=pred.dtype).view(-1, 1, 1, 1)
+            x0_pred = train_tuple.xt.to(device=pred.device, dtype=pred.dtype) - t_view * pred
+            x0_err = (x0_pred.float() - batch.x0.to(device=pred.device, dtype=torch.float32)).pow(2).mean(dim=[1, 2, 3])
+            loss = loss + float(model.cfg.x0_aux_weight) * (x0_err * train_tuple.weight.to(device=x0_err.device, dtype=x0_err.dtype)).mean()
 
     stats = loss_by_t_bins(per.detach(), train_tuple.t.detach(), bins=10, prefix="loss_t_bin")
     return loss, stats
@@ -173,7 +184,10 @@ def _run_validation(
                     source_latent=batch.source_latent,
                     mask=batch.mask,
                     control_latents=batch.control_latents,
+                    control_type=batch.control_type,
                     task=batch.task,
+                    strength=batch.strength,
+                    control_strength=batch.control_strength,
                 )
                 per = _per_sample_flow_mse(
                     pred,

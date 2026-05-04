@@ -54,7 +54,7 @@ def test_control_task_builds_control_latents_without_changing_target() -> None:
     assert item.control_latents is not None
     assert item.control_latents.shape == (2, 4, 8, 8)
     assert torch.equal(item.x0, torch.ones(4, 8, 8))
-    assert torch.allclose(item.control_latents, torch.full((2, 4, 8, 8), 0.5))
+    assert torch.allclose(item.control_latents, torch.ones(2, 4, 8, 8))
     assert item.metadata["control_preprocessing"] == "latent_identity"
 
 
