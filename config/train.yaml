@@ -76,7 +76,7 @@ training:
   optimizer: adamw
   warmup_steps: 1000
   max_steps: 60000
-  ema_decay: 0.9999
+  ema_decay: 0.999
   grad_clip_norm: 1.0
   amp: true
   amp_dtype: bf16
