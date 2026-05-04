@@ -199,6 +199,7 @@ class SampleArgs(BaseModel):
     mask: str = ""
     control_image: str = Field(default="", alias="control-image")
     control_strength: float = Field(default=1.0, ge=0.0, alias="control-strength")
+    control_type: Literal["none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"] = Field(default="image", alias="control-type")
     latent_only: bool = Field(default=False, alias="latent-only")
     fake_vae: bool = Field(default=False, alias="fake-vae")
     use_ema: bool = Field(default=True, alias="use-ema")

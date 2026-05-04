@@ -439,6 +439,7 @@ class JobManager:
             "init-image": "init_image",
             "control-image": "control_image",
             "control-strength": "control_strength",
+            "control-type": "control_type",
             "latent-only": "latent_only",
             "fake-vae": "fake_vae",
             "use-ema": "use_ema",

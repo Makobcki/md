@@ -20,6 +20,8 @@ const LABELS = {
   control_image: "Control image",
   "control-strength": "Control strength",
   control_strength: "Control strength",
+  "control-type": "Control type",
+  control_type: "Control type",
   "latent-only": "Latent-only",
   latent_only: "Latent-only",
   "fake-vae": "Fake VAE",

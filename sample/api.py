@@ -27,9 +27,12 @@ class SampleOptions:
     task: Literal["txt2img", "img2img", "inpaint", "control"] = "txt2img"
     control_image: str = ""
     control_strength: float = 1.0
+    control_type: str = "image"
     latent_only: bool = False
     fake_vae: bool = False
     use_ema: bool = True
+    width: int | None = None
+    height: int | None = None
 
     def validate(self) -> None:
         if self.n < 1:
@@ -48,6 +51,12 @@ class SampleOptions:
             raise ValueError("shift must be positive")
         if float(self.control_strength) < 0:
             raise ValueError("control_strength must be non-negative")
+        if self.width is not None and int(self.width) < 1:
+            raise ValueError("width must be >= 1")
+        if self.height is not None and int(self.height) < 1:
+            raise ValueError("height must be >= 1")
+        if self.control_type not in {"none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"}:
+            raise ValueError("control_type must be one of: none, latent_identity, image, canny, depth, pose, lineart, normal")
         if self.task in {"img2img", "inpaint"} and not self.init_image:
             raise RuntimeError(f"task={self.task} requires --init-image")
         if self.task == "inpaint" and not self.mask:
@@ -120,6 +129,11 @@ def _model_config_for_metadata(cfg: dict[str, Any], built: Any) -> dict[str, obj
         "double_stream_blocks": int(cfg.get("double_stream_blocks", model_section.get("double_stream_blocks", 16))),
         "single_stream_blocks": int(cfg.get("single_stream_blocks", model_section.get("single_stream_blocks", 8))),
         "pos_embed": str(cfg.get("pos_embed", model_section.get("pos_embed", "rope_2d"))),
+        "rope_scaling": str(cfg.get("rope_scaling", model_section.get("rope_scaling", _cfg_section(model_section, "rope").get("scaling", "none")))),
+        "rope_base_grid_hw": list(cfg.get("rope_base_grid_hw", model_section.get("rope_base_grid_hw", _cfg_section(model_section, "rope").get("base_grid", [32, 32])))),
+        "rope_theta": float(cfg.get("rope_theta", model_section.get("rope_theta", _cfg_section(model_section, "rope").get("theta", 10000.0)))),
+        "hierarchical_tokens_enabled": bool(cfg.get("hierarchical_tokens_enabled", model_section.get("hierarchical_tokens_enabled", _cfg_section(model_section, "hierarchical").get("enabled", False)))),
+        "coarse_patch_size": int(cfg.get("coarse_patch_size", model_section.get("coarse_patch_size", _cfg_section(model_section, "hierarchical").get("coarse_patch_size", 4)))),
         "text_dim": int(cfg.get("text_dim", _cfg_section(cfg, "text").get("text_dim", 1024))),
         "pooled_dim": int(cfg.get("pooled_dim", _cfg_section(cfg, "text").get("pooled_dim", 1024))),
     }
@@ -217,6 +231,8 @@ def _sample_metadata(
         "mask": str(_get_opt(args, "mask", "")),
         "control_image": str(_get_opt(args, "control_image", "")),
         "control_strength": float(_get_opt(args, "control_strength", 1.0)),
+        "control_type": str(_get_opt(args, "control_type", "image")),
+        "control_preprocessing": str(_get_opt(args, "control_type", "image")) if str(_get_opt(args, "control_image", "")) else "none",
         "latent_only": latent_only,
         "use_ema": bool(_get_opt(args, "use_ema", True)),
     }
@@ -236,7 +252,8 @@ def _load_latent_mask(path: str, *, latent_h: int, latent_w: int, device):
 def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, object]], None] | None = None, quiet: bool = False) -> dict[str, object]:
     options.validate()
     import torch
-    from data_loader.dataset import load_image_tensor
+    import numpy as np
+    from PIL import Image
     from diffusion.events import EventBus, StdoutJsonSink
     from diffusion.perf import PerfConfig, configure_performance
     from samplers import sample_flow_euler, sample_flow_heun
@@ -264,6 +281,8 @@ def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, objec
         latent_only=bool(options.latent_only),
         fake_vae=bool(options.fake_vae),
         use_ema=bool(options.use_ema),
+        width=options.width,
+        height=options.height,
     )
     configure_performance(
         PerfConfig(
@@ -291,10 +310,18 @@ def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, objec
     control_latents = None
     mask_latent = None
     start_t = 1.0
+
+    def _load_sample_image_tensor(path: str) -> torch.Tensor:
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            if im.size != (built.w, built.h):
+                im = im.resize((built.w, built.h), Image.Resampling.LANCZOS)
+            arr = np.asarray(im, dtype=np.float32) / 255.0
+        return torch.from_numpy(arr).permute(2, 0, 1).contiguous() * 2.0 - 1.0
     if options.init_image:
         if built.vae is None:
             raise RuntimeError("--init-image requires a VAE or --fake-vae; it is not available in --latent-only mode.")
-        img = load_image_tensor(options.init_image).unsqueeze(0).to(device)
+        img = _load_sample_image_tensor(options.init_image).unsqueeze(0).to(device)
         source_latent = built.vae.encode(img)
         start_t = float(options.strength)
     if options.mask:
@@ -302,8 +329,11 @@ def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, objec
     if options.control_image:
         if built.vae is None:
             raise RuntimeError("--control-image requires a VAE or --fake-vae; it is not available in --latent-only mode.")
-        control_img = load_image_tensor(options.control_image).unsqueeze(0).to(device)
-        control_latents = built.vae.encode(control_img) * float(options.control_strength)
+        from control.preprocess import image_control_preprocess
+
+        control_img = _load_sample_image_tensor(options.control_image).unsqueeze(0).to(device)
+        control_img = image_control_preprocess(control_img, str(options.control_type))
+        control_latents = built.vae.encode(control_img)
 
     outputs = []
     sampler = str(options.sampler)
@@ -341,6 +371,9 @@ def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, objec
             "source_latent": source_latent,
             "mask": mask_latent,
             "control_latents": control_latents,
+            "control_type": str(options.control_type),
+            "strength": float(options.strength) if options.task in {"img2img", "inpaint"} else 1.0,
+            "control_strength": float(options.control_strength) if control_latents is not None else 0.0,
             "task": str(options.task),
         }
         z = sample_flow_euler(**kwargs) if sampler == "flow_euler" else sample_flow_heun(**kwargs)
