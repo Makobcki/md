@@ -29,6 +29,28 @@ _MODEL_COMPAT_FIELDS = (
     "double_stream_blocks",
     "single_stream_blocks",
     "pos_embed",
+    "rope_scaling",
+    "rope_base_grid_hw",
+    "rope_theta",
+    "text_resampler_enabled",
+    "text_resampler_num_tokens",
+    "text_resampler_depth",
+    "text_resampler_mlp_ratio",
+    "attention_schedule",
+    "early_joint_blocks",
+    "late_joint_blocks",
+    "x0_aux_weight",
+    "source_patch_size",
+    "mask_patch_size",
+    "control_patch_size",
+    "mask_as_source_channel",
+    "conditioning_rope",
+    "strength_embed",
+    "control_type_embed",
+    "control_adapter",
+    "control_adapter_ratio",
+    "hierarchical_tokens_enabled",
+    "coarse_patch_size",
 )
 
 _TOP_LEVEL_COMPAT_FIELDS = (
@@ -97,8 +119,30 @@ def build_mmdit_checkpoint_metadata(
         "double_stream_blocks": int(cfg.double_stream_blocks),
         "single_stream_blocks": int(cfg.single_stream_blocks),
         "pos_embed": str(cfg.pos_embed),
+        "rope_scaling": str(getattr(cfg, "rope_scaling", "none")),
+        "rope_base_grid_hw": list(getattr(cfg, "rope_base_grid_hw", (32, 32))),
+        "rope_theta": float(getattr(cfg, "rope_theta", 10000.0)),
         "text_dim": int(cfg.text_dim),
         "pooled_dim": int(cfg.pooled_dim),
+        "text_resampler_enabled": bool(getattr(cfg, "text_resampler_enabled", False)),
+        "text_resampler_num_tokens": int(getattr(cfg, "text_resampler_num_tokens", 128)),
+        "text_resampler_depth": int(getattr(cfg, "text_resampler_depth", 2)),
+        "text_resampler_mlp_ratio": float(getattr(cfg, "text_resampler_mlp_ratio", 4.0)),
+        "attention_schedule": str(getattr(cfg, "attention_schedule", "full")),
+        "early_joint_blocks": int(getattr(cfg, "early_joint_blocks", 0)),
+        "late_joint_blocks": int(getattr(cfg, "late_joint_blocks", 0)),
+        "source_patch_size": int(getattr(cfg, "source_patch_size", cfg.latent_patch_size)),
+        "mask_patch_size": int(getattr(cfg, "mask_patch_size", cfg.latent_patch_size)),
+        "control_patch_size": int(getattr(cfg, "control_patch_size", cfg.latent_patch_size)),
+        "mask_as_source_channel": bool(getattr(cfg, "mask_as_source_channel", False)),
+        "conditioning_rope": bool(getattr(cfg, "conditioning_rope", True)),
+        "strength_embed": bool(getattr(cfg, "strength_embed", False)),
+        "control_type_embed": bool(getattr(cfg, "control_type_embed", False)),
+        "control_adapter": bool(getattr(cfg, "control_adapter", False)),
+        "control_adapter_ratio": float(getattr(cfg, "control_adapter_ratio", 0.25)),
+        "hierarchical_tokens_enabled": bool(getattr(cfg, "hierarchical_tokens_enabled", False)),
+        "coarse_patch_size": int(getattr(cfg, "coarse_patch_size", 4)),
+        "x0_aux_weight": float(getattr(cfg, "x0_aux_weight", 0.0)),
     }
     text_config = {
         "encoders": text_metadata.get("encoders", cfg_dict.get("text", {}).get("encoders", [])),
@@ -185,7 +229,9 @@ def validate_mmdit_checkpoint_compatibility(ckpt: dict, cfg: dict) -> None:
     for key in (*_TOP_LEVEL_COMPAT_FIELDS, *_MODEL_COMPAT_FIELDS, "text_dim", "pooled_dim", "vae_scaling_factor"):
         ck_value = _ck_value(ckpt, key)
         cfg_value = _cfg_value(cfg, key)
-        if cfg_value is not None and ck_value is not None and ck_value != cfg_value:
+        ck_cmp = _normalize_compat_value(key, ck_value)
+        cfg_cmp = _normalize_compat_value(key, cfg_value)
+        if cfg_cmp is not None and ck_cmp is not None and ck_cmp != cfg_cmp:
             _raise_mismatch(key, ck_value, cfg_value)
 
     ck_meta = _ckpt_metadata(ckpt)

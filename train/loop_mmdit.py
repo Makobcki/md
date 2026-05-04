@@ -67,9 +67,17 @@ def training_step_mmdit(
             source_latent=batch.source_latent,
             mask=batch.mask,
             control_latents=batch.control_latents,
+            control_type=batch.control_type,
             task=batch.task,
+            strength=batch.strength,
+            control_strength=batch.control_strength,
         )
-        return rectified_flow_loss(pred, train_tuple.target, train_tuple.weight, mask=batch.mask)
+        loss = rectified_flow_loss(pred, train_tuple.target, train_tuple.weight, mask=batch.mask)
+        if float(getattr(model.cfg, "x0_aux_weight", 0.0)) > 0:
+            t_view = train_tuple.t.to(device=pred.device, dtype=pred.dtype).view(-1, 1, 1, 1)
+            x0_pred = train_tuple.xt.to(device=pred.device, dtype=pred.dtype) - t_view * pred
+            loss = loss + float(model.cfg.x0_aux_weight) * (x0_pred.float() - x0.to(device=pred.device, dtype=torch.float32)).pow(2).mean()
+        return loss
 
 
 def build_mmdit_checkpoint(
@@ -103,6 +111,23 @@ def build_mmdit_checkpoint(
             self.flow_timestep_shift = float(data.get("flow_timestep_shift", flow.get("timestep_shift", flow.get("shift", 1.0))))
             self.flow_train_t_min = float(data.get("flow_train_t_min", flow.get("train_t_min", 0.0)))
             self.flow_train_t_max = float(data.get("flow_train_t_max", flow.get("train_t_max", 1.0)))
+            model = data.get("model", {}) if isinstance(data.get("model", {}), dict) else {}
+            self.text_resampler_enabled = bool(data.get("text_resampler_enabled", model.get("text_resampler_enabled", False)))
+            self.text_resampler_num_tokens = int(data.get("text_resampler_num_tokens", model.get("text_resampler_num_tokens", 128)))
+            self.text_resampler_depth = int(data.get("text_resampler_depth", model.get("text_resampler_depth", 2)))
+            self.attention_schedule = str(data.get("attention_schedule", model.get("attention_schedule", "full")))
+            self.early_joint_blocks = int(data.get("early_joint_blocks", model.get("early_joint_blocks", 0)))
+            self.late_joint_blocks = int(data.get("late_joint_blocks", model.get("late_joint_blocks", 0)))
+            self.source_patch_size = int(data.get("source_patch_size", model.get("source_patch_size", self.latent_patch_size)))
+            self.mask_patch_size = int(data.get("mask_patch_size", model.get("mask_patch_size", self.latent_patch_size)))
+            self.control_patch_size = int(data.get("control_patch_size", model.get("control_patch_size", self.latent_patch_size)))
+            self.mask_as_source_channel = bool(data.get("mask_as_source_channel", model.get("mask_as_source_channel", False)))
+            self.conditioning_rope = bool(data.get("conditioning_rope", model.get("conditioning_rope", True)))
+            self.strength_embed = bool(data.get("strength_embed", model.get("strength_embed", False)))
+            self.control_type_embed = bool(data.get("control_type_embed", model.get("control_type_embed", False)))
+            self.control_adapter = bool(data.get("control_adapter", model.get("control_adapter", False)))
+            self.control_adapter_ratio = float(data.get("control_adapter_ratio", model.get("control_adapter_ratio", 0.25)))
+            self.x0_aux_weight = float(data.get("x0_aux_weight", data.get("loss", {}).get("x0_aux_weight", 0.0))) if isinstance(data.get("loss", {}), dict) else float(data.get("x0_aux_weight", 0.0))
 
     metadata = build_mmdit_checkpoint_metadata(
         cfg=_CfgProxy(cfg_dict),
