@@ -1,21 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, API_ORIGIN } from "../api.js";
+import { api, absoluteFileUrl, absoluteDownloadUrl } from "../api.js";
 
-const toRunsUrl = (path) => {
-  if (!path) return null;
-  const marker = "webui_runs/";
-  const idx = path.indexOf(marker);
-  if (idx === -1) return null;
-  return `${API_ORIGIN}/runs/${path.slice(idx + marker.length)}`;
-};
 
 export default function TrainSamplesPage() {
   const [samples, setSamples] = useState([]);
 
   useEffect(() => {
     const load = async () => {
-      const data = await api.listSamples();
+      const data = await api.listTrainSamples();
       setSamples(data.items || []);
     };
     load();
@@ -39,17 +32,17 @@ export default function TrainSamplesPage() {
         ) : (
           <div className="gallery-grid">
             {filtered.map((item) => {
-              const url = toRunsUrl(item);
+              const url = absoluteFileUrl(item);
               return url ? (
-                <div key={item} className="image-card">
+                <div key={item.path || item.url || item} className="image-card">
                   <img src={url} alt="sample" />
                   <div className="image-meta">
-                    <span className="badge">{item.split("/").pop()}</span>
+                    <span className="badge">{String(item.path || item).split("/").pop()}</span>
                     <div className="row">
                       <a href={url} target="_blank" rel="noreferrer">
                         Open full
                       </a>
-                      <a href={url} download>
+                      <a href={absoluteDownloadUrl(item) || url} download>
                         Download
                       </a>
                     </div>

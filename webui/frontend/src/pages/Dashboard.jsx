@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api, API_ORIGIN, wsUrl } from "../api.js";
+import { api, absoluteFileUrl, wsUrl } from "../api.js";
 import LineChart from "../components/LineChart.jsx";
 import StatusPill from "../components/StatusPill.jsx";
+import { isMetricEvent, mergeMetricEvents, metricChartData, metricStep, metricThroughput } from "../utils/metrics.js";
 import {
   formatDate,
   formatRelativeDate,
@@ -13,13 +14,6 @@ import {
   parseRunDate,
 } from "../utils/formatters.js";
 
-const toRunsUrl = (path) => {
-  if (!path) return null;
-  const marker = "webui_runs/";
-  const idx = path.indexOf(marker);
-  if (idx === -1) return null;
-  return `${API_ORIGIN}/runs/${path.slice(idx + marker.length)}`;
-};
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -87,8 +81,8 @@ export default function Dashboard() {
     ws.onmessage = (event) => {
       try {
         const metric = JSON.parse(event.data);
-        if (metric.type === "metric") {
-          setMetrics((prev) => [...prev.slice(-200), metric]);
+        if (isMetricEvent(metric)) {
+          setMetrics((prev) => mergeMetricEvents(prev, [metric], 500));
         }
       } catch (err) {
         console.warn(err);
@@ -114,7 +108,7 @@ export default function Dashboard() {
   };
 
   const lastMetric = metrics[metrics.length - 1];
-  const progressValue = lastMetric?.step ?? lastMetric?.processed ?? 0;
+  const progressValue = metricStep(lastMetric) ?? lastMetric?.processed ?? 0;
   const progressMax = lastMetric?.max_steps || lastMetric?.total || 0;
 
   const recentSamples = useMemo(() => {
@@ -170,7 +164,7 @@ export default function Dashboard() {
                 <div className="grid">
                   <div>
                     <div className="muted">Step</div>
-                    <div>{lastMetric?.step ?? "-"}</div>
+                    <div>{metricStep(lastMetric) ?? "-"}</div>
                   </div>
                   <div>
                     <div className="muted">ETA</div>
@@ -178,7 +172,7 @@ export default function Dashboard() {
                   </div>
                   <div>
                     <div className="muted">Speed</div>
-                    <div>{lastMetric?.img_per_sec ? `${lastMetric.img_per_sec.toFixed(2)} it/s` : "-"}</div>
+                    <div>{Number.isFinite(metricThroughput(lastMetric)) ? `${metricThroughput(lastMetric).toFixed(2)} it/s` : "-"}</div>
                   </div>
                   <div>
                     <div className="muted">VRAM</div>
@@ -191,7 +185,7 @@ export default function Dashboard() {
                   <div className="card-header">
                     <h2 className="card-title">Training Metrics</h2>
                   </div>
-                  <LineChart data={metrics.map((m) => ({ step: m.step, loss: m.loss }))} />
+                  <LineChart data={metricChartData(metrics)} />
                 </div>
               )}
             </div>
@@ -210,12 +204,12 @@ export default function Dashboard() {
         ) : (
           <div className="gallery-grid">
             {recentSamples.map((item) => {
-              const url = toRunsUrl(item);
+              const url = absoluteFileUrl(item);
               return url ? (
-                <div key={item} className="image-card">
+                <div key={item.path || item.url || item} className="image-card">
                   <img src={url} alt="sample" />
                   <div className="image-meta">
-                    <span className="badge">{item.split("/").pop()}</span>
+                    <span className="badge">{String(item.path || item).split("/").pop()}</span>
                   </div>
                 </div>
               ) : null;

@@ -4,6 +4,7 @@ import LogViewer from "../components/LogViewer.jsx";
 import useLogBuffer from "../hooks/useLogBuffer.js";
 import ArgField from "../components/ArgField.jsx";
 import StatusPill from "../components/StatusPill.jsx";
+import { isMetricEvent, mergeMetricEvents } from "../utils/metrics.js";
 
 const settingGroups = [
   {
@@ -119,8 +120,8 @@ export default function PrepareLatentsPage() {
     ws.onmessage = (event) => {
       try {
         const metric = JSON.parse(event.data);
-        if (metric.type === "metric") {
-          setMetrics((prev) => [...prev.slice(-200), metric]);
+        if (isMetricEvent(metric)) {
+          setMetrics((prev) => mergeMetricEvents(prev, [metric], 500));
         }
       } catch (err) {
         console.warn(err);

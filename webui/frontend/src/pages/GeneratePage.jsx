@@ -1,7 +1,8 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, wsUrl, API_ORIGIN } from "../api.js";
+import { api, wsUrl, absoluteFileUrl, absoluteDownloadUrl, API_ORIGIN } from "../api.js";
 import useLogBuffer from "../hooks/useLogBuffer.js";
 import ArgField from "../components/ArgField.jsx";
+import { isMetricEvent, mergeMetricEvents } from "../utils/metrics.js";
 
 const quickFields = ["task", "ckpt", "steps", "n", "seed"];
 const promptFields = ["prompt", "neg_prompt"];
@@ -14,19 +15,12 @@ const TASK_HELP = {
   control: "Control generation with a control image.",
 };
 
-const toRunsUrl = (path) => {
-  if (!path) return null;
-  const marker = "webui_runs/";
-  const idx = path.indexOf(marker);
-  if (idx === -1) return null;
-  return `${API_ORIGIN}/runs/${path.slice(idx + marker.length)}`;
-};
 
 const absolutePreviewUrl = (value) => {
   if (!value) return "";
   if (/^blob:|^data:|^https?:/i.test(value)) return value;
   if (String(value).startsWith("/")) return `${API_ORIGIN}${value}`;
-  return toRunsUrl(value) || "";
+  return absoluteFileUrl(value) || "";
 };
 
 function TaskAssetCard({
@@ -316,10 +310,20 @@ export default function GeneratePage() {
   }, [args.ckpt]);
 
   const refreshSamples = async ({ keepOutput = false } = {}) => {
-    const samples = await api.listSamples();
-    const items = samples.items || [];
+    if (!runId) {
+      const samples = await api.listSamples("");
+      const items = samples.items || [];
+      if (items.length > 0 && !keepOutput) {
+        setOutput([...items].reverse()[0]);
+      }
+      return;
+    }
+    const artifacts = await api.listArtifacts({ runId, source: "all" });
+    const items = (artifacts.items || []).filter((item) =>
+      ["webui_sample", "webui_latent"].includes(item.source)
+    );
     if (items.length > 0 && !keepOutput) {
-      setOutput([...items].reverse()[0]);
+      setOutput([...items].sort((a, b) => (a.mtime || 0) - (b.mtime || 0)).reverse()[0]);
     }
   };
 
@@ -331,7 +335,7 @@ export default function GeneratePage() {
       );
     }, 5000);
     return () => clearInterval(timer);
-  }, [status.active]);
+  }, [status.active, runId]);
 
   useEffect(() => {
     const poll = async () => {
@@ -390,8 +394,8 @@ export default function GeneratePage() {
     ws.onmessage = (event) => {
       try {
         const metric = JSON.parse(event.data);
-        if (metric.type === "metric") {
-          setMetrics((prev) => [...prev.slice(-200), metric]);
+        if (isMetricEvent(metric)) {
+          setMetrics((prev) => mergeMetricEvents(prev, [metric], 500));
         }
       } catch (err) {
         console.warn(err);
@@ -408,7 +412,23 @@ export default function GeneratePage() {
   }, []);
 
   const handleChange = (name, value) => {
-    setArgs((prev) => ({ ...prev, [name]: value }));
+    setArgs((prev) => {
+      if (name !== "task") return { ...prev, [name]: value };
+      return {
+        ...prev,
+        task: value,
+        "init-image": "",
+        mask: "",
+        "control-image": "",
+      };
+    });
+    if (name === "task") {
+      setInitFile(null);
+      setControlFile(null);
+      setInitPreview("");
+      setControlPreview("");
+      setMaskDataUrl("");
+    }
   };
 
   const setLocalPreview = (kind, file) => {
@@ -657,8 +677,12 @@ export default function GeneratePage() {
           <div className="generation-preview-square">
             {isGenerating ? (
               <div className="preview-loader" />
-            ) : output && toRunsUrl(output) ? (
-              <img src={toRunsUrl(output)} alt="sample" />
+            ) : output && absoluteFileUrl(output) ? (
+              <img src={absoluteFileUrl(output)} alt="sample" />
+            ) : output && absoluteDownloadUrl(output) ? (
+              <div className="task-asset-empty muted">
+                Output is not previewable. <a href={absoluteDownloadUrl(output)}>Download artifact</a>
+              </div>
             ) : (
               <div className="preview-loader" />
             )}

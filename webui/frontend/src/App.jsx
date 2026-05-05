@@ -7,6 +7,7 @@ import RunDetails from "./pages/RunDetails.jsx";
 import FilesPage from "./pages/FilesPage.jsx";
 import PrepareLatentsPage from "./pages/PrepareLatentsPage.jsx";
 import TrainSamplesPage from "./pages/TrainSamplesPage.jsx";
+import { getAuthToken, setAuthToken } from "./api.js";
 
 const navItems = [
   {
@@ -57,6 +58,42 @@ const navItems = [
   },
 ];
 
+function AuthControls() {
+  const [token, setToken] = useState(() => getAuthToken());
+  const [savedToken, setSavedToken] = useState(() => getAuthToken());
+
+  const save = () => {
+    const next = token.trim();
+    setAuthToken(next);
+    setSavedToken(next);
+  };
+  const clear = () => {
+    setToken("");
+    setAuthToken("");
+    setSavedToken("");
+  };
+
+  return (
+    <div className="auth-controls">
+      <input
+        type="password"
+        value={token}
+        onChange={(event) => setToken(event.target.value)}
+        placeholder="WEBUI_AUTH_TOKEN"
+        aria-label="WebUI auth token"
+      />
+      <button type="button" className="secondary" onClick={save} title="Save token in this browser">
+        {savedToken ? "Update token" : "Save token"}
+      </button>
+      {savedToken ? (
+        <button type="button" className="ghost" onClick={clear} title="Clear saved token">
+          Logout
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export default function App() {
   const [theme, setTheme] = useState(() => {
     if (typeof window === "undefined") return "light";
@@ -84,6 +121,8 @@ export default function App() {
             ))}
           </nav>
         </div>
+        <div className="header-actions">
+          <AuthControls />
         <button
           type="button"
           className="theme-toggle"
@@ -116,6 +155,7 @@ export default function App() {
             </svg>
           )}
         </button>
+        </div>
       </header>
       <div className="app-shell">
         <Routes>
