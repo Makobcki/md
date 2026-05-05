@@ -1,24 +1,27 @@
 import React, { useMemo, useRef } from "react";
 
-const escapeHtml = (value) =>
-  value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-
-const highlightYaml = (value) => {
-  const escaped = escapeHtml(value);
-  return escaped
-    .replace(/(^\s*#.*$)/gm, '<span class="token comment">$1</span>')
-    .replace(/(^\s*[\w-]+:)/gm, '<span class="token key">$1</span>')
-    .replace(/(:\s*)("[^"]*"|'[^']*')/g, '$1<span class="token string">$2</span>')
-    .replace(/(:\s*)(\d+(?:\.\d+)?)/g, '$1<span class="token number">$2</span>');
+const classifyLine = (line) => {
+  if (/^\s*#/.test(line)) return [{ text: line, cls: "comment" }];
+  const keyMatch = line.match(/^(\s*[\w-]+:)(.*)$/);
+  if (!keyMatch) return [{ text: line, cls: "" }];
+  const [, key, rest] = keyMatch;
+  const valueParts = [];
+  const stringMatch = rest.match(/^(\s*)("[^"]*"|'[^']*')(.*)$/);
+  const numberMatch = rest.match(/^(\s*)(\d+(?:\.\d+)?)(.*)$/);
+  if (stringMatch) {
+    valueParts.push({ text: stringMatch[1], cls: "" }, { text: stringMatch[2], cls: "string" }, { text: stringMatch[3], cls: "" });
+  } else if (numberMatch) {
+    valueParts.push({ text: numberMatch[1], cls: "" }, { text: numberMatch[2], cls: "number" }, { text: numberMatch[3], cls: "" });
+  } else {
+    valueParts.push({ text: rest, cls: "" });
+  }
+  return [{ text: key, cls: "key" }, ...valueParts];
 };
 
 export default function YamlEditor({ value, onChange, onSave }) {
   const highlightRef = useRef(null);
   const inputRef = useRef(null);
-  const highlighted = useMemo(() => `${highlightYaml(value)}\n`, [value]);
+  const highlightedLines = useMemo(() => `${value}\n`.split("\n").map(classifyLine), [value]);
 
   const syncScroll = () => {
     if (!highlightRef.current || !inputRef.current) return;
@@ -29,20 +32,26 @@ export default function YamlEditor({ value, onChange, onSave }) {
   const handleKeyDown = (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
       event.preventDefault();
-      if (onSave) {
-        onSave();
-      }
+      if (onSave) onSave();
     }
   };
 
   return (
     <div className="editor-shell">
-      <pre
-        className="editor-highlight"
-        aria-hidden="true"
-        ref={highlightRef}
-        dangerouslySetInnerHTML={{ __html: highlighted }}
-      />
+      <pre className="editor-highlight" aria-hidden="true" ref={highlightRef}>
+        {highlightedLines.map((parts, lineIdx) => (
+          <React.Fragment key={lineIdx}>
+            {parts.map((part, partIdx) =>
+              part.cls ? (
+                <span key={partIdx} className={`token ${part.cls}`}>{part.text}</span>
+              ) : (
+                <React.Fragment key={partIdx}>{part.text}</React.Fragment>
+              )
+            )}
+            {lineIdx < highlightedLines.length - 1 ? "\n" : null}
+          </React.Fragment>
+        ))}
+      </pre>
       <textarea
         className="editor-input"
         ref={inputRef}
