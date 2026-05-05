@@ -1,8 +1,16 @@
 # MMDiT Rectified Flow image model
 
-Проект обучает и запускает **latent MMDiT Rectified Flow** модель для image generation. Поддерживаемая линия модели — **MMDiT RF-only**: latent space, frozen CLIP/T5 text encoders, joint text/image attention, flow-matching objective, Flow Euler/Heun sampling. Старый U-Net/DDPM/DDIM/DPM workflow не используется.
+Проект обучает и запускает **latent MMDiT Rectified Flow** модель для генерации изображений. Текущая линия модели — **MMDiT RF-only**: latent space, frozen CLIP/T5 text encoders, joint text/image attention, flow-matching objective, Flow Euler/Heun sampling. Старый U-Net/DDPM/DDIM/DPM workflow не используется.
 
-## 1. Что нужно установить
+Поддерживаемые режимы:
+
+- `txt2img` — генерация из текста;
+- `img2img` — source latent + text;
+- `inpaint` — source latent + mask + text;
+- `control` — control-image/control-latent stream + text;
+- `latent-only` — smoke/debug output без VAE decode.
+
+## 1. Требования и установка
 
 Рекомендуемое окружение:
 
@@ -11,9 +19,9 @@
 - NVIDIA GPU для реального обучения/инференса;
 - CUDA-сборка PyTorch, подходящая под драйвер;
 - `git`, `python-venv`, `build-essential`;
-- `npm` только для WebUI frontend.
+- Node.js `^20.19.0 || >=22.12.0` только для frontend build/dev mode.
 
-Создание окружения:
+Создание Python окружения:
 
 ```bash
 python -m venv .venv
@@ -21,37 +29,54 @@ source .venv/bin/activate
 python -m pip install -U pip setuptools wheel
 ```
 
-Установка PyTorch под свою CUDA/CPU сборку. Пример для CUDA-сборки нужно брать под текущий драйвер с сайта PyTorch. После этого установи проект:
+Установи PyTorch под свою CUDA/CPU сборку, затем проект:
 
 ```bash
 python -m pip install -e ".[all]"
 ```
 
-Минимальная установка без WebUI/dev extras:
+Минимальная ML-установка без WebUI/dev extras:
 
 ```bash
 python -m pip install -e ".[ml]"
 ```
 
-Для WebUI:
+WebUI-зависимости:
 
 ```bash
 python -m pip install -e ".[web,ml]"
-cd webui/frontend
-npm install
-cd ../..
 ```
 
-Для тестов:
+Dev/test-зависимости:
 
 ```bash
 python -m pip install -e ".[all,dev]"
 ```
 
-Если text encoders скачиваются с HuggingFace, желательно задать token:
+Frontend build:
+
+```bash
+cd webui/frontend
+npm ci
+npm run build
+cd ../..
+```
+
+`webui/frontend/dist` используется как static frontend fallback. В dev checkout можно запускать Vite dev server, если есть `webui/frontend/node_modules`.
+
+Если text encoders скачиваются с HuggingFace, задай token:
 
 ```bash
 export HF_TOKEN=...
+```
+
+Offline/local-only режим для text encoders:
+
+```bash
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+# или
+export MD_LOCAL_FILES_ONLY=1
 ```
 
 ## 2. Архитектура
@@ -82,14 +107,19 @@ VAE decoder
 image
 ```
 
-Поддерживаемые conditioning modes:
+Важные детали текущей реализации:
 
-- `txt2img`: target noisy latent + text tokens;
-- `img2img`: target noisy latent + source latent tokens + text tokens;
-- `inpaint`: target noisy latent + source latent tokens + mask tokens + text tokens;
-- `control`: control latent token stream для дальнейшего ControlNet/IP-Adapter-style развития.
+- Conditioning streams имеют per-sample masks, поэтому mixed-task batch не даёт `txt2img` строкам лишние `img2img/inpaint/control` tokens.
+- Control stream gated целиком: `control_gate * (control_base + type_token)`.
+- Inpaint loss weighting применяется только к rows с `task == "inpaint"`.
+- `PatchEmbed` и direct model API валидируют divisibility latent H/W by patch size.
+- `cfg_predict()` корректно дублирует batch-aligned tensor/list/tuple kwargs.
+- `TextConditioning.replace_where()` корректно обрабатывает `token_types`.
+- Flow timesteps и objective валидируют positive `shift/timestep_shift`.
+- Sampling API использует строгую matrix допустимых task/input combinations.
+- Sampling checkpoint грузится на CPU перед переносом модели на target device.
 
-## 3. Структура датасета
+## 3. Dataset
 
 Минимальная структура:
 
@@ -101,13 +131,13 @@ data/dataset/
   metadata.jsonl
 ```
 
-Каждая строка `metadata.jsonl` — JSON object. Минимально:
+Каждая строка `metadata.jsonl` — JSON object:
 
 ```json
 { "md5": "hash", "file_name": "hash.png", "prompt": "a cat on a table" }
 ```
 
-Также поддерживаются per-image JSON files через `meta_dir`:
+Поддерживаются per-image JSON sidecars через `meta_dir`:
 
 ```text
 data/dataset/
@@ -115,7 +145,7 @@ data/dataset/
   meta/hash.json
 ```
 
-Пример `meta/hash.json`:
+Пример:
 
 ```json
 {
@@ -129,16 +159,13 @@ data/dataset/
 
 Поле изображения может называться `file_name`, `filename`, `image`, `img`, `path` или `image_path`. Если поле не указано, loader ищет `images/<md5>.*`.
 
-### 3.1. Обучение на prompt вместо caption
+### Prompt-first training
 
-Для обучения именно на prompt-полях:
+Для обучения на prompt-полях:
 
 ```yaml
 text_field: prompt
-text_fields:
-  - prompt
-  - caption
-  - text
+text_fields: [prompt, caption, text]
 ```
 
 или nested-вариант:
@@ -146,13 +173,10 @@ text_fields:
 ```yaml
 dataset:
   text_field: prompt
-  text_fields:
-    - prompt
-    - caption
-    - text
+  text_fields: [prompt, caption, text]
 ```
 
-`caption_field` остаётся совместимым со старым caption-flow, но для новых запусков с prompt-first лучше использовать `text_field/text_fields`.
+`caption_field` остаётся legacy-compatible, но для новых запусков предпочтительны `text_field/text_fields`.
 
 Dataset index сохраняет:
 
@@ -166,9 +190,9 @@ Dataset index сохраняет:
 
 `caption` заполняется тем же текстом для обратной совместимости.
 
-### 3.2. Если промпты лежат в `prompts/<hash>.txt`
+### Prompts as sidecar `.txt`
 
-Если структура такая:
+Если данные лежат так:
 
 ```text
 data/dataset/
@@ -176,7 +200,7 @@ data/dataset/
   prompts/hash.txt
 ```
 
-лучше один раз собрать `metadata.jsonl` из sidecar-файлов:
+собери `metadata.jsonl`:
 
 ```bash
 python - <<'PY'
@@ -199,18 +223,14 @@ for img in sorted(images.iterdir()):
     prompt = prompt_path.read_text(encoding="utf-8").strip()
     if not prompt:
         continue
-    rows.append({
-        "md5": img.stem,
-        "file_name": img.name,
-        "prompt": prompt,
-    })
+    rows.append({"md5": img.stem, "file_name": img.name, "prompt": prompt})
 
 out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
 print(f"wrote {len(rows)} rows to {out}")
 PY
 ```
 
-После этого в config указать:
+Config:
 
 ```yaml
 data_root: ./data/dataset
@@ -221,9 +241,57 @@ text_field: prompt
 text_fields: [prompt, caption, text]
 ```
 
-`tags_dir: prompts` можно использовать только если эти `.txt` нужны как tags sidecars, но для exact prompt training правильнее `metadata.jsonl` с полем `prompt`.
+## 4. Config profiles
 
-## 4. VAE и text encoders
+Основные профили:
+
+```bash
+python -m train.cli --profile smoke --dry-run
+python -m train.cli --profile overfit --dry-run
+python -m train.cli --profile dev --dry-run
+python -m train.cli --profile base --dry-run
+python -m train.cli --profile milestone_a --dry-run
+python -m train.cli --profile milestone_b --dry-run
+python -m train.cli --profile milestone_c --dry-run
+python -m train.cli --profile distributed_smoke --dry-run
+python -m train.cli --profile fsdp_template --dry-run
+```
+
+`config/train.yaml` alias-compatible с `config/train_base.yaml`.
+
+Nested config keys поддерживаются для основных секций:
+
+```yaml
+model:
+  hidden_dim: 1024
+  depth: 24
+  num_heads: 16
+  mlp_ratio: 4.0
+  qk_norm: true
+  rms_norm: true
+  swiglu: true
+
+training:
+  batch_size: 2
+  grad_accum_steps: 32
+  num_workers: 8
+  prefetch_factor: 2
+  pin_memory: true
+  persistent_workers: true
+  lr: 1.0e-4
+  lr_scheduler: cosine
+  min_lr_ratio: 0.1
+  decay_steps: 300000
+  fail_on_nonfinite_grad: false
+  ckpt_keep_last: 5
+  deterministic: false
+  amp: true
+  amp_dtype: bf16
+```
+
+`text:` может быть dict или отсутствовать. Некорректный non-dict `text:` больше не должен ронять config flattening.
+
+## 5. VAE и text encoders
 
 Для реального latent training нужен VAE, совместимый с `diffusers.AutoencoderKL.from_pretrained`:
 
@@ -234,9 +302,7 @@ vae:
   scaling_factor: 0.18215
 ```
 
-`./vae_sd_mse` должен быть локальной папкой diffusers VAE или именем модели HuggingFace.
-
-Text encoders задаются в config:
+Text encoders:
 
 ```yaml
 text:
@@ -257,81 +323,9 @@ text:
   empty_prompt_cache: true
 ```
 
-Для тестов и smoke sample есть fake/latent-only пути, но real training использует подготовленные text/latent caches.
+Для smoke/debug есть fake/latent-only paths, но real training использует text/latent caches.
 
-## 5. Config для твоей структуры `data/dataset`
-
-Если данные лежат так:
-
-```text
-data/dataset/
-  images/<hash>.png
-  metadata.jsonl
-  prompts/<hash>.txt   # optional, если уже сконвертировано в metadata.jsonl, можно не использовать
-```
-
-то в `config/train.yaml` или отдельном config указать:
-
-```yaml
-architecture: mmdit_rf
-mode: latent
-image_size: 512
-latent_channels: 4
-latent_downsample_factor: 8
-latent_patch_size: 2
-
-objective: rectified_flow
-prediction_type: flow_velocity
-
-data_root: ./data/dataset
-image_dir: images
-meta_dir: ""
-tags_dir: ""
-text_field: prompt
-text_fields: [prompt, caption, text]
-require_512: true
-min_tag_count: 0
-
-cache:
-  latent_cache: true
-  text_cache: true
-  auto_prepare: true
-  validate_on_start: true
-  strict: true
-  rebuild_if_stale: false
-  sharded: true
-  dtype: bf16
-```
-
-Если текущий config использует `data_root: ./data/dataset/pixso_512`, то либо переместить dataset туда, либо поменяй `data_root` на `path/to/dataset`.
-
-## 6. Проверка проекта
-
-Быстрые тесты:
-
-```bash
-pytest -q
-```
-
-Локальная CI-style проверка:
-
-```bash
-bash scripts/check_project.sh
-```
-
-Dry-run профили без запуска обучения:
-
-```bash
-python -m train.cli --profile smoke --dry-run
-python -m train.cli --profile overfit --dry-run
-python -m train.cli --profile dev --dry-run
-python -m train.cli --profile base --dry-run
-python -m train.cli --profile milestone_a --dry-run
-python -m train.cli --profile milestone_b --dry-run
-python -m train.cli --profile milestone_c --dry-run
-```
-
-## 7. Подготовка cache
+## 6. Cache preparation и validation
 
 Training умеет auto-prepare, если в config:
 
@@ -340,56 +334,65 @@ cache:
   auto_prepare: true
 ```
 
-Но для больших датасетов лучше подготовить cache вручную.
+Для больших датасетов лучше готовить cache вручную.
 
-### 7.1. Text cache
+### Text cache
 
 ```bash
 python -m scripts.prepare_text_cache --config config/train.yaml
 ```
 
-Будет создано:
+Output:
 
 ```text
 data/dataset/.cache/text/
+  manifest.json          # status: preparing|complete
   metadata.json
-  manifest.json
   index.jsonl
   empty_prompt.safetensors
   shards/text_00000.safetensors
-  ...
 ```
 
-Проверить text cache:
+Проверка:
 
 ```bash
 python -m scripts.validate_cache --config config/train.yaml --text
 ```
 
-### 7.2. Latent cache
+### Latent cache
 
 ```bash
 python -m scripts.prepare_latents --config config/train.yaml
 ```
 
-Будет создано:
+Output:
 
 ```text
 data/dataset/.cache/latents/
+  manifest.json          # status: preparing|complete
   metadata.json
   shard_index.jsonl
-  shards/*.pt или *.safetensors
+  shards/*.pt
 ```
 
-### 7.3. Unified training cache
+Текущее поведение:
 
-Одна команда для text + latents + manifest:
+- manifest пишется как `preparing -> complete`;
+- training принимает cache только со статусом `complete`;
+- non-sharded cache валидируется по metadata на старте;
+- sharded cache валидирует metadata всех shards;
+- aspect buckets пишут `latent_shape: null`, `latent_shapes`, `bucket_shapes`;
+- per-entry expected shape проверяется против assigned bucket.
+
+Aspect buckets требуют валидные dimensions в dataset entries: `width/height`, `image_width/image_height` или `size: [width, height]`.
+
+### Unified training cache
 
 ```bash
 python -m scripts.prepare_training_cache --config config/train.yaml
 ```
 
-Repair/rebuild modes:
+Repair/rebuild:
 
 ```bash
 python -m scripts.prepare_training_cache --config config/train.yaml --repair
@@ -397,43 +400,38 @@ python -m scripts.prepare_training_cache --config config/train.yaml --repair --f
 python -m scripts.prepare_training_cache --config config/train.yaml --repair --rebuild
 ```
 
-Если переключаешься с captions на prompts, пересобери text cache:
+Пересборка при смене prompts/text fields:
 
 ```bash
 rm -rf data/dataset/.cache/text
 python -m scripts.prepare_text_cache --config config/train.yaml
 ```
 
-Если меняешь VAE, image size, latent dtype или latent shape, пересобери latent cache:
+Пересборка при смене VAE/image size/latent dtype/buckets:
 
 ```bash
 rm -rf data/dataset/.cache/latents
 python -m scripts.prepare_latents --config config/train.yaml
 ```
 
-## 8. Обучение
+## 7. Training
 
-Smoke run:
+Smoke:
 
 ```bash
 python -m train.cli --profile smoke
 ```
 
-Overfit run:
+Overfit:
 
 ```bash
 python -m train.cli --profile overfit
 ```
 
-Development run:
+Dev/base:
 
 ```bash
 python -m train.cli --profile dev
-```
-
-Base run:
-
-```bash
 python -m train.cli --profile base
 ```
 
@@ -446,101 +444,159 @@ python -m train.cli --config config/train.yaml
 Resume:
 
 ```bash
+python -m train.cli --config config/train.yaml --resume latest
 python -m train.cli --config config/train.yaml --resume runs/.../checkpoints/latest.pt
 ```
 
-Результаты пишутся в run directory вида:
+Run directory:
 
 ```text
 runs/
   2026-05-03_001_dev768/
-    config.yaml
-    config_resolved.yaml
-    config_snapshot.yaml
+    config.yaml                # canonical resolved config
+    config_resolved.yaml        # compatibility alias
+    config_snapshot.yaml        # compatibility alias / WebUI snapshot
+    config_manifest.yaml
     train.log
     events.jsonl
     checkpoints/
       step_000100.pt
-      latest.pt
+      step_000100.pt.metadata.json
+      latest.pt                 # hardlink/symlink alias, not full duplicate copy
+      latest.pt.metadata.json
       final.pt
-    samples/
+      final.pt.metadata.json
+    ckpt_0000100.pt             # legacy alias
+    ckpt_latest.pt              # legacy alias
+    ckpt_final.pt               # legacy alias
     eval/
-    cache_manifest.json
 ```
 
-Train events содержат:
+Training loop behavior:
+
+- EMA обновляется только если optimizer step реально выполнен.
+- Если AMP GradScaler пропустил step, EMA не обновляется.
+- Nonfinite gradients не попадают в optimizer step.
+- Nonfinite/AMP skipped steps логируются.
+- `event_bus.close()` и `pbar.close()` вызываются в `finally`.
+- `AspectBucketBatchSampler` поддерживает `set_epoch(epoch)` и меняет shuffle по epoch.
+- Task sampling в mixed-task dataset детерминирован относительно `seed + idx + epoch`.
+
+## 8. Checkpoints
+
+Canonical checkpoint layout:
+
+```text
+<run_dir>/checkpoints/
+  step_000100.pt
+  step_000100.pt.metadata.json
+  latest.pt
+  latest.pt.metadata.json
+  final.pt
+  final.pt.metadata.json
+```
+
+Legacy root aliases:
+
+```text
+<run_dir>/ckpt_0000100.pt
+<run_dir>/ckpt_latest.pt
+<run_dir>/ckpt_final.pt
+```
+
+Root aliases создаются как hardlink/symlink, а не как полноценная вторая копия checkpoint bytes.
+
+Metadata sidecar содержит:
 
 ```json
 {
-  "type": "train",
-  "step": 100,
-  "loss": 0.123,
-  "train_loss": 0.123,
-  "lr": 0.0001,
-  "grad_norm": 0.91,
-  "grad_norm_total": 0.91,
-  "has_nan_grad": false,
-  "has_inf_grad": false,
-  "samples_per_sec": 3.2,
-  "loss_t_bin_00_01": 0.12,
-  "loss_t_bin_09_10": 0.17
+  "metadata": {
+    "architecture": "mmdit_rf",
+    "objective": "rectified_flow",
+    "prediction_type": "flow_velocity",
+    "model_config": {},
+    "text_config": {},
+    "vae_config": {},
+    "flow_config": {},
+    "train_config_hash": "...",
+    "dataset_hash": "...",
+    "step": 100
+  },
+  "cfg": {},
+  "step": 100
 }
 ```
 
-Validation events:
+Compatibility check учитывает architecture-affecting fields:
 
-```json
-{
-  "type": "eval",
-  "step": 1000,
-  "val_loss": 0.101,
-  "val_loss_t_bin_00_01": 0.09
-}
+```text
+hidden_dim
+depth
+num_heads
+mlp_ratio
+qk_norm
+rms_norm
+swiglu
+double_stream_blocks
+single_stream_blocks
+pos_embed
+patch_size
+latent_channels
+text_dim
+pooled_dim
+source_patch_size
+mask_patch_size
+control_patch_size
+coarse_patch_size
+text_resampler_enabled
+text_resampler_num_tokens
+text_resampler_depth
+text_resampler_mlp_ratio
+attention_schedule
+early_joint_blocks
+late_joint_blocks
+```
+
+`x0_aux_weight` — loss hyperparameter, не model compatibility field.
+
+Checkpoint loading uses safe loader first:
+
+```text
+torch.load(..., weights_only=True)
+```
+
+Legacy unsafe fallback should only be used for trusted local artifacts. For stricter behavior:
+
+```bash
+export MD_ALLOW_UNSAFE_TORCH_LOAD=0
 ```
 
 ## 9. Sampling CLI
 
-Text-to-image:
+Txt2img:
 
 ```bash
 python -m sample.cli \
   --ckpt runs/.../checkpoints/latest.pt \
-  --prompt "1girl, blue hair, white dress" \
-  --neg_prompt "low quality, blurry" \
-  --sampler flow_heun \
-  --steps 28 \
-  --cfg 4.5 \
-  --shift 3.0 \
-  --seed 42 \
-  --out samples/txt2img.png
-```
-
-Euler sampler:
-
-```bash
-python -m sample.cli \
-  --ckpt runs/.../checkpoints/latest.pt \
-  --prompt "a cat on a table" \
-  --sampler flow_euler \
+  --task txt2img \
+  --prompt "a cinematic photo of a red fox in snow" \
   --steps 28 \
   --cfg 4.5 \
   --seed 42 \
-  --out samples/euler.png
+  --out samples/fox.png
 ```
 
-Image-to-image:
+Img2img:
 
 ```bash
 python -m sample.cli \
   --ckpt runs/.../checkpoints/latest.pt \
   --task img2img \
-  --prompt "same character, winter outfit" \
+  --prompt "same scene, watercolor style" \
   --init-image input.png \
-  --strength 0.55 \
-  --sampler flow_heun \
+  --strength 0.6 \
   --steps 28 \
   --cfg 4.5 \
-  --seed 42 \
   --out samples/img2img.png
 ```
 
@@ -553,14 +609,12 @@ python -m sample.cli \
   --prompt "replace the background with a neon city" \
   --init-image input.png \
   --mask mask.png \
-  --sampler flow_heun \
   --steps 28 \
   --cfg 4.5 \
-  --seed 42 \
   --out samples/inpaint.png
 ```
 
-Control smoke path:
+Control:
 
 ```bash
 python -m sample.cli \
@@ -568,10 +622,27 @@ python -m sample.cli \
   --task control \
   --prompt "edge guided cat" \
   --control-image control.png \
+  --control-type image \
   --control-strength 0.75 \
-  --sampler flow_heun \
   --steps 28 \
   --out samples/control.png
+```
+
+Strict task/input matrix:
+
+```text
+txt2img -> no init_image, mask, control_image
+img2img -> requires init_image; no mask/control_image
+inpaint -> requires init_image + mask; no control_image
+control -> requires control_image; no init_image/mask
+```
+
+`control_img2img` / `control_inpaint` are not implicit modes. Add explicit task names before combining those inputs.
+
+Device default is `auto`:
+
+```bash
+python -m sample.cli --ckpt runs/.../checkpoints/latest.pt --prompt "a cat" --device auto --out samples/cat.png
 ```
 
 EMA flags:
@@ -581,7 +652,7 @@ python -m sample.cli --ckpt runs/.../checkpoints/latest.pt --prompt "a cat" --us
 python -m sample.cli --ckpt runs/.../checkpoints/latest.pt --prompt "a cat" --no-ema --out samples/raw.png
 ```
 
-Latent-only smoke sample без VAE decode:
+Latent-only output requires `.pt` or `.pth`:
 
 ```bash
 python -m sample.cli \
@@ -594,31 +665,20 @@ python -m sample.cli \
   --out samples/latent.pt
 ```
 
-Fake VAE smoke sample:
+Image output requires `.png`, `.jpg`, `.jpeg` or `.webp`.
 
-```bash
-python -m sample.cli \
-  --ckpt runs/.../checkpoints/latest.pt \
-  --prompt "smoke" \
-  --fake-vae \
-  --device cpu \
-  --steps 2 \
-  --n 1 \
-  --out samples/fake.png
-```
+Sampling loads checkpoint on CPU first, builds/loads model on CPU, then moves model to target device to reduce VRAM spikes. CPU sampling forces text/VAE dtype to `float32`.
 
-Рядом с output всегда пишется JSON metadata sidecar:
+Metadata sidecar is written next to every output:
 
 ```text
 samples/txt2img.png
 samples/txt2img.json
 ```
 
-Metadata содержит checkpoint path/step, prompt, negative prompt, sampler, steps, cfg, seed, shift, latent shape, model config, VAE config и text encoder config.
-
 ## 10. Evaluation
 
-Посмотреть prompt bank:
+Prompt bank:
 
 ```bash
 python -m train.eval_cli --prompt-set core --count-per-set 3 --print
@@ -638,26 +698,11 @@ python -m train.eval_cli \
   --cfg 4.5
 ```
 
-CFG sweep:
+Sweeps:
 
 ```bash
-python -m train.eval_cli \
-  --ckpt runs/.../checkpoints/latest.pt \
-  --out-dir runs/... \
-  --prompt-set core \
-  --cfg-sweep 1.0 2.5 4.5 7.0
-```
-
-Step/sampler/shift sweep:
-
-```bash
-python -m train.eval_cli \
-  --ckpt runs/.../checkpoints/latest.pt \
-  --out-dir runs/... \
-  --prompt-set core \
-  --step-sweep 8 16 28 40 \
-  --sampler-sweep flow_euler flow_heun \
-  --shift-sweep 1.0 2.0 3.0 4.0
+python -m train.eval_cli --ckpt runs/.../checkpoints/latest.pt --out-dir runs/... --prompt-set core --cfg-sweep 1.0 2.5 4.5 7.0
+python -m train.eval_cli --ckpt runs/.../checkpoints/latest.pt --out-dir runs/... --prompt-set core --step-sweep 8 16 28 40 --sampler-sweep flow_euler flow_heun --shift-sweep 1.0 2.0 3.0 4.0
 ```
 
 Resolution eval:
@@ -670,7 +715,7 @@ python -m train.eval_cli \
   --resolution 768
 ```
 
-Output layout:
+Output:
 
 ```text
 runs/.../eval/eval_768/step_000100/
@@ -681,13 +726,14 @@ runs/.../eval/eval_768/step_000100/
 
 ## 11. WebUI
 
-Backend + frontend:
+Local backend + frontend:
 
 ```bash
+export WEBUI_AUTH_TOKEN="secret"
 python -m main --host 127.0.0.1 --port 8000 --frontend --frontend-host 127.0.0.1 --frontend-port 5173
 ```
 
-fontend:
+Open:
 
 ```text
 http://127.0.0.1:5173
@@ -699,28 +745,101 @@ Backend only:
 python -m main --host 127.0.0.1 --port 8000 --no-frontend
 ```
 
-WebUI sample path напрямую использует `sample.api.run_sample`, а не subprocess `sample.cli`. Поддерживаются поля:
-
-- `task`: `txt2img`, `img2img`, `inpaint`, `control`;
-- `sampler`: `flow_euler`, `flow_heun`;
-- `steps`, `cfg`, `shift`, `seed`, `n`;
-- `prompt`, `neg_prompt`;
-- `init-image`, `strength`;
-- `mask`;
-- `control-image`, `control-strength`;
-- `latent-only`, `fake-vae`, `use-ema`.
-
-По умолчанию WebUI ограничивает пути repo root, run dir и configured `out_dir`. Для дополнительных директорий:
+Static frontend mode:
 
 ```bash
-export WEBUI_ALLOWED_PATHS="/path/to/data:/path/to/samples"
+cd webui/frontend
+npm ci
+npm run build
+cd ../..
+python -m main --host 127.0.0.1 --port 8000 --frontend
 ```
 
-Если нужен token:
+Public bind requires auth:
 
 ```bash
 export WEBUI_AUTH_TOKEN="secret"
+python -m main --host 0.0.0.0 --port 8000 --frontend --frontend-host 0.0.0.0
 ```
+
+For remote dev frontend, use relative API/Vite proxy or explicit API base:
+
+```bash
+python -m main \
+  --host 0.0.0.0 \
+  --frontend-host 0.0.0.0 \
+  --api-base http://SERVER_IP:8000
+```
+
+Security model:
+
+- `/runs` is not mounted publicly.
+- Read endpoints require token when `WEBUI_AUTH_TOKEN` is set.
+- Uploads are not exposed through predictable `/api/files/_uploads/...` paths.
+- File previews/downloads use HMAC-signed file tokens.
+- `WEBUI_FILE_TOKEN_SECRET` signs file tokens. If not set, a local `.webui_file_token_secret` is generated.
+- Do not commit `.webui_file_token_secret`.
+
+Recommended env:
+
+```bash
+export WEBUI_AUTH_TOKEN="secret"
+export WEBUI_FILE_TOKEN_SECRET="separate-long-random-secret"
+export WEBUI_MAX_UPLOAD_MB=32
+export WEBUI_ALLOWED_PATHS="/path/to/data:/path/to/extra/outputs"
+```
+
+WebUI sample jobs run as subprocesses in normal repo mode. Stop endpoints are type-aware:
+
+```text
+/api/train/stop   -> train only
+/api/sample/stop  -> sample only
+/api/latents/stop -> latent_cache only
+```
+
+Sample metrics are saved to:
+
+```text
+webui_runs/<run_id>/metrics/sample.jsonl
+```
+
+Latent prepare metrics are saved to:
+
+```text
+webui_runs/<run_id>/metrics/latent_prepare.jsonl
+```
+
+### WebUI API highlights
+
+```text
+GET  /api/status
+GET  /api/runs
+GET  /api/runs/{run_id}
+GET  /api/runs/{run_id}/logs/{stdout|stderr}?raw=true
+GET  /api/runs/{run_id}/metrics
+GET  /api/artifacts?run_id=...&source=all
+GET  /api/generated-samples?run_id=...
+GET  /api/train-samples?run_id=...
+GET  /api/files/{relative-preview-path}
+GET  /api/files/by-path/{signed-token}
+GET  /api/files/download/{signed-token}
+```
+
+Artifacts have backend-generated URLs:
+
+```json
+{
+  "path": "...",
+  "name": "sample.png",
+  "source": "webui_sample",
+  "run_id": "...",
+  "previewable": true,
+  "url": "/api/files/...",
+  "download_url": "/api/files/download/..."
+}
+```
+
+Frontend must not parse filesystem paths or assume `webui_runs/` in URLs.
 
 ## 12. Distributed / Accelerate
 
@@ -730,7 +849,7 @@ Dry-run:
 python -m train.cli --profile distributed_smoke --dry-run
 ```
 
-Реальный запуск через Accelerate:
+Accelerate:
 
 ```bash
 accelerate config
@@ -739,7 +858,7 @@ accelerate launch -m train.cli --config config/train_distributed_smoke.yaml
 
 Checkpoint и events пишутся только rank 0. Метрики агрегируются через distributed context.
 
-FSDP пока намеренно не включён в trainer. Есть template и документация:
+FSDP пока не включён в trainer. Есть template и документация:
 
 ```text
 config/train_fsdp_template.yaml
@@ -752,7 +871,36 @@ docs/distributed_and_fsdp.md
 python -m train.cli --profile fsdp_template --dry-run
 ```
 
-## 13. Рекомендуемый порядок нового запуска
+## 13. Тесты и проверки
+
+Быстрый suite:
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q
+```
+
+Полный локальный check:
+
+```bash
+bash scripts/check_project.sh
+```
+
+Frontend:
+
+```bash
+cd webui/frontend
+npm ci
+npm run build
+cd ../..
+```
+
+Compile check:
+
+```bash
+python -m compileall -q .
+```
+
+## 14. Рекомендуемый порядок нового запуска
 
 1. Проверить dataset:
 
@@ -796,20 +944,15 @@ python -m scripts.validate_cache --config config/train.yaml
 python -m train.cli --profile smoke
 ```
 
-7. Overfit:
+7. Overfit/dev/base:
 
 ```bash
 python -m train.cli --profile overfit
-```
-
-8. Dev/base training:
-
-```bash
 python -m train.cli --profile dev
 python -m train.cli --profile base
 ```
 
-9. Sample checkpoint:
+8. Sample checkpoint:
 
 ```bash
 python -m sample.cli \
@@ -821,7 +964,7 @@ python -m sample.cli \
   --out samples/test.png
 ```
 
-10. Eval grids:
+9. Eval grids:
 
 ```bash
 python -m train.eval_cli \
@@ -831,11 +974,11 @@ python -m train.eval_cli \
   --seed 42
 ```
 
-## 14. Типичные ошибки
+## 15. Типичные ошибки
 
 ### `Text cache missing key`
 
-Dataset index изменился, а text cache старый. Пересборка:
+Dataset index изменился, а text cache старый:
 
 ```bash
 rm -rf data/dataset/.cache/text
@@ -844,31 +987,39 @@ python -m scripts.prepare_text_cache --config config/train.yaml
 
 ### `text cache dataset_hash mismatch`
 
-Изменились prompts/captions/tags или `text_field/text_fields`. Пересборка text cache.
+Изменились prompts/captions/tags или `text_field/text_fields`. Пересобери text cache.
 
-### `Latent cache is stale` или `latent shape mismatch`
+### `latent cache manifest status is not complete`
 
-Изменился VAE, `image_size`, `latent_downsample_factor`, `latent_patch_size`, dtype или dataset. Пересборка latents:
+Cache preparation был прерван. Удали partial cache или запусти repair/rebuild:
+
+```bash
+python -m scripts.prepare_training_cache --config config/train.yaml --repair --rebuild
+```
+
+### `Latent cache is stale` / `latent shape mismatch`
+
+Изменился VAE, `image_size`, aspect buckets, `latent_downsample_factor`, latent dtype или dataset. Пересобери latents:
 
 ```bash
 python -m scripts.prepare_latents --config config/train.yaml --overwrite
 ```
 
-### `Checkpoint incompatible: hidden_dim mismatch`
+### `Checkpoint incompatible: ... mismatch`
 
 Checkpoint создан для другой архитектуры/config. Используй совместимый config или другой checkpoint.
 
-### `task=inpaint requires --mask`
+### `task=... does not allow ...`
 
-Для inpaint обязательно нужны `--init-image` и `--mask`.
+Sampler API запрещает неявные mixed modes. Используй task/input matrix из раздела Sampling CLI.
 
-### `task=img2img requires --init-image`
+### `latent_only outputs must use .pt or .pth extension`
 
-Для img2img нужен `--init-image`.
+Для `--latent-only` output должен быть `.pt` или `.pth`.
 
 ### `text_cache=false is only allowed when allow_on_the_fly_text=true`
 
-Для real training text cache должен быть включён. Debug-only режим:
+Для real training text cache должен быть включён. Debug-only:
 
 ```yaml
 text_cache: false
@@ -877,7 +1028,7 @@ allow_on_the_fly_text: true
 
 ### CUDA OOM
 
-Уменьшать:
+Уменьшай:
 
 ```yaml
 training:
@@ -889,7 +1040,7 @@ model:
 
 Также можно использовать меньший профиль: `smoke`, `overfit`, `dev`, `milestone_a`.
 
-## 15. Полезные entry points
+## 16. Entry points
 
 После `pip install -e .` доступны:
 
@@ -904,7 +1055,7 @@ md-cache-validate --help
 md-webui --help
 ```
 
-Эквивалентные module commands:
+Module commands:
 
 ```bash
 python -m train.cli --help
@@ -915,4 +1066,27 @@ python -m scripts.prepare_training_cache --help
 python -m train.eval_cli --help
 python -m scripts.validate_cache --help
 python -m main --help
+```
+
+## 17. Runtime files that must not be committed
+
+Do not commit generated data, cache, outputs or local secrets:
+
+```text
+.venv/
+webui/frontend/node_modules/
+webui/frontend/.vite/
+.webui_file_token_secret
+data/dataset/
+samples/
+runs/
+webui_runs/
+vae_sd_mse/
+*.egg-info/
+```
+
+If `webui/frontend/dist` is intentionally shipped with a wheel/package, add it explicitly:
+
+```bash
+git add -f webui/frontend/dist
 ```
