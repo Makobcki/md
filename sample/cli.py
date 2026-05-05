@@ -33,6 +33,13 @@ def _nonnegative_float(value: str) -> float:
     return parsed
 
 
+def _positive_float(value: str) -> float:
+    parsed = float(value)
+    if parsed <= 0.0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
 def _main_impl() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
@@ -42,10 +49,10 @@ def _main_impl() -> None:
     ap.add_argument("--prompt", default="")
     ap.add_argument("--neg_prompt", "--negative-prompt", dest="neg_prompt", default="")
     ap.add_argument("--cfg", type=float, default=5.0)
-    ap.add_argument("--shift", type=_nonnegative_float, default=None, help="Positive inference timestep shift override. Defaults to checkpoint/config sampling shift.")
+    ap.add_argument("--shift", type=_positive_float, default=None, help="Positive inference timestep shift override. Defaults to checkpoint/config sampling shift.")
     ap.add_argument("--sampler", default="flow_heun", choices=("flow_euler", "flow_heun"))
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--device", default="auto")
     ap.add_argument("--width", type=_positive_int, default=None)
     ap.add_argument("--height", type=_positive_int, default=None)
     ap.add_argument("--init-image", dest="init_image", default="")
