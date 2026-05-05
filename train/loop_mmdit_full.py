@@ -15,7 +15,7 @@ from model.mmdit import MMDiTFlowModel
 from model.text.conditioning import TextConditioning, TrainBatch
 from model.text.pretrained import FrozenTextEncoderBundle
 from diffusion.vae import VAEWrapper
-from train.checkpoint import _prune_checkpoints, save_ckpt
+from train.checkpoint import _prune_checkpoints, link_checkpoint_alias, save_ckpt
 from train.eval_mmdit import run_mmdit_eval_sampling
 from train.schedulers import _apply_lr, _compute_lr
 from train.webui import _is_webui_mode, _webui_metrics_path
@@ -82,6 +82,7 @@ def _per_sample_flow_mse(
     target: torch.Tensor,
     mask: torch.Tensor | None = None,
     *,
+    task: str | list[str] | tuple[str, ...] | None = None,
     mask_weight: float = 1.0,
     unmask_weight: float = 1.0,
 ) -> torch.Tensor:
@@ -102,7 +103,16 @@ def _per_sample_flow_mse(
     weights = weights.expand_as(err) if weights.shape[1] == 1 else weights
     denom = weights.sum(dim=[1, 2, 3])
     weighted = (err * weights).sum(dim=[1, 2, 3]) / denom.clamp_min(1.0)
-    return torch.where(denom > 0, weighted, full)
+    weighted = torch.where(denom > 0, weighted, full)
+    if task is None:
+        return weighted
+    if isinstance(task, str):
+        return weighted if task == "inpaint" else full
+    tasks = list(task)
+    if len(tasks) != pred.shape[0]:
+        raise RuntimeError(f"task batch {len(tasks)} is incompatible with prediction batch {pred.shape[0]}")
+    inpaint_rows = torch.tensor([str(name) == "inpaint" for name in tasks], device=pred.device, dtype=torch.bool)
+    return torch.where(inpaint_rows, weighted, full)
 
 
 def _loss_and_bins(
@@ -137,6 +147,7 @@ def _loss_and_bins(
             pred,
             train_tuple.target,
             batch.mask,
+            task=batch.task,
             mask_weight=float(inpaint_loss_mask_weight),
             unmask_weight=float(inpaint_loss_unmask_weight),
         )
@@ -193,6 +204,7 @@ def _run_validation(
                     pred,
                     train_tuple.target,
                     batch.mask,
+                    task=batch.task,
                     mask_weight=float(inpaint_loss_mask_weight),
                     unmask_weight=float(inpaint_loss_unmask_weight),
                 )
@@ -354,226 +366,250 @@ def run_mmdit_training_loop(
     run_start = time.perf_counter()
     log_window_start = run_start
     log_window_step = int(step)
+    epoch_idx = 0
 
-    while step < max_steps:
-        saw_batch = False
-        for raw in dataloader:
-            saw_batch = True
-            if step >= max_steps:
-                break
-            lr = _compute_lr(
-                step=step,
-                base_lr=base_lr,
-                warmup_steps=warmup_steps,
-                decay_steps=decay_steps,
-                min_lr_ratio=min_lr_ratio,
-                scheduler=str(cfg.lr_scheduler),
-            )
-            _apply_lr(optimizer, lr)
-            batch = _move_batch(raw, device)
-            loss, bins = _loss_and_bins(
-                model=model,
-                objective=objective,
-                batch=batch,
-                empty_text=empty_text,
-                cfg_drop_prob=float(cfg.cond_drop_prob),
-                use_amp=use_amp,
-                amp_dtype=amp_dtype,
-                inpaint_loss_mask_weight=float(cfg.inpaint_loss_mask_weight),
-                inpaint_loss_unmask_weight=float(cfg.inpaint_loss_unmask_weight),
-            )
-            _assert_finite("mmdit_loss", loss.detach())
-            scaler.scale(loss / grad_accum).backward()
-            recent_losses.append(float(loss.detach().cpu()))
-            recent_samples += int(batch.x0.shape[0])
-            for key, value in bins.items():
-                recent_bins.setdefault(key, []).append(value)
-            accum_idx += 1
-
-            if accum_idx >= grad_accum:
-                if use_amp:
-                    scaler.unscale_(optimizer)
-                grad_stats = _grad_diagnostics(model)
-                grad_norm = float(grad_stats["grad_norm_total"])
-                if grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                if bool(cfg.fail_on_nonfinite_grad):
-                    if bool(grad_stats["has_nan_grad"]) or bool(grad_stats["has_inf_grad"]):
-                        for name, param in model.named_parameters():
-                            if param.grad is not None and not torch.isfinite(param.grad).all():
-                                raise RuntimeError(f"Non-finite gradient in {name}")
-                        raise RuntimeError("Non-finite gradient detected")
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-                ema.update(model)
-                accum_idx = 0
-                next_step = step + 1
-                now = time.perf_counter()
-                elapsed_sec = max(now - run_start, 0.0)
-                completed_steps = max(int(next_step) - int(start_step), 1)
-                avg_sec_per_step_progress = elapsed_sec / float(completed_steps)
-                remaining_steps_progress = max(int(max_steps) - int(next_step), 0)
-                eta_sec_progress = remaining_steps_progress * avg_sec_per_step_progress
-                event_bus.emit(
-                    {
-                        "type": "progress",
-                        "step": next_step,
-                        "max_steps": max_steps,
-                        "lr": lr,
-                        "elapsed_sec": float(elapsed_sec),
-                        "elapsed": _format_duration(elapsed_sec),
-                        "eta_sec": float(eta_sec_progress),
-                        "eta": _format_duration(eta_sec_progress),
-                        "eta_h": float(eta_sec_progress) / 3600.0,
-                        "sec_per_step": float(avg_sec_per_step_progress),
-                        "s_per_step": float(avg_sec_per_step_progress),
-                        "avg_sec_per_step": float(avg_sec_per_step_progress),
-                        "steps_per_sec": float(1.0 / avg_sec_per_step_progress) if avg_sec_per_step_progress > 0 else 0.0,
-                        "remaining_steps": int(remaining_steps_progress),
-                    }
+    try:
+        while step < max_steps:
+            sampler = getattr(dataloader, "batch_sampler", None) or getattr(dataloader, "sampler", None)
+            if hasattr(sampler, "set_epoch"):
+                sampler.set_epoch(epoch_idx)
+            dataset = getattr(dataloader, "dataset", None)
+            if hasattr(dataset, "set_epoch"):
+                dataset.set_epoch(epoch_idx)
+            saw_batch = False
+            for raw in dataloader:
+                saw_batch = True
+                if step >= max_steps:
+                    break
+                lr = _compute_lr(
+                    step=step,
+                    base_lr=base_lr,
+                    warmup_steps=warmup_steps,
+                    decay_steps=decay_steps,
+                    min_lr_ratio=min_lr_ratio,
+                    scheduler=str(cfg.lr_scheduler),
                 )
+                _apply_lr(optimizer, lr)
+                batch = _move_batch(raw, device)
+                loss, bins = _loss_and_bins(
+                    model=model,
+                    objective=objective,
+                    batch=batch,
+                    empty_text=empty_text,
+                    cfg_drop_prob=float(cfg.cond_drop_prob),
+                    use_amp=use_amp,
+                    amp_dtype=amp_dtype,
+                    inpaint_loss_mask_weight=float(cfg.inpaint_loss_mask_weight),
+                    inpaint_loss_unmask_weight=float(cfg.inpaint_loss_unmask_weight),
+                )
+                _assert_finite("mmdit_loss", loss.detach())
+                scaler.scale(loss / grad_accum).backward()
+                recent_losses.append(float(loss.detach().cpu()))
+                recent_samples += int(batch.x0.shape[0])
+                for key, value in bins.items():
+                    recent_bins.setdefault(key, []).append(value)
+                accum_idx += 1
 
-                if log_every > 0 and next_step % log_every == 0:
-                    window_elapsed_sec = max(now - log_window_start, 1.0e-9)
-                    window_steps = max(int(next_step) - int(log_window_step), 1)
-                    sec_per_step = window_elapsed_sec / float(window_steps)
-                    avg_sec_per_step = elapsed_sec / float(max(int(next_step) - int(start_step), 1))
-                    remaining_steps = max(int(max_steps) - int(next_step), 0)
-                    eta_sec = remaining_steps * sec_per_step
-                    mean_loss = sum(recent_losses) / max(len(recent_losses), 1)
-                    mean_loss = dist.reduce_mean_float(mean_loss, device=device)
-                    grad_norm = dist.reduce_mean_float(grad_norm, device=device)
-                    event = {
-                        "type": "train",
-                        "step": next_step,
-                        "max_steps": max_steps,
-                        "loss": mean_loss,
-                        "train_loss": mean_loss,
-                        "lr": lr,
-                        "grad_norm": grad_norm,
-                        "grad_norm_total": float(grad_stats["grad_norm_total"]),
-                        "has_nan_grad": bool(grad_stats["has_nan_grad"]),
-                        "has_inf_grad": bool(grad_stats["has_inf_grad"]),
-                        "samples_per_sec": float(recent_samples) / window_elapsed_sec,
-                        "steps_per_sec": float(window_steps) / window_elapsed_sec,
-                        "sec_per_step": float(sec_per_step),
-                        "s_per_step": float(sec_per_step),
-                        "avg_sec_per_step": float(avg_sec_per_step),
-                        "elapsed_sec": float(elapsed_sec),
-                        "elapsed": _format_duration(elapsed_sec),
-                        "eta_sec": float(eta_sec),
-                        "eta": _format_duration(eta_sec),
-                        "eta_h": float(eta_sec) / 3600.0,
-                        "remaining_steps": int(remaining_steps),
-                    }
-                    local_bins = {k: sum(v) / len(v) for k, v in recent_bins.items() if v}
-                    event.update({k: dist.reduce_mean_float(float(v), device=device) for k, v in local_bins.items()})
-                    event_bus.emit(event)
-                    recent_losses.clear()
-                    recent_bins.clear()
-                    recent_samples = 0
-                    log_window_start = time.perf_counter()
-                    log_window_step = int(next_step)
-
-                if val_every > 0 and next_step % val_every == 0:
-                    val_loss, val_bins = _run_validation(
-                        model=model,
-                        objective=objective,
-                        dataloader=val_dataloader,
-                        device=device,
-                        max_batches=val_batches,
-                        use_amp=use_amp,
-                        amp_dtype=amp_dtype,
-                        inpaint_loss_mask_weight=float(cfg.inpaint_loss_mask_weight),
-                        inpaint_loss_unmask_weight=float(cfg.inpaint_loss_unmask_weight),
-                    )
-                    if val_loss is not None:
-                        val_loss = dist.reduce_mean_float(float(val_loss), device=device)
-                        event = {
-                            "type": "eval",
+                if accum_idx >= grad_accum:
+                    if use_amp:
+                        scaler.unscale_(optimizer)
+                    grad_stats = _grad_diagnostics(model)
+                    grad_norm = float(grad_stats["grad_norm_total"])
+                    has_nonfinite_grad = bool(grad_stats["has_nan_grad"]) or bool(grad_stats["has_inf_grad"])
+                    if has_nonfinite_grad:
+                        if bool(cfg.fail_on_nonfinite_grad):
+                            for name, param in model.named_parameters():
+                                if param.grad is not None and not torch.isfinite(param.grad).all():
+                                    raise RuntimeError(f"Non-finite gradient in {name}")
+                            raise RuntimeError("Non-finite gradient detected")
+                        optimizer.zero_grad(set_to_none=True)
+                        accum_idx = 0
+                        continue
+                    if grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                    old_scale = float(scaler.get_scale()) if use_amp and scaler.is_enabled() else 1.0
+                    scaler.step(optimizer)
+                    scaler.update()
+                    new_scale = float(scaler.get_scale()) if use_amp and scaler.is_enabled() else old_scale
+                    optimizer.zero_grad(set_to_none=True)
+                    optimizer_step_ran = (not use_amp) or (not scaler.is_enabled()) or new_scale >= old_scale
+                    if not optimizer_step_ran:
+                        accum_idx = 0
+                        continue
+                    ema.update(model)
+                    accum_idx = 0
+                    next_step = step + 1
+                    now = time.perf_counter()
+                    elapsed_sec = max(now - run_start, 0.0)
+                    completed_steps = max(int(next_step) - int(start_step), 1)
+                    avg_sec_per_step_progress = elapsed_sec / float(completed_steps)
+                    remaining_steps_progress = max(int(max_steps) - int(next_step), 0)
+                    eta_sec_progress = remaining_steps_progress * avg_sec_per_step_progress
+                    event_bus.emit(
+                        {
+                            "type": "progress",
                             "step": next_step,
                             "max_steps": max_steps,
-                            "val_loss": val_loss,
+                            "lr": lr,
+                            "elapsed_sec": float(elapsed_sec),
+                            "elapsed": _format_duration(elapsed_sec),
+                            "eta_sec": float(eta_sec_progress),
+                            "eta": _format_duration(eta_sec_progress),
+                            "eta_h": float(eta_sec_progress) / 3600.0,
+                            "sec_per_step": float(avg_sec_per_step_progress),
+                            "s_per_step": float(avg_sec_per_step_progress),
+                            "avg_sec_per_step": float(avg_sec_per_step_progress),
+                            "steps_per_sec": float(1.0 / avg_sec_per_step_progress) if avg_sec_per_step_progress > 0 else 0.0,
+                            "remaining_steps": int(remaining_steps_progress),
                         }
-                        event.update({k: dist.reduce_mean_float(float(v), device=device) for k, v in val_bins.items()})
-                        event_bus.emit(event)
-
-                if (
-                    int(cfg.eval_every) > 0
-                    and next_step % int(cfg.eval_every) == 0
-                    and write_outputs
-                    and eval_prompts
-                    and eval_text_encoder is not None
-                    and eval_vae is not None
-                ):
-                    sample_events = run_mmdit_eval_sampling(
-                        step=next_step,
-                        model=model,
-                        ema=ema,
-                        vae=eval_vae,
-                        text_encoder=eval_text_encoder,
-                        out_dir=out_dir,
-                        prompts=eval_prompts,
-                        eval_seed=int(cfg.eval_seed),
-                        eval_sampler=str(cfg.eval_sampler),
-                        eval_steps=int(cfg.eval_steps),
-                        eval_cfg=float(cfg.eval_cfg),
-                        eval_n=int(cfg.eval_n),
-                        latent_channels=int(cfg.latent_channels),
-                        image_size=int(cfg.image_size),
-                        latent_downsample_factor=int(cfg.latent_downsample_factor),
-                        shift=float(cfg.sampling_shift),
-                        use_amp=use_amp,
-                        amp_dtype=amp_dtype,
                     )
-                    for sample_event in sample_events:
-                        event = dict(sample_event)
-                        event["max_steps"] = max_steps
+
+                    if log_every > 0 and next_step % log_every == 0:
+                        window_elapsed_sec = max(now - log_window_start, 1.0e-9)
+                        window_steps = max(int(next_step) - int(log_window_step), 1)
+                        sec_per_step = window_elapsed_sec / float(window_steps)
+                        avg_sec_per_step = elapsed_sec / float(max(int(next_step) - int(start_step), 1))
+                        remaining_steps = max(int(max_steps) - int(next_step), 0)
+                        eta_sec = remaining_steps * sec_per_step
+                        mean_loss = sum(recent_losses) / max(len(recent_losses), 1)
+                        mean_loss = dist.reduce_mean_float(mean_loss, device=device)
+                        grad_norm = dist.reduce_mean_float(grad_norm, device=device)
+                        event = {
+                            "type": "train",
+                            "step": next_step,
+                            "max_steps": max_steps,
+                            "loss": mean_loss,
+                            "train_loss": mean_loss,
+                            "lr": lr,
+                            "grad_norm": grad_norm,
+                            "grad_norm_total": float(grad_stats["grad_norm_total"]),
+                            "has_nan_grad": bool(grad_stats["has_nan_grad"]),
+                            "has_inf_grad": bool(grad_stats["has_inf_grad"]),
+                            "samples_per_sec": float(recent_samples) / window_elapsed_sec,
+                            "steps_per_sec": float(window_steps) / window_elapsed_sec,
+                            "sec_per_step": float(sec_per_step),
+                            "s_per_step": float(sec_per_step),
+                            "avg_sec_per_step": float(avg_sec_per_step),
+                            "elapsed_sec": float(elapsed_sec),
+                            "elapsed": _format_duration(elapsed_sec),
+                            "eta_sec": float(eta_sec),
+                            "eta": _format_duration(eta_sec),
+                            "eta_h": float(eta_sec) / 3600.0,
+                            "remaining_steps": int(remaining_steps),
+                        }
+                        local_bins = {k: sum(v) / len(v) for k, v in recent_bins.items() if v}
+                        event.update({k: dist.reduce_mean_float(float(v), device=device) for k, v in local_bins.items()})
                         event_bus.emit(event)
+                        recent_losses.clear()
+                        recent_bins.clear()
+                        recent_samples = 0
+                        log_window_start = time.perf_counter()
+                        log_window_step = int(next_step)
 
-                if save_every > 0 and next_step % save_every == 0 and write_outputs:
-                    ckpt = _build_ckpt(
-                        cfg=cfg,
-                        cfg_dict=cfg_dict,
-                        model=model,
-                        optimizer=optimizer,
-                        scaler=scaler,
-                        ema=ema,
-                        step=next_step,
-                        text_metadata=text_metadata,
-                    )
-                    save_ckpt(str(checkpoint_dir / f"step_{next_step:06d}.pt"), ckpt)
-                    save_ckpt(str(checkpoint_dir / "latest.pt"), ckpt)
-                    # Backward-compatible flat names for older scripts/UI.
-                    save_ckpt(str(out_dir / f"ckpt_{next_step:07d}.pt"), ckpt)
-                    save_ckpt(str(out_dir / "ckpt_latest.pt"), ckpt)
-                    _prune_checkpoints(out_dir, int(cfg.ckpt_keep_last))
-                    _prune_checkpoints(checkpoint_dir, int(cfg.ckpt_keep_last))
+                    if val_every > 0 and next_step % val_every == 0:
+                        val_loss, val_bins = _run_validation(
+                            model=model,
+                            objective=objective,
+                            dataloader=val_dataloader,
+                            device=device,
+                            max_batches=val_batches,
+                            use_amp=use_amp,
+                            amp_dtype=amp_dtype,
+                            inpaint_loss_mask_weight=float(cfg.inpaint_loss_mask_weight),
+                            inpaint_loss_unmask_weight=float(cfg.inpaint_loss_unmask_weight),
+                        )
+                        if val_loss is not None:
+                            val_loss = dist.reduce_mean_float(float(val_loss), device=device)
+                            event = {
+                                "type": "eval",
+                                "step": next_step,
+                                "max_steps": max_steps,
+                                "val_loss": val_loss,
+                            }
+                            event.update({k: dist.reduce_mean_float(float(v), device=device) for k, v in val_bins.items()})
+                            event_bus.emit(event)
 
-                step = next_step
-                pbar.update(1)
-        if not saw_batch:
-            raise RuntimeError(
-                "MMDiT training dataloader produced no batches. "
-                "Check latent cache, text cache, batch_size, drop_last, and dataset filters."
+                    if (
+                        int(cfg.eval_every) > 0
+                        and next_step % int(cfg.eval_every) == 0
+                        and write_outputs
+                        and eval_prompts
+                        and eval_text_encoder is not None
+                        and eval_vae is not None
+                    ):
+                        sample_events = run_mmdit_eval_sampling(
+                            step=next_step,
+                            model=model,
+                            ema=ema,
+                            vae=eval_vae,
+                            text_encoder=eval_text_encoder,
+                            out_dir=out_dir,
+                            prompts=eval_prompts,
+                            eval_seed=int(cfg.eval_seed),
+                            eval_sampler=str(cfg.eval_sampler),
+                            eval_steps=int(cfg.eval_steps),
+                            eval_cfg=float(cfg.eval_cfg),
+                            eval_n=int(cfg.eval_n),
+                            latent_channels=int(cfg.latent_channels),
+                            image_size=int(cfg.image_size),
+                            latent_downsample_factor=int(cfg.latent_downsample_factor),
+                            shift=float(cfg.sampling_shift),
+                            use_amp=use_amp,
+                            amp_dtype=amp_dtype,
+                        )
+                        for sample_event in sample_events:
+                            event = dict(sample_event)
+                            event["max_steps"] = max_steps
+                            event_bus.emit(event)
+
+                    if save_every > 0 and next_step % save_every == 0 and write_outputs:
+                        ckpt = _build_ckpt(
+                            cfg=cfg,
+                            cfg_dict=cfg_dict,
+                            model=model,
+                            optimizer=optimizer,
+                            scaler=scaler,
+                            ema=ema,
+                            step=next_step,
+                            text_metadata=text_metadata,
+                        )
+                        step_path = checkpoint_dir / f"step_{next_step:06d}.pt"
+                        latest_path = checkpoint_dir / "latest.pt"
+                        save_ckpt(str(step_path), ckpt)
+                        save_ckpt(str(latest_path), ckpt)
+                        # Backward-compatible flat aliases for older scripts/UI.
+                        link_checkpoint_alias(step_path, out_dir / f"ckpt_{next_step:07d}.pt")
+                        link_checkpoint_alias(latest_path, out_dir / "ckpt_latest.pt")
+                        _prune_checkpoints(out_dir, int(cfg.ckpt_keep_last))
+                        _prune_checkpoints(checkpoint_dir, int(cfg.ckpt_keep_last))
+
+                    step = next_step
+                    pbar.update(1)
+            if not saw_batch:
+                raise RuntimeError(
+                    "MMDiT training dataloader produced no batches. "
+                    "Check latent cache, text cache, batch_size, drop_last, and dataset filters."
+                )
+            epoch_idx += 1
+
+        if write_outputs:
+            ckpt = _build_ckpt(
+                cfg=cfg,
+                cfg_dict=cfg_dict,
+                model=model,
+                optimizer=optimizer,
+                scaler=scaler,
+                ema=ema,
+                step=step,
+                text_metadata=text_metadata,
             )
-
-    if write_outputs:
-        ckpt = _build_ckpt(
-            cfg=cfg,
-            cfg_dict=cfg_dict,
-            model=model,
-            optimizer=optimizer,
-            scaler=scaler,
-            ema=ema,
-            step=step,
-            text_metadata=text_metadata,
-        )
-        save_ckpt(str(checkpoint_dir / "final.pt"), ckpt)
-        save_ckpt(str(checkpoint_dir / "latest.pt"), ckpt)
-        save_ckpt(str(out_dir / "ckpt_final.pt"), ckpt)
-        save_ckpt(str(out_dir / "ckpt_latest.pt"), ckpt)
-    dist.wait_for_everyone()
-    event_bus.close()
-    pbar.close()
+            final_path = checkpoint_dir / "final.pt"
+            latest_path = checkpoint_dir / "latest.pt"
+            save_ckpt(str(final_path), ckpt)
+            save_ckpt(str(latest_path), ckpt)
+            link_checkpoint_alias(final_path, out_dir / "ckpt_final.pt")
+            link_checkpoint_alias(latest_path, out_dir / "ckpt_latest.pt")
+        dist.wait_for_everyone()
+    finally:
+        event_bus.close()
+        pbar.close()
