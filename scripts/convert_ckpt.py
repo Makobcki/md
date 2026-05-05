@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import torch
+from diffusion.io.ckpt import _torch_load
 
 
 def strip_prefix(sd: dict, prefix: str) -> dict:
@@ -23,7 +24,7 @@ def main() -> None:
     ap.add_argument("--prefix", default="_orig_mod.")
     args = ap.parse_args()
 
-    ck = torch.load(args.inp, map_location="cpu")
+    ck = _torch_load(args.inp, map_location="cpu")
 
     if "model" in ck:
         ck["model"] = strip_prefix(ck["model"], args.prefix)

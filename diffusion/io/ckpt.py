@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import pickle
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -11,6 +13,45 @@ import torch.nn as nn
 
 _KNOWN_PREFIXES = ("_orig_mod.", "module.")
 CKPT_FORMAT_VERSION = 2
+
+
+def _torch_load(path: str | Path, map_location: torch.device | str):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except TypeError:
+        # Older PyTorch has no weights_only argument. These project checkpoints
+        # are trusted local training artifacts, not arbitrary uploads.
+        return torch.load(path, map_location=map_location)
+    except (RuntimeError, pickle.UnpicklingError):
+        if os.environ.get("MD_ALLOW_UNSAFE_TORCH_LOAD", "1") not in {"1", "true", "True", "yes"}:
+            raise
+        # Backward compatibility for legacy project checkpoints containing Python
+        # objects unsupported by weights_only.
+        return torch.load(path, map_location=map_location, weights_only=False)
+
+
+def _checkpoint_metadata_sidecar(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".metadata.json")
+
+
+def _write_checkpoint_metadata_sidecar(path: Path, obj: dict) -> None:
+    metadata = obj.get("metadata") if isinstance(obj, dict) else None
+    if not isinstance(metadata, dict):
+        return
+    payload = {
+        "metadata": metadata,
+        "cfg": obj.get("cfg", {}),
+        "step": obj.get("step", metadata.get("step")),
+        "architecture": obj.get("architecture", metadata.get("architecture")),
+        "objective": obj.get("objective", metadata.get("objective")),
+        "prediction_type": obj.get("prediction_type", metadata.get("prediction_type")),
+    }
+    sidecar = _checkpoint_metadata_sidecar(path)
+    tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+    _fsync_file(tmp)
+    os.replace(tmp, sidecar)
+    _fsync_dir(sidecar.parent)
 
 
 def _strip_prefixes(key: str) -> str:
@@ -84,7 +125,7 @@ def normalize_state_dict_for_model(state_dict: dict, model: nn.Module, name: str
 
 
 def load_ckpt(path: str, device: torch.device) -> dict:
-    ck = torch.load(path, map_location=device)
+    ck = _torch_load(path, map_location=device)
     ck = sanitize_ckpt(ck)
     if isinstance(ck, dict):
         format_version = int(ck.get("format_version", 1))
@@ -113,26 +154,31 @@ def save_ckpt(path: str, obj: dict) -> None:
     _fsync_file(tmp)
     os.replace(tmp, p)
     _fsync_dir(p.parent)
+    _write_checkpoint_metadata_sidecar(p, obj)
 
 
 def resolve_resume_path(resume: str, out_dir: Path) -> str:
     resume = str(resume).strip()
     if not resume:
         return ""
+    checkpoint_dir = out_dir / "checkpoints"
     if resume == "latest":
-        latest_path = out_dir / "ckpt_latest.pt"
-        if latest_path.exists():
-            return str(latest_path)
-        ckpts = sorted(out_dir.glob("ckpt_*.pt"))
+        candidates = (checkpoint_dir / "latest.pt", out_dir / "latest.pt", out_dir / "ckpt_latest.pt")
+        for path in candidates:
+            if path.exists():
+                return str(path)
+        ckpts = sorted(checkpoint_dir.glob("step_*.pt")) or sorted(out_dir.glob("step_*.pt")) or sorted(out_dir.glob("ckpt_*.pt"))
+        ckpts = [p for p in ckpts if p.name not in {"ckpt_latest.pt", "ckpt_final.pt"}]
         if ckpts:
             return str(ckpts[-1])
         raise RuntimeError("No checkpoints found for resume=latest.")
     if resume.isdigit():
         step = int(resume)
-        ckpt_path = out_dir / f"ckpt_{step:07d}.pt"
-        if not ckpt_path.exists():
-            raise RuntimeError(f"Checkpoint not found for step {step}: {ckpt_path}")
-        return str(ckpt_path)
+        candidates = (checkpoint_dir / f"step_{step:06d}.pt", out_dir / f"step_{step:06d}.pt", out_dir / f"ckpt_{step:07d}.pt")
+        for path in candidates:
+            if path.exists():
+                return str(path)
+        raise RuntimeError(f"Checkpoint not found for step {step}: {candidates[0]}")
     return resume
 
 

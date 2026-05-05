@@ -7,6 +7,8 @@ from typing import Any
 
 import torch
 
+from diffusion.io.ckpt import _torch_load
+
 _REQUIRED_METADATA_FIELDS = (
     "architecture",
     "objective",
@@ -26,6 +28,10 @@ _MODEL_COMPAT_FIELDS = (
     "hidden_dim",
     "depth",
     "num_heads",
+    "mlp_ratio",
+    "qk_norm",
+    "rms_norm",
+    "swiglu",
     "double_stream_blocks",
     "single_stream_blocks",
     "pos_embed",
@@ -39,7 +45,6 @@ _MODEL_COMPAT_FIELDS = (
     "attention_schedule",
     "early_joint_blocks",
     "late_joint_blocks",
-    "x0_aux_weight",
     "source_patch_size",
     "mask_patch_size",
     "control_patch_size",
@@ -116,6 +121,10 @@ def build_mmdit_checkpoint_metadata(
         "hidden_dim": int(cfg.hidden_dim),
         "depth": int(cfg.depth),
         "num_heads": int(cfg.num_heads),
+        "mlp_ratio": float(getattr(cfg, "mlp_ratio", 4.0)),
+        "qk_norm": bool(getattr(cfg, "qk_norm", True)),
+        "rms_norm": bool(getattr(cfg, "rms_norm", True)),
+        "swiglu": bool(getattr(cfg, "swiglu", True)),
         "double_stream_blocks": int(cfg.double_stream_blocks),
         "single_stream_blocks": int(cfg.single_stream_blocks),
         "pos_embed": str(cfg.pos_embed),
@@ -186,7 +195,7 @@ def validate_checkpoint_metadata(metadata: dict[str, Any]) -> None:
 
 
 def read_checkpoint_metadata(path: str | Path) -> dict[str, Any]:
-    ckpt = torch.load(str(path), map_location="cpu")
+    ckpt = _torch_load(str(path), map_location="cpu")
     if not isinstance(ckpt, dict):
         raise RuntimeError("Checkpoint payload must be a dict.")
     metadata = _ckpt_metadata(ckpt)
@@ -253,7 +262,7 @@ def _normalize_compat_value(key: str, value: Any) -> Any:
     if key in {
         "rope_theta",
         "text_resampler_mlp_ratio",
-        "x0_aux_weight",
+        "mlp_ratio",
         "control_adapter_ratio",
         "vae_scaling_factor",
     } and value is not None:
