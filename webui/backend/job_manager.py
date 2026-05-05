@@ -79,10 +79,30 @@ class JobManager:
             if "pid" not in item:
                 item["pid"] = None
             self.runs[item["run_id"]] = RunRecord(**item)
+        changed = False
+        recovered_active = False
         for run in self.runs.values():
-            if run.status == "running" and run.pid and self._pid_alive(run.pid):
-                self.current_run_id = run.run_id
-                break
+            if run.status not in {"queued", "running", "stopping"}:
+                continue
+            if run.pid and self._pid_alive(run.pid):
+                run.notes = dict(run.notes or {})
+                run.notes["recovered_after_backend_restart"] = True
+                run.notes["recovery_mode"] = "degraded_no_log_or_metric_tailers"
+                if not recovered_active:
+                    run.status = "running"
+                    self.current_run_id = run.run_id
+                    recovered_active = True
+                else:
+                    run.status = "recovered"
+                changed = True
+            else:
+                run.status = "interrupted"
+                run.exit_code = -1
+                run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                run.pid = None
+                changed = True
+        if changed:
+            self._save_state()
 
     def _save_state(self) -> None:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -197,7 +217,13 @@ class JobManager:
             out_dir = self.repo_root / out_dir
         if not out_dir.exists():
             return []
-        return sorted([str(p) for p in out_dir.rglob("*.pt")])
+        candidates: list[Path] = []
+        checkpoint_dir = out_dir / "checkpoints"
+        if checkpoint_dir.exists():
+            candidates.extend(checkpoint_dir.glob("*.pt"))
+        candidates.extend(out_dir.glob("ckpt_*.pt"))
+        candidates.extend(out_dir.glob("step_*.pt"))
+        return sorted({str(p) for p in candidates if p.is_file() or p.is_symlink()})
 
     def _emit_metric_line_from_file(self, run: RunRecord, line: str) -> None:
         event = self._parse_event_line(line)
@@ -303,6 +329,17 @@ class JobManager:
                     "stream": stream_name,
                     "line": log_line,
                 }, ensure_ascii=False))
+                if stream_name == "stdout" and event is not None and is_metric_event(event):
+                    if run.run_type == "train" and isinstance(event.get("path"), str):
+                        with self.lock:
+                            run.notes = dict(run.notes or {})
+                            event_path = Path(str(event.get("path")))
+                            if event_path.is_absolute():
+                                run.notes.setdefault("latest_artifact_dir", str(event_path.parent))
+                            elif run.notes.get("train_run_dir"):
+                                run.notes.setdefault("latest_artifact_dir", str((Path(str(run.notes["train_run_dir"])) / event_path).parent))
+                            self._save_state()
+                    self.ws_manager.send_from_thread(run.run_id, "metrics", json.dumps(event, ensure_ascii=False))
 
         stdout_thread = threading.Thread(target=_reader, args=(proc.stdout, "stdout"), daemon=True)
         stderr_thread = threading.Thread(target=_reader, args=(proc.stderr, "stderr"), daemon=True)
@@ -316,21 +353,25 @@ class JobManager:
             self._stop_metrics_tailer(run.run_id)
             stdout_f.close()
             stderr_f.close()
-            run.exit_code = proc.returncode
-            run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-            run.pid = None
-            if run.status == "stopping":
-                run.status = "stopped"
-            elif proc.returncode == 0:
-                run.status = "done"
-            else:
-                run.status = "failed"
-            self.process = None
-            self.current_run_id = None
-            self._save_state()
+            with self.lock:
+                run.exit_code = proc.returncode
+                run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                run.pid = None
+                if run.status == "stopping":
+                    run.status = "stopped"
+                elif proc.returncode == 0:
+                    run.status = "done"
+                else:
+                    run.status = "failed"
+                if self.process is proc:
+                    self.process = None
+                if self.current_run_id == run.run_id:
+                    self.current_run_id = None
+                status = run.status
+                self._save_state()
             self.ws_manager.send_from_thread(run.run_id, "logs", json.dumps({
                 "type": "status",
-                "status": run.status,
+                "status": status,
                 "exit_code": proc.returncode,
             }, ensure_ascii=False))
 
@@ -346,7 +387,7 @@ class JobManager:
             metrics_dir.mkdir(parents=True, exist_ok=True)
 
             config_snapshot = run_dir / "config_snapshot.yaml"
-            cfg_path = self.repo_root / "config" / "train.yaml"
+            cfg_path = config_service.get_config_path(self.repo_root)
             atomic_write_text(config_snapshot, cfg_path.read_text(encoding="utf-8"))
 
             cmd = [
@@ -354,6 +395,8 @@ class JobManager:
                 "-u",
                 "-m",
                 "train.cli",
+                "--config",
+                str(cfg_path),
             ]
             if resume:
                 cmd.extend(["--resume", str(resume)])
@@ -379,6 +422,15 @@ class JobManager:
             self.runs[run_id] = run
             self._save_state()
             notes: Dict[str, Any] = {"type": "train"}
+            try:
+                cfg_dict = self._read_train_config()
+                out_dir = Path(str(cfg_dict.get("out_dir", "./runs")))
+                if not out_dir.is_absolute():
+                    out_dir = self.repo_root / out_dir
+                notes["out_dir"] = str(out_dir.resolve())
+                run.notes = dict(run.notes or {}) | notes
+            except Exception:
+                pass
             if resume:
                 notes["resume"] = str(resume)
             self._write_notes(run_dir, notes)
@@ -547,7 +599,28 @@ class JobManager:
 
             options = SampleOptions(**normalized_args)
             options.validate()
-            command = ["sample.api.run_sample", json.dumps(normalized_args, ensure_ascii=False, sort_keys=True)]
+            use_legacy_thread = not self.repo_root.exists()
+            command = ["sample.api.run_sample"] if use_legacy_thread else [os.environ.get("PYTHON", sys.executable), "-u", "-m", "sample.cli"]
+            cli_flags = {
+                "neg_prompt": "--neg_prompt",
+                "init_image": "--init-image",
+                "control_image": "--control-image",
+                "control_strength": "--control-strength",
+                "control_type": "--control-type",
+                "latent_only": "--latent-only",
+                "fake_vae": "--fake-vae",
+                "use_ema": "--use-ema",
+            }
+            if not use_legacy_thread:
+                for key, value in normalized_args.items():
+                    flag = cli_flags.get(key, f"--{key.replace('_', '-')}")
+                    if isinstance(value, bool):
+                        if key == "use_ema":
+                            command.append("--use-ema" if value else "--no-ema")
+                        elif value:
+                            command.append(flag)
+                    elif value is not None and value != "":
+                        command.extend([flag, str(value)])
 
             run = RunRecord(
                 run_id=run_id,
@@ -570,7 +643,19 @@ class JobManager:
             self.runs[run_id] = run
             self._save_state()
             self._write_notes(run_dir, {"type": "sample", "args": normalized_args, "output": str(output_path), **notes})
-            self._start_sample_thread(run, options)
+
+            if use_legacy_thread:
+                notes["warning"] = "sample subprocess disabled because repo_root does not exist"
+                self._start_sample_thread(run, options)
+                return run
+
+            env = os.environ.copy()
+            env["WEBUI"] = "1"
+            env["WEBUI_RUN_DIR"] = str(run_dir)
+            env["PYTHONUNBUFFERED"] = "1"
+            repo_root_str = str(self.repo_root)
+            env["PYTHONPATH"] = repo_root_str + os.pathsep + env.get("PYTHONPATH", "")
+            self._start_process(run, env)
             return run
     def start_prepare_latents(self, args: Dict[str, Any]) -> RunRecord:
         with self.lock:
@@ -591,6 +676,10 @@ class JobManager:
                 if isinstance(value, bool):
                     if value:
                         cmd.append(flag)
+                    elif key == "pin-memory":
+                        cmd.append("--no-pin-memory")
+                    elif key == "overwrite":
+                        cmd.append("--no-overwrite")
                 else:
                     cmd.extend([flag, str(value)])
 
@@ -608,7 +697,7 @@ class JobManager:
                 config_snapshot=None,
                 log_stdout=str(logs_dir / "latents.log"),
                 log_stderr=str(logs_dir / "latents.err.log"),
-                metrics_path=None,
+                metrics_path=str(run_dir / "metrics" / "latent_prepare.jsonl"),
                 output_path=None,
                 notes={"type": "latent_cache", "args": args},
             )
@@ -630,6 +719,7 @@ class JobManager:
 
     def stop_current(
         self,
+        expected_type: str | None = None,
         timeout_int: int = 8,
         timeout_term: int = 5,
         timeout_kill: int = 2,
@@ -642,84 +732,55 @@ class JobManager:
             except OSError:
                 os.kill(pid, sig)
 
+        proc: subprocess.Popen | None = None
+        pid: int | None = None
+        run: RunRecord | None = None
         with self.lock:
-            if self.process is None or self.current_run_id is None:
-                if self.current_run_id and self.worker_thread is not None and self.worker_thread.is_alive():
-                    run = self.runs[self.current_run_id]
-                    run.status = "stopping"
-                    self._save_state()
-                    return run
-                if self.current_run_id:
-                    run = self.runs[self.current_run_id]
-                    if run.pid and self._pid_alive(run.pid):
-                        run.status = "stopping"
-                        self._save_state()
-                        try:
-                            _send(run.pid, signal.SIGINT)
-                        except OSError:
-                            return run
-                        deadline = time.time() + timeout_int
-                        while time.time() < deadline:
-                            if not self._pid_alive(run.pid):
-                                run.status = "stopped"
-                                run.exit_code = 0
-                                run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-                                run.pid = None
-                                self.current_run_id = None
-                                self._save_state()
-                                return run
-                            time.sleep(0.2)
-                        try:
-                            _send(run.pid, signal.SIGTERM)
-                        except OSError:
-                            return run
-                        deadline = time.time() + timeout_term
-                        while time.time() < deadline:
-                            if not self._pid_alive(run.pid):
-                                run.status = "stopped"
-                                run.exit_code = 0
-                                run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-                                run.pid = None
-                                self.current_run_id = None
-                                self._save_state()
-                                return run
-                            time.sleep(0.2)
-                        try:
-                            _send(run.pid, signal.SIGKILL)
-                        except OSError:
-                            return run
-                        deadline = time.time() + timeout_kill
-                        while time.time() < deadline:
-                            if not self._pid_alive(run.pid):
-                                run.status = "stopped"
-                                run.exit_code = -signal.SIGKILL
-                                run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
-                                run.pid = None
-                                self.current_run_id = None
-                                self._save_state()
-                                return run
-                            time.sleep(0.2)
-                        return run
+            if self.current_run_id is None:
                 return None
-            run = self.runs[self.current_run_id]
+            run = self.runs.get(self.current_run_id)
+            if run is None:
+                self.current_run_id = None
+                self._save_state()
+                return None
+            if expected_type is not None and run.run_type != expected_type:
+                raise RuntimeError(f"Active job is {run.run_type}, not {expected_type}.")
             run.status = "stopping"
-            self._save_state()
-
-
             proc = self.process
-            try:
-                _send(proc.pid, signal.SIGINT)
-                proc.wait(timeout=timeout_int)
+            pid = proc.pid if proc is not None else run.pid
+            self._save_state()
+            if proc is None and self.worker_thread is not None and self.worker_thread.is_alive():
+                # Thread-only legacy jobs cannot be force-stopped. New sample jobs
+                # run as subprocesses; this branch only marks old recovered jobs.
                 return run
-            except subprocess.TimeoutExpired:
-                _send(proc.pid, signal.SIGTERM)
-                try:
-                    proc.wait(timeout=timeout_term)
-                    return run
-                except subprocess.TimeoutExpired:
-                    _send(proc.pid, signal.SIGKILL)
-                    try:
-                        proc.wait(timeout=timeout_kill)
-                    except subprocess.TimeoutExpired:
+
+        if pid is None:
+            return run
+
+        for sig, timeout in (
+            (signal.SIGINT, timeout_int),
+            (signal.SIGTERM, timeout_term),
+            (signal.SIGKILL, timeout_kill),
+        ):
+            try:
+                _send(pid, sig)
+            except OSError:
+                break
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if proc is not None:
+                    if proc.poll() is not None:
                         return run
+                elif not self._pid_alive(pid):
+                    with self.lock:
+                        if run is not None:
+                            run.status = "stopped"
+                            run.exit_code = 0 if sig is not signal.SIGKILL else -signal.SIGKILL
+                            run.ended_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+                            run.pid = None
+                        if self.current_run_id == (run.run_id if run else None):
+                            self.current_run_id = None
+                        self._save_state()
                     return run
+                time.sleep(0.2)
+        return run
