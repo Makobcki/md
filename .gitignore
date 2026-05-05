@@ -1,5 +1,7 @@
 .venv/
 .idea/
+.git/
+.pytest_cache/
 webui/frontend/node_modules/
 webui/frontend/dist/
 data/dataset/
@@ -14,4 +16,6 @@ md-dev/
 .codex
 report.md
 **__pycache__/
+*.egg-info
 webui/frontend/.vite/
+.webui_file_token_secret
