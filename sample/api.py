@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 
+class SampleValidationError(ValueError, RuntimeError):
+    """Stable sampler validation error type accepted by API and legacy callers."""
+
+
 @dataclass(frozen=True)
 class SampleOptions:
     ckpt: str
@@ -20,7 +24,7 @@ class SampleOptions:
     sampler: Literal["flow_euler", "flow_heun"] = "flow_heun"
     seed: int | None = 42
     shift: float | None = None
-    device: str = "cuda"
+    device: str = "auto"
     init_image: str = ""
     strength: float = 1.0
     mask: str = ""
@@ -36,35 +40,67 @@ class SampleOptions:
 
     def validate(self) -> None:
         if self.n < 1:
-            raise ValueError("n must be >= 1")
+            raise SampleValidationError("n must be >= 1")
         if self.steps < 1:
-            raise ValueError("steps must be >= 1")
+            raise SampleValidationError("steps must be >= 1")
         if self.sampler not in {"flow_euler", "flow_heun"}:
-            raise ValueError("sampler must be one of: flow_euler, flow_heun")
+            raise SampleValidationError("sampler must be one of: flow_euler, flow_heun")
         if self.task not in {"txt2img", "img2img", "inpaint", "control"}:
-            raise ValueError("task must be one of: txt2img, img2img, inpaint, control")
+            raise SampleValidationError("task must be one of: txt2img, img2img, inpaint, control")
         if not (0.0 <= float(self.strength) <= 1.0):
-            raise ValueError("strength must be in [0, 1]")
+            raise SampleValidationError("strength must be in [0, 1]")
         if float(self.cfg) < 0:
-            raise ValueError("cfg must be non-negative")
+            raise SampleValidationError("cfg must be non-negative")
         if self.shift is not None and float(self.shift) <= 0.0:
-            raise ValueError("shift must be positive")
+            raise SampleValidationError("shift must be positive")
         if float(self.control_strength) < 0:
-            raise ValueError("control_strength must be non-negative")
+            raise SampleValidationError("control_strength must be non-negative")
         if self.width is not None and int(self.width) < 1:
-            raise ValueError("width must be >= 1")
+            raise SampleValidationError("width must be >= 1")
         if self.height is not None and int(self.height) < 1:
-            raise ValueError("height must be >= 1")
+            raise SampleValidationError("height must be >= 1")
         if self.control_type not in {"none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"}:
-            raise ValueError("control_type must be one of: none, latent_identity, image, canny, depth, pose, lineart, normal")
-        if self.task in {"img2img", "inpaint"} and not self.init_image:
-            raise RuntimeError(f"task={self.task} requires --init-image")
-        if self.task == "inpaint" and not self.mask:
-            raise RuntimeError("task=inpaint requires --mask")
-        if self.task == "control" and not self.control_image:
-            raise RuntimeError("task=control requires --control-image")
+            raise SampleValidationError("control_type must be one of: none, latent_identity, image, canny, depth, pose, lineart, normal")
+        inputs = {
+            "init_image": bool(self.init_image),
+            "mask": bool(self.mask),
+            "control_image": bool(self.control_image),
+        }
+        allowed = {
+            "txt2img": set(),
+            "img2img": {"init_image"},
+            "inpaint": {"init_image", "mask"},
+            "control": {"control_image"},
+        }[self.task]
+        required = {
+            "txt2img": set(),
+            "img2img": {"init_image"},
+            "inpaint": {"init_image", "mask"},
+            "control": {"control_image"},
+        }[self.task]
+        supplied = {name for name, present in inputs.items() if present}
+        missing = sorted(required - supplied)
+        extra = sorted(supplied - allowed)
+        flag_names = {
+            "init_image": "--init-image",
+            "mask": "--mask",
+            "control_image": "--control-image",
+        }
+        if missing:
+            raise SampleValidationError(
+                f"task={self.task} requires {', '.join(flag_names.get(name, name) for name in missing)}"
+            )
+        if extra:
+            raise SampleValidationError(
+                f"task={self.task} does not allow {', '.join(flag_names.get(name, name) for name in extra)}"
+            )
         if self.latent_only and (self.init_image or self.control_image):
-            raise ValueError("init/control images require a VAE or fake_vae; they are not available in latent_only mode")
+            raise SampleValidationError("init/control images require a VAE or fake_vae; they are not available in latent_only mode")
+        out_suffix = Path(self.out).suffix.lower() if self.out else ""
+        if self.latent_only and out_suffix and out_suffix not in {".pt", ".pth"}:
+            raise SampleValidationError("latent_only outputs must use .pt or .pth extension")
+        if not self.latent_only and out_suffix and out_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise SampleValidationError("image outputs must use .png, .jpg, .jpeg or .webp extension")
 
 
 def _save_image_grid(x, path: str | Path, nrow: int) -> None:
@@ -126,6 +162,10 @@ def _model_config_for_metadata(cfg: dict[str, Any], built: Any) -> dict[str, obj
         "hidden_dim": int(cfg.get("hidden_dim", model_section.get("hidden_dim", 1024))),
         "depth": int(cfg.get("depth", model_section.get("depth", 24))),
         "num_heads": int(cfg.get("num_heads", model_section.get("num_heads", 16))),
+        "mlp_ratio": float(cfg.get("mlp_ratio", model_section.get("mlp_ratio", 4.0))),
+        "qk_norm": bool(cfg.get("qk_norm", model_section.get("qk_norm", True))),
+        "rms_norm": bool(cfg.get("rms_norm", model_section.get("rms_norm", True))),
+        "swiglu": bool(cfg.get("swiglu", model_section.get("swiglu", True))),
         "double_stream_blocks": int(cfg.get("double_stream_blocks", model_section.get("double_stream_blocks", 16))),
         "single_stream_blocks": int(cfg.get("single_stream_blocks", model_section.get("single_stream_blocks", 8))),
         "pos_embed": str(cfg.get("pos_embed", model_section.get("pos_embed", "rope_2d"))),
@@ -259,7 +299,8 @@ def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, objec
     from samplers import sample_flow_euler, sample_flow_heun
     from .build import build_all
 
-    device = torch.device(options.device if options.device == "cpu" or torch.cuda.is_available() else "cpu")
+    requested_device = "cuda" if options.device == "auto" else options.device
+    device = torch.device(requested_device if requested_device == "cpu" or torch.cuda.is_available() else "cpu")
     class _CallbackSink:
         def __init__(self, callback: Callable[[dict[str, object]], None]) -> None:
             self.callback = callback

@@ -78,7 +78,9 @@ def _metadata_from_ckpt(ck: Dict[str, Any]) -> dict[str, Any]:
 
 
 def load_checkpoint_and_cfg(ckpt_path: str, device: torch.device) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    ck = load_ckpt(ckpt_path, device)
+    # Always stage checkpoints on CPU first to avoid a VRAM spike before the
+    # model object has been built and moved to the final target device.
+    ck = load_ckpt(ckpt_path, torch.device("cpu"))
     cfg = TrainConfig.from_dict(ck["cfg"]).to_dict()
     validate_mmdit_checkpoint_compatibility(ck, cfg)
     return ck, cfg
@@ -109,7 +111,7 @@ def build_vae(
         raise RuntimeError("MMDiT RF image sampling requires vae_pretrained, --fake-vae, or --latent-only.")
 
     amp_dtype = str(cfg.get("amp_dtype", "")).lower()
-    dtype = torch.bfloat16 if amp_dtype == "bf16" else torch.float16
+    dtype = torch.float32 if device.type == "cpu" else (torch.bfloat16 if amp_dtype == "bf16" else torch.float16)
     return VAEWrapper(
         pretrained=vae_pretrained,
         freeze=True,
@@ -202,16 +204,17 @@ def build_all(
     if str(cfg.get("mode", "latent")) != "latent":
         raise RuntimeError("MMDiT RF sampling requires latent mode.")
 
-    model = MMDiTFlowModel(MMDiTConfig.from_dict(cfg)).to(device)
+    model = MMDiTFlowModel(MMDiTConfig.from_dict(cfg))
     model.load_state_dict(ck["model"], strict=True)
     if use_ema and "ema" in ck and isinstance(ck["ema"], dict):
         ema = EMA(model)
-        ema.shadow = {k: v.to(device) for k, v in ck["ema"].items()}
+        ema.shadow = {k: v.to("cpu") for k, v in ck["ema"].items()}
         ema.copy_to(model)
+    model.to(device)
     model.eval()
 
     h, w, latent_h, latent_w = resolve_shapes(cfg, width=width, height=height)
-    text_dtype = torch.bfloat16 if str(cfg.get("amp_dtype", "bf16")) == "bf16" else torch.float16
+    text_dtype = torch.float32 if device.type == "cpu" else (torch.bfloat16 if str(cfg.get("amp_dtype", "bf16")) == "bf16" else torch.float16)
     text_encoder = FrozenTextEncoderBundle.from_config(
         cfg,
         device=device,
