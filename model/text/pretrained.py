@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -44,7 +45,21 @@ def _as_prompt_list(prompts: str | Iterable[str]) -> list[str]:
     return [str(p) for p in prompts]
 
 
+def _local_files_only_requested() -> bool:
+    return any(
+        os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+        for name in ("MD_LOCAL_FILES_ONLY", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    )
+
+
 def _from_pretrained_with_local_fallback(factory: Any, model_name: str, **kwargs: Any) -> Any:
+    if _local_files_only_requested():
+        try:
+            return factory.from_pretrained(model_name, local_files_only=True, **kwargs)
+        except TypeError:
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs.pop("use_safetensors", None)
+            return factory.from_pretrained(model_name, local_files_only=True, **fallback_kwargs)
     try:
         return factory.from_pretrained(model_name, **kwargs)
     except TypeError:
