@@ -117,11 +117,15 @@ class AspectBucketBatchSampler:
         self.batch_size = int(batch_size)
         self.shuffle = bool(shuffle)
         self.seed = int(seed)
+        self.epoch = 0
         self.drop_last = bool(drop_last)
         self.groups = group_entries_by_bucket(entries, self.buckets)
 
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
     def __iter__(self) -> Iterator[list[int]]:
-        rng = random.Random(self.seed)
+        rng = random.Random(self.seed + self.epoch)
         bucket_items = [list(indices) for indices in self.groups.values() if indices]
         if self.shuffle:
             for indices in bucket_items:

@@ -122,6 +122,8 @@ def prepare_text_cache(
             f"and min_tag_count={cfg.min_tag_count}."
         )
     out_dir.mkdir(parents=True, exist_ok=True)
+    preparing_manifest = {"version": 1, "status": "preparing"}
+    (out_dir / "manifest.json").write_text(json.dumps(preparing_manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     bundle = FrozenTextEncoderBundle(cfg.to_dict(), device=device, dtype=dtype)
     bundle_meta = bundle.metadata()
     metadata = {
@@ -235,6 +237,7 @@ def prepare_text_cache(
     (out_dir / "index.jsonl").write_text("\n".join(index_lines) + ("\n" if index_lines else ""), encoding="utf-8")
     manifest = {
         "version": 1,
+        "status": "complete",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "num_samples": len(entries),
         "dataset_hash": metadata["dataset_hash"],

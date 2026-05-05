@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 import torch
+from diffusion.io.ckpt import _torch_load
 from torch.utils.data import Dataset
 
 import numpy as np
@@ -15,11 +16,11 @@ from PIL import Image
 from .types import LatentCacheMetadata, LatentShardLocation
 
 
-def load_image_tensor(path: str) -> torch.Tensor:
+def load_image_tensor(path: str, *, expected_size: tuple[int, int] = (512, 512)) -> torch.Tensor:
     with Image.open(path) as im:
         im = im.convert("RGB")
-        if im.size != (512, 512):
-            raise RuntimeError(f"Unexpected image size: {im.size}")
+        if im.size != tuple(expected_size):
+            raise RuntimeError(f"Unexpected image size: {im.size}; expected {tuple(expected_size)}")
         # PIL -> torch float32 in [0,1], CHW
         arr = np.asarray(im, dtype=np.float32) / 255.0  # HWC
         x = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
@@ -140,9 +141,11 @@ class ImageTextDataset(Dataset):
         latent_cache_strict: bool = True,
         latent_cache_fallback: bool = False,
         latent_expected_meta: Optional[LatentCacheMetadata] = None,
+        latent_expected_meta_by_md5: Optional[dict[str, LatentCacheMetadata]] = None,
         include_is_latent: bool = False,
         latent_missing_log_path: Optional[Path] = None,
         latent_shard_cache_size: int = 2,
+        expected_image_size: int = 512,
     ):
         self.entries = entries
         self.tokenizer = tokenizer
@@ -159,9 +162,11 @@ class ImageTextDataset(Dataset):
         self.latent_cache_strict = bool(latent_cache_strict)
         self.latent_cache_fallback = bool(latent_cache_fallback)
         self.latent_expected_meta = latent_expected_meta
+        self.latent_expected_meta_by_md5 = dict(latent_expected_meta_by_md5 or {})
         self.include_is_latent = bool(include_is_latent)
         self.latent_missing_log_path = latent_missing_log_path
         self.latent_shard_cache_size = int(latent_shard_cache_size)
+        self.expected_image_size = int(expected_image_size)
         self.latent_cache_total = len(entries)
         self.latent_cache_hits = 0
         self.latent_cache_missing = 0
@@ -258,7 +263,7 @@ class ImageTextDataset(Dataset):
         return len(self.entries)
 
     def _load_image(self, path: str) -> torch.Tensor:
-        return load_image_tensor(path)
+        return load_image_tensor(path, expected_size=(self.expected_image_size, self.expected_image_size))
 
     def _load_latent(self, md5: str) -> torch.Tensor:
         if not self.latent_cache_dir:
@@ -268,10 +273,10 @@ class ImageTextDataset(Dataset):
         cache_path = latent_cache_path(self.latent_cache_dir, md5)
         if not cache_path.exists():
             raise FileNotFoundError(f"Missing latent cache: {cache_path}")
-        payload = torch.load(cache_path, map_location="cpu")
+        payload = _torch_load(cache_path, map_location="cpu")
         latent, meta = _parse_latent_payload(payload)
         _validate_latent_meta(
-            expected=self.latent_expected_meta,
+            expected=self.latent_expected_meta_by_md5.get(md5, self.latent_expected_meta),
             actual=meta,
             strict=self.latent_cache_strict,
             cache_path=cache_path,
@@ -306,7 +311,7 @@ class ImageTextDataset(Dataset):
             self.current_shard_id = shard_path.name
             self.current_shard_tensor = cached
             return cached
-        payload = torch.load(shard_path, map_location="cpu")
+        payload = _torch_load(shard_path, map_location="cpu")
         if not isinstance(payload, dict) or int(payload.get("format_version", 0)) != 3:
             raise RuntimeError(f"Invalid shard payload format: {shard_path}")
         meta_common = payload.get("meta_common")
@@ -390,7 +395,7 @@ class ImageTextDataset(Dataset):
         cache_path = self._token_cache_path
         if cache_path.exists():
             try:
-                payload = torch.load(cache_path, map_location="cpu")
+                payload = _torch_load(cache_path, map_location="cpu")
                 md5_list = payload.get("md5", [])
                 text_hash = payload.get("text_hash", [])
                 ids = payload.get("ids")
