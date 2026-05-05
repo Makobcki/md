@@ -62,10 +62,15 @@ def prepare_train_run_structure(
     (run_dir / "metrics").mkdir(parents=True, exist_ok=True)
     train_log_path = run_dir / "train.log"
     train_log_path.touch(exist_ok=True)
+    # config.yaml is the canonical resolved training config for this run.
     _write_yaml(run_dir / "config.yaml", cfg_dict)
+    # Compatibility aliases for older UI/readers; kept explicit in config_manifest.yaml.
     _write_yaml(run_dir / "config_resolved.yaml", cfg_dict)
-    # Compatibility with older UI/readers.
     _write_yaml(run_dir / "config_snapshot.yaml", cfg_dict)
+    _write_yaml(run_dir / "config_manifest.yaml", {
+        "canonical": "config.yaml",
+        "aliases": ["config_resolved.yaml", "config_snapshot.yaml"],
+    })
     cache_manifest_path = run_dir / "cache_manifest.json"
     if cache_manifest_source is not None and Path(cache_manifest_source).exists():
         cache_manifest_path.parent.mkdir(parents=True, exist_ok=True)
