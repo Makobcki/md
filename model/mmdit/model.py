@@ -136,6 +136,7 @@ class MMDiTFlowModel(nn.Module):
         txt: torch.Tensor,
         cond: torch.Tensor,
         mask: Optional[torch.Tensor],
+        img_mask: Optional[torch.Tensor],
         grid_hw: tuple[int, int],
         use_rope: bool,
         rope_sections: tuple[tuple[int, int, int, int, int, int], ...] | None = None,
@@ -151,6 +152,7 @@ class MMDiTFlowModel(nn.Module):
                 txt,
                 cond,
                 mask,
+                img_mask,
                 grid_hw,
                 use_rope,
                 rope_base,
@@ -159,7 +161,7 @@ class MMDiTFlowModel(nn.Module):
                 sections,
                 use_reentrant=False,
             )
-        return block(img, txt, cond, mask, grid_hw, use_rope, rope_base, rope_scaling, rope_theta, sections)
+        return block(img, txt, cond, mask, img_mask, grid_hw, use_rope, rope_base, rope_scaling, rope_theta, sections)
 
     def _base_grid_for_patch(self, patch_size: int) -> tuple[int, int]:
         base_h, base_w = tuple(int(v) for v in self.cfg.rope_base_grid_hw)
@@ -245,6 +247,13 @@ class MMDiTFlowModel(nn.Module):
             raise ValueError(f"Unsupported control_type {exc.args[0]!r}; allowed: {allowed}.") from exc
         return torch.tensor(raw, device=device, dtype=torch.long)
 
+    def _task_names(self, task: str | Sequence[str], batch_size: int) -> list[str]:
+        return [task] * batch_size if isinstance(task, str) else [str(v) for v in task]
+
+    def _row_stream_mask(self, names: list[str], present_for: set[str], *, tokens: int, device: torch.device) -> torch.Tensor:
+        rows = torch.tensor([name in present_for for name in names], device=device, dtype=torch.bool).view(-1, 1)
+        return rows.expand(len(names), int(tokens))
+
     def _condition_tokens(
         self,
         x: torch.Tensor,
@@ -253,13 +262,19 @@ class MMDiTFlowModel(nn.Module):
         control_latents: Optional[torch.Tensor],
         control_type: torch.Tensor | str | Sequence[str] | None = None,
         control_strength: torch.Tensor | float | None = None,
-    ) -> tuple[torch.Tensor, int, tuple[int, int], tuple[tuple[int, int, int, int, int, int], ...]]:
+        task: str | Sequence[str] = "txt2img",
+    ) -> tuple[torch.Tensor, torch.Tensor, int, tuple[int, int], tuple[tuple[int, int, int, int, int, int], ...]]:
+        if x.shape[-2] % self.cfg.patch_size != 0 or x.shape[-1] % self.cfg.patch_size != 0:
+            raise ValueError(f"target latent shape {tuple(x.shape[-2:])} must be divisible by patch_size={self.cfg.patch_size}.")
         target = self.patch_embed(x)
         grid_hw = (x.shape[-2] // self.cfg.patch_size, x.shape[-1] // self.cfg.patch_size)
         target = add_2d_pos_embed(target, grid_hw, self.cfg.pos_embed) + self.type_image + self.type_target
 
-        streams: list[tuple[torch.Tensor, tuple[int, int], int]] = []
+        streams: list[tuple[torch.Tensor, torch.Tensor, tuple[int, int], int]] = []
         expected_hw = (x.shape[-2], x.shape[-1])
+        task_names = self._task_names(task, x.shape[0])
+        if len(task_names) != x.shape[0]:
+            raise ValueError(f"task list length {len(task_names)} must match batch size {x.shape[0]}.")
         m = None if mask is None else (mask.unsqueeze(1) if mask.dim() == 3 else mask)
         source_mask_fused = False
         if source_latent is not None and m is not None and self.cfg.mask_as_source_channel:
@@ -271,7 +286,7 @@ class MMDiTFlowModel(nn.Module):
                 type_token=self.type_source,
                 expected_hw=expected_hw,
             )
-            streams.append((tokens, cond_grid, self.cfg.source_patch_size))
+            streams.append((tokens, self._row_stream_mask(task_names, {"img2img", "inpaint"}, tokens=tokens.shape[1], device=x.device), cond_grid, self.cfg.source_patch_size))
             source_mask_fused = True
         elif source_latent is not None:
             tokens, cond_grid = self._patch_image_like(
@@ -282,7 +297,7 @@ class MMDiTFlowModel(nn.Module):
                 type_token=self.type_source,
                 expected_hw=expected_hw,
             )
-            streams.append((tokens, cond_grid, self.cfg.source_patch_size))
+            streams.append((tokens, self._row_stream_mask(task_names, {"img2img", "inpaint"}, tokens=tokens.shape[1], device=x.device), cond_grid, self.cfg.source_patch_size))
         if m is not None and not source_mask_fused:
             tokens, cond_grid = self._patch_image_like(
                 self.mask_patch_embed,
@@ -292,7 +307,7 @@ class MMDiTFlowModel(nn.Module):
                 type_token=self.type_mask,
                 expected_hw=expected_hw,
             )
-            streams.append((tokens, cond_grid, self.cfg.mask_patch_size))
+            streams.append((tokens, self._row_stream_mask(task_names, {"inpaint"}, tokens=tokens.shape[1], device=x.device), cond_grid, self.cfg.mask_patch_size))
         if control_latents is not None:
             controls = control_latents.unsqueeze(1) if control_latents.dim() == 4 else control_latents
             if controls.dim() != 5:
@@ -318,9 +333,9 @@ class MMDiTFlowModel(nn.Module):
                     dtype=x.dtype,
                     expected_hw=expected_hw,
                 )
-                control_tokens = control_gate * control_base + type_token
+                control_tokens = control_gate * (control_base + type_token)
                 control_tokens = self.control_adapter(control_tokens)
-                streams.append((control_tokens, cond_grid, self.cfg.control_patch_size))
+                streams.append((control_tokens, self._row_stream_mask(task_names, {"control"}, tokens=control_tokens.shape[1], device=x.device), cond_grid, self.cfg.control_patch_size))
         if self.cfg.hierarchical_tokens_enabled:
             coarse_tokens, coarse_grid = self._patch_image_like_base(
                 self.coarse_patch_embed,
@@ -329,20 +344,21 @@ class MMDiTFlowModel(nn.Module):
                 dtype=x.dtype,
                 expected_hw=expected_hw,
             )
-            streams.append((coarse_tokens + self.type_image + self.type_coarse, coarse_grid, self.cfg.coarse_patch_size))
+            streams.append((coarse_tokens + self.type_image + self.type_coarse, torch.ones((x.shape[0], coarse_tokens.shape[1]), device=x.device, dtype=torch.bool), coarse_grid, self.cfg.coarse_patch_size))
 
-        streams.append((target, grid_hw, self.cfg.patch_size))
-        img = torch.cat([tokens for tokens, _, _ in streams], dim=1)
+        streams.append((target, torch.ones((x.shape[0], target.shape[1]), device=x.device, dtype=torch.bool), grid_hw, self.cfg.patch_size))
+        img = torch.cat([tokens for tokens, _, _, _ in streams], dim=1)
+        img_mask = torch.cat([stream_mask for _, stream_mask, _, _ in streams], dim=1)
 
         rope_sections: list[tuple[int, int, int, int, int, int]] = []
         if self.cfg.conditioning_rope:
             offset = 0
-            for tokens, section_grid, patch_size in streams:
+            for tokens, _, section_grid, patch_size in streams:
                 base_grid = self._base_grid_for_patch(int(patch_size))
                 rope_sections.append((offset, tokens.shape[1], section_grid[0], section_grid[1], base_grid[0], base_grid[1]))
                 offset += tokens.shape[1]
         target_tokens = target.shape[1]
-        return img, target_tokens, grid_hw, tuple(rope_sections)
+        return img, img_mask, target_tokens, grid_hw, tuple(rope_sections)
 
     def _project_text_tokens_with_mask(self, text: TextConditioning, *, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor | None]:
         raw = text.tokens.to(device=device)
@@ -398,7 +414,7 @@ class MMDiTFlowModel(nn.Module):
             t = t.reshape(-1)
         if t.shape[0] != x.shape[0]:
             raise ValueError("t batch size must match x.")
-        img, target_tokens, grid_hw, rope_sections = self._condition_tokens(x, source_latent, mask, control_latents, control_type, control_strength)
+        img, img_mask, target_tokens, grid_hw, rope_sections = self._condition_tokens(x, source_latent, mask, control_latents, control_type, control_strength, task=task)
         txt, txt_mask = self._project_text_tokens_with_mask(text, device=x.device, dtype=img.dtype)
         pooled = self.pooled_in(text.pooled.to(device=x.device, dtype=self.pooled_in.weight.dtype)).to(dtype=img.dtype)
         task_cond = self.task_embed(self._task_ids(task, x.shape[0], x.device)).to(dtype=img.dtype)
@@ -420,9 +436,9 @@ class MMDiTFlowModel(nn.Module):
         use_rope_sections = self.cfg.pos_embed == "rope_2d" and bool(rope_sections)
         for idx, block in enumerate(all_blocks):
             if self._block_mode(idx) == "image_only":
-                img, txt = self._run_block(block, img, txt, cond, None, grid_hw, use_rope_sections, rope_sections)
+                img, txt = self._run_block(block, img, txt, cond, None, img_mask, grid_hw, use_rope_sections, rope_sections)
             else:
-                img, txt = self._run_block(block, img, txt, cond, txt_mask, grid_hw, use_rope_sections, rope_sections)
+                img, txt = self._run_block(block, img, txt, cond, txt_mask, img_mask, grid_hw, use_rope_sections, rope_sections)
 
         target = img[:, -target_tokens:]
         patches = self.final(target, cond)

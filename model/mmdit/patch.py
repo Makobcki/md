@@ -16,6 +16,13 @@ class PatchEmbed(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 4:
+            raise ValueError("PatchEmbed input must have shape [B,C,H,W].")
+        if x.shape[-2] % self.patch_size != 0 or x.shape[-1] % self.patch_size != 0:
+            raise ValueError(
+                f"height and width must be divisible by patch_size={self.patch_size}; "
+                f"got {tuple(x.shape[-2:])}."
+            )
         x = self.proj(x)
         return x.flatten(2).transpose(1, 2).contiguous()
 

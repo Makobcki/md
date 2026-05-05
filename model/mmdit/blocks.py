@@ -91,6 +91,7 @@ class MMDiTDoubleBlock(nn.Module):
         txt: torch.Tensor,
         cond: torch.Tensor,
         txt_mask: Optional[torch.Tensor],
+        img_mask: Optional[torch.Tensor] = None,
         rope_grid_hw: Optional[tuple[int, int]] = None,
         use_rope: bool = False,
         rope_base_grid_hw: Optional[tuple[int, int]] = None,
@@ -110,9 +111,18 @@ class MMDiTDoubleBlock(nn.Module):
         k = torch.cat([k_txt, k_img], dim=1)
         v = torch.cat([v_txt, v_img], dim=1)
         joint_mask = None
-        if txt_mask is not None:
-            img_mask = torch.ones(img.shape[:2], device=img.device, dtype=torch.bool)
-            joint_mask = torch.cat([txt_mask.to(device=img.device, dtype=torch.bool), img_mask], dim=1)
+        if txt_mask is not None or img_mask is not None:
+            txt_mask_v = (
+                txt_mask.to(device=img.device, dtype=torch.bool)
+                if txt_mask is not None
+                else torch.ones(txt.shape[:2], device=img.device, dtype=torch.bool)
+            )
+            img_mask_v = (
+                img_mask.to(device=img.device, dtype=torch.bool)
+                if img_mask is not None
+                else torch.ones(img.shape[:2], device=img.device, dtype=torch.bool)
+            )
+            joint_mask = torch.cat([txt_mask_v, img_mask_v], dim=1)
         joint_rope_sections = _offset_rope_sections(rope_sections, txt.shape[1]) if use_rope else None
         out = self.attn(
             q,
@@ -163,6 +173,7 @@ class MMDiTSingleBlock(nn.Module):
         txt: torch.Tensor,
         cond: torch.Tensor,
         txt_mask: Optional[torch.Tensor],
+        img_mask: Optional[torch.Tensor] = None,
         rope_grid_hw: Optional[tuple[int, int]] = None,
         use_rope: bool = False,
         rope_base_grid_hw: Optional[tuple[int, int]] = None,
@@ -175,9 +186,18 @@ class MMDiTSingleBlock(nn.Module):
         x_norm = modulate(self.norm1(x), shift, scale)
         q, k, v = self.qkv(x_norm).chunk(3, dim=-1)
         joint_mask = None
-        if txt_mask is not None:
-            img_mask = torch.ones(img.shape[:2], device=img.device, dtype=torch.bool)
-            joint_mask = torch.cat([txt_mask.to(device=img.device, dtype=torch.bool), img_mask], dim=1)
+        if txt_mask is not None or img_mask is not None:
+            txt_mask_v = (
+                txt_mask.to(device=img.device, dtype=torch.bool)
+                if txt_mask is not None
+                else torch.ones(txt.shape[:2], device=img.device, dtype=torch.bool)
+            )
+            img_mask_v = (
+                img_mask.to(device=img.device, dtype=torch.bool)
+                if img_mask is not None
+                else torch.ones(img.shape[:2], device=img.device, dtype=torch.bool)
+            )
+            joint_mask = torch.cat([txt_mask_v, img_mask_v], dim=1)
         joint_rope_sections = _offset_rope_sections(rope_sections, txt.shape[1]) if use_rope else None
         x = x + gate_attn.unsqueeze(1) * self.out(
             self.attn(
@@ -226,6 +246,7 @@ class ImageOnlyBlock(nn.Module):
         txt: torch.Tensor,
         cond: torch.Tensor,
         txt_mask: Optional[torch.Tensor],
+        img_mask: Optional[torch.Tensor] = None,
         rope_grid_hw: Optional[tuple[int, int]] = None,
         use_rope: bool = False,
         rope_base_grid_hw: Optional[tuple[int, int]] = None,
@@ -241,7 +262,7 @@ class ImageOnlyBlock(nn.Module):
                 q,
                 k,
                 v,
-                None,
+                img_mask.to(device=img.device, dtype=torch.bool) if img_mask is not None else None,
                 rope_grid_hw=rope_grid_hw if use_rope else None,
                 rope_start=0,
                 rope_length=img.shape[1],
