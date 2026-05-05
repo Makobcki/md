@@ -9,6 +9,7 @@ import shutil
 from typing import Any, Optional
 
 import torch
+from diffusion.io.ckpt import _torch_load
 from torch.utils.data import DataLoader
 import yaml
 
@@ -19,6 +20,7 @@ from data_loader import (
     ImageTextDataset,
     LatentCacheMetadata,
     AspectBucketBatchSampler,
+    assign_bucket,
     parse_buckets,
     validate_buckets,
     build_or_load_index,
@@ -324,6 +326,9 @@ def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: 
                 _warn_or_raise(message, strict=strict)
 
     if cache.manifest:
+        manifest_status = str(cache.manifest.get("status", "complete"))
+        if manifest_status != "complete":
+            _warn_or_raise(f"text cache manifest status is not complete: {manifest_status}", strict=strict)
         manifest_samples = int(cache.manifest.get("num_samples", len(cache.entries)))
         if manifest_samples != len(cache.entries):
             _warn_or_raise(f"text cache manifest sample count mismatch: {manifest_samples} != {len(cache.entries)}", strict=strict)
@@ -422,18 +427,98 @@ def _ensure_text_cache_ready(cfg: TrainConfig, entries: list[dict], device: torc
 
 
 def _latent_expected_metadata(cfg: TrainConfig) -> dict[str, Any]:
+    if bool(cfg.aspect_buckets_enabled):
+        buckets = validate_buckets(
+            parse_buckets(cfg.aspect_buckets),
+            latent_downsample_factor=int(cfg.latent_downsample_factor),
+            latent_patch_size=int(cfg.latent_patch_size),
+        )
+        latent_shapes = [
+            [
+                int(cfg.latent_channels),
+                int(bucket.height) // int(cfg.latent_downsample_factor),
+                int(bucket.width) // int(cfg.latent_downsample_factor),
+            ]
+            for bucket in buckets
+        ]
+        return {
+            "format_version": 3,
+            "vae_pretrained": str(cfg.vae_pretrained),
+            "scaling_factor": float(cfg.vae_scaling_factor),
+            "latent_shape": None,
+            "latent_shapes": latent_shapes,
+            "bucket_shapes": [[int(bucket.width), int(bucket.height)] for bucket in buckets],
+            "dtype": str(cfg.latent_dtype),
+        }
     latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
+    latent_shape = [int(cfg.latent_channels), latent_side, latent_side]
     return {
         "format_version": 3,
         "vae_pretrained": str(cfg.vae_pretrained),
         "scaling_factor": float(cfg.vae_scaling_factor),
-        "latent_shape": [int(cfg.latent_channels), latent_side, latent_side],
+        "latent_shape": latent_shape,
+        "latent_shapes": [latent_shape],
+        "bucket_shapes": [],
         "dtype": str(cfg.latent_dtype),
     }
 
 
+
+def _latent_expected_metadata_by_md5(cfg: TrainConfig, entries: list[dict]) -> dict[str, LatentCacheMetadata]:
+    if not bool(cfg.aspect_buckets_enabled):
+        return {}
+    buckets = validate_buckets(
+        parse_buckets(cfg.aspect_buckets),
+        latent_downsample_factor=int(cfg.latent_downsample_factor),
+        latent_patch_size=[
+            int(cfg.latent_patch_size),
+            int(cfg.source_patch_size),
+            int(cfg.mask_patch_size),
+            int(cfg.control_patch_size),
+            int(cfg.coarse_patch_size),
+        ] if bool(getattr(cfg, "hierarchical_tokens_enabled", False)) else [
+            int(cfg.latent_patch_size),
+            int(cfg.source_patch_size),
+            int(cfg.mask_patch_size),
+            int(cfg.control_patch_size),
+        ],
+    )
+    result: dict[str, LatentCacheMetadata] = {}
+    for entry in entries:
+        md5 = str(entry.get("md5", ""))
+        if not md5:
+            continue
+        width = int(entry.get("width", entry.get("image_width", 0)) or 0)
+        height = int(entry.get("height", entry.get("image_height", 0)) or 0)
+        if width <= 0 or height <= 0:
+            size = entry.get("size")
+            if isinstance(size, (list, tuple)) and len(size) == 2:
+                width, height = int(size[0]), int(size[1])
+        bucket = assign_bucket(width, height, buckets)
+        result[md5] = LatentCacheMetadata(
+            vae_pretrained=str(cfg.vae_pretrained),
+            scaling_factor=float(cfg.vae_scaling_factor),
+            latent_shape=(
+                int(cfg.latent_channels),
+                int(bucket.height) // int(cfg.latent_downsample_factor),
+                int(bucket.width) // int(cfg.latent_downsample_factor),
+            ),
+            dtype=str(cfg.latent_dtype),
+        )
+    return result
+
 def _latent_cache_state(cfg: TrainConfig, entries: list[dict]) -> tuple[str, str]:
     cache_dir = _resolve_latent_cache_dir(cfg)
+    manifest_path = cache_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return "stale", f"latent cache manifest is invalid: {exc}"
+        status = str(manifest.get("status", "complete")) if isinstance(manifest, dict) else "invalid"
+        if status != "complete":
+            return "stale", f"latent cache manifest status is not complete: {status}"
+
     if bool(cfg.latent_cache_sharded):
         index_path = _resolve_latent_shard_index_path(cfg)
         if not index_path.exists():
@@ -463,6 +548,29 @@ def _latent_cache_state(cfg: TrainConfig, entries: list[dict]) -> tuple[str, str
     ]
     if missing_paths:
         return "missing", f"latent cache missing {len(missing_paths)} files. Examples: {', '.join(missing_paths[:3])}"
+    if bool(getattr(cfg, "cache_validate_on_start", True)):
+        expected_by_md5 = _latent_expected_metadata_by_md5(cfg, entries)
+        expected_common = None if expected_by_md5 else LatentCacheMetadata(
+            vae_pretrained=str(cfg.vae_pretrained),
+            scaling_factor=float(cfg.vae_scaling_factor),
+            latent_shape=tuple(_latent_expected_metadata(cfg)["latent_shape"]),
+            dtype=str(cfg.latent_dtype),
+        )
+        from data_loader.dataset import _parse_latent_payload, _validate_latent_meta
+        for entry in entries:
+            md5 = str(entry.get("md5", ""))
+            cache_path = latent_cache_path(cache_dir, md5)
+            try:
+                payload = _torch_load(cache_path, map_location="cpu")
+                _latent, meta = _parse_latent_payload(payload)
+                _validate_latent_meta(
+                    expected=expected_by_md5.get(md5, expected_common),
+                    actual=meta,
+                    strict=True,
+                    cache_path=cache_path,
+                )
+            except Exception as exc:
+                return "stale", f"latent cache metadata mismatch for {cache_path}: {exc}"
     return "ready", ""
 
 
@@ -561,15 +669,21 @@ class _MMDiTCachedDataset(torch.utils.data.Dataset):
         if not self.task_names or float(weights.sum().item()) <= 0:
             raise RuntimeError("MMDiT dataset_tasks must include at least one positive task weight.")
         self.task_probs = weights / weights.sum()
+        self.epoch = 0
 
     def __len__(self) -> int:
         return len(self.latent_ds)
 
-    def _sample_task(self) -> str:
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def _sample_task(self, idx: int) -> str:
         if len(self.task_names) == 1:
             return self.task_names[0]
-        idx = int(torch.multinomial(self.task_probs, 1).item())
-        return self.task_names[idx]
+        gen = torch.Generator(device="cpu")
+        gen.manual_seed(self.seed + int(self.epoch) * 1_000_003 + int(idx) * 9_176 + 17)
+        sampled = int(torch.multinomial(self.task_probs, 1, generator=gen).item())
+        return self.task_names[sampled]
 
     def _random_mask(self, x0: torch.Tensor, *, idx: int) -> torch.Tensor:
         return generate_inpaint_mask(
@@ -593,7 +707,7 @@ class _MMDiTCachedDataset(torch.utils.data.Dataset):
         raw = self.latent_ds[idx]
         x0 = raw[0] if isinstance(raw, tuple) else raw
         key = str(self.entries[idx].get("md5", idx))
-        task = self._sample_task()
+        task = self._sample_task(idx)
         source_latent = None
         mask = None
         control_latents = None
@@ -695,26 +809,31 @@ def _collate_mmdit(batch: list[TrainBatch]) -> TrainBatch:
     tasks = [item.task for item in batch]
     strength = torch.stack([item.strength if item.strength is not None else torch.tensor(1.0 if item.task in {"img2img", "inpaint"} else 1.0, dtype=item.x0.dtype) for item in batch], dim=0)
     control_strength = torch.stack([item.control_strength if item.control_strength is not None else torch.tensor(0.0, dtype=item.x0.dtype) for item in batch], dim=0)
+    def _merge_text_tensor(values: list[torch.Tensor]) -> torch.Tensor:
+        first_dim = values[0].dim()
+        if not all(value.dim() == first_dim for value in values):
+            raise RuntimeError("mixed text cache tensor ranks in one batch; rebuild text cache")
+        return torch.stack(values, dim=0) if first_dim in {1, 2} else torch.cat(values, dim=0)
+
+    token_type_values: list[torch.Tensor | None] = [item.text.token_types for item in batch]
+    if all(value is None for value in token_type_values):
+        merged_token_types = None
+    else:
+        normalized_types: list[torch.Tensor] = []
+        for item, value in zip(batch, token_type_values):
+            if value is None:
+                value = torch.zeros(item.text.tokens.shape[:-1], dtype=torch.long)
+            normalized_types.append(value.to(dtype=torch.long))
+        merged_token_types = _merge_text_tensor(normalized_types)
+
     return TrainBatch(
         x0=torch.stack([item.x0 for item in batch], dim=0),
         text=TextConditioning(
-            tokens=torch.stack([item.text.tokens for item in batch], dim=0)
-            if batch[0].text.tokens.dim() == 2
-            else torch.cat([item.text.tokens for item in batch], dim=0),
-            mask=torch.stack([item.text.mask for item in batch], dim=0)
-            if batch[0].text.mask.dim() == 1
-            else torch.cat([item.text.mask for item in batch], dim=0),
-            pooled=torch.stack([item.text.pooled for item in batch], dim=0)
-            if batch[0].text.pooled.dim() == 1
-            else torch.cat([item.text.pooled for item in batch], dim=0),
+            tokens=_merge_text_tensor([item.text.tokens for item in batch]),
+            mask=_merge_text_tensor([item.text.mask for item in batch]),
+            pooled=_merge_text_tensor([item.text.pooled for item in batch]),
             is_uncond=None,
-            token_types=(
-                torch.stack([item.text.token_types for item in batch], dim=0)
-                if batch[0].text.token_types is not None and batch[0].text.token_types.dim() == 1
-                else torch.cat([item.text.token_types for item in batch], dim=0)
-                if batch[0].text.token_types is not None
-                else None
-            ),
+            token_types=merged_token_types,
         ),
         source_latent=source_latent,
         mask=mask,
@@ -857,6 +976,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
         latent_shape=(int(cfg.latent_channels), latent_side, latent_side),
         dtype=str(cfg.latent_dtype),
     )
+    latent_expected_meta_by_md5 = _latent_expected_metadata_by_md5(cfg, train_entries) if bool(cfg.aspect_buckets_enabled) else {}
     latent_ds = ImageTextDataset(
         entries=train_entries,
         tokenizer=None,
@@ -870,9 +990,11 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
         latent_cache_strict=bool(cfg.latent_cache_strict),
         latent_cache_fallback=False,
         latent_expected_meta=latent_expected_meta,
+        latent_expected_meta_by_md5=latent_expected_meta_by_md5,
         include_is_latent=False,
         latent_missing_log_path=out_dir / "latent_missing.txt",
         latent_shard_cache_size=int(cfg.latent_shard_cache_size),
+        expected_image_size=int(cfg.image_size),
     )
     if len(latent_ds) == 0:
         raise RuntimeError("Latent cache is empty after auto-prepare. Check data_root, dataset_limit, VAE path, and cache metadata.")
@@ -923,9 +1045,11 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
             latent_cache_strict=bool(cfg.latent_cache_strict),
             latent_cache_fallback=False,
             latent_expected_meta=latent_expected_meta,
+            latent_expected_meta_by_md5=_latent_expected_metadata_by_md5(cfg, val_entries) if bool(cfg.aspect_buckets_enabled) else {},
             include_is_latent=False,
             latent_missing_log_path=out_dir / "latent_missing_val.txt",
             latent_shard_cache_size=int(cfg.latent_shard_cache_size),
+            expected_image_size=int(cfg.image_size),
         )
         if len(val_latent_ds) > 0:
             val_text_ready = True
