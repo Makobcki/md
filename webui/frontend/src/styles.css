@@ -1450,3 +1450,30 @@ button.secondary.mask-toggle.active {
   border-color: var(--accent);
   color: var(--accent-strong);
 }
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.auth-controls input {
+  width: 180px;
+  max-width: 22vw;
+}
+
+@media (max-width: 900px) {
+  .header-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .auth-controls input {
+    max-width: 38vw;
+  }
+}

@@ -6,7 +6,7 @@ import StatusPill from "../components/StatusPill.jsx";
 import { formatDate, formatRunType, parseRunDate } from "../utils/formatters.js";
 
 const parseLogLine = (line) => {
-  const trimmed = line.trim();
+  const trimmed = line.replace(/^\[(stdout|stderr)\]\s*/, "").trim();
   if (!trimmed.startsWith("{")) {
     return { raw: line, level: "info", timestamp: null };
   }
@@ -53,8 +53,8 @@ export default function FilesPage() {
     const loadLogs = async () => {
       try {
         const [outLog, errLog] = await Promise.all([
-          api.getRunLog(selectedRunId, "stdout"),
-          api.getRunLog(selectedRunId, "stderr"),
+          api.getRunLog(selectedRunId, "stdout", { raw: true }),
+          api.getRunLog(selectedRunId, "stderr", { raw: true }),
         ]);
         setStdout(outLog.content.split("\n").filter(Boolean).map((line) => `[stdout] ${line}`));
         setStderr(errLog.content.split("\n").filter(Boolean).map((line) => `[stderr] ${line}`));
@@ -63,6 +63,8 @@ export default function FilesPage() {
       }
     };
     loadLogs();
+    const timer = setInterval(loadLogs, 1000);
+    return () => clearInterval(timer);
   }, [selectedRunId]);
 
   const filteredLines = useMemo(() => {

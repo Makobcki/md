@@ -157,7 +157,7 @@ export default function TrainPage() {
   }, [config]);
 
   const handleSave = async (silent = false) => {
-    if (saving) return;
+    if (saving) return false;
     setSaving(true);
     if (!silent) {
       setError("");
@@ -165,10 +165,10 @@ export default function TrainPage() {
     try {
       await api.updateConfig(config);
       setLastSaved(config);
+      return true;
     } catch (err) {
-      if (!silent) {
-        setError(err.message);
-      }
+      setError(err.message);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -177,7 +177,8 @@ export default function TrainPage() {
   const handleStart = async () => {
     setError("");
     if (isDirty) {
-      await handleSave(true);
+      const saved = await handleSave(true);
+      if (!saved) return;
     }
     try {
       const payload = resumeCkpt ? { resume: resumeCkpt } : {};

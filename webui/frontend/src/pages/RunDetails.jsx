@@ -1,18 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { api, API_ORIGIN } from "../api.js";
+import { api, absoluteFileUrl, absoluteDownloadUrl } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 import LineChart from "../components/LineChart.jsx";
 import StatusPill from "../components/StatusPill.jsx";
 import { formatDate, formatRunId, formatRunType, parseRunDate } from "../utils/formatters.js";
 
-const toRunsUrl = (path) => {
-  if (!path) return null;
-  const marker = "webui_runs/";
-  const idx = path.indexOf(marker);
-  if (idx === -1) return null;
-  return `${API_ORIGIN}/runs/${path.slice(idx + marker.length)}`;
-};
 
 export default function RunDetails() {
   const { runId } = useParams();
@@ -38,12 +31,10 @@ export default function RunDetails() {
       setStderr(errLog.content.split("\n").filter(Boolean));
       const metricsData = await api.getRunMetrics(runId);
       setMetrics(metricsData.items || []);
-      const ckptData = await api.listCheckpoints();
-      setCheckpoints(ckptData.items || []);
-      const sampleData = await api.listSamples();
-      setSamples(
-        (sampleData.items || []).filter((path) => path.includes(`/webui_runs/${runId}/samples/`))
-      );
+      const artifactData = await api.listArtifacts({ runId });
+      const artifacts = artifactData.items || [];
+      setCheckpoints(artifacts.filter((item) => item.source === "checkpoint"));
+      setSamples(artifacts.filter((item) => item.previewable && ["webui_sample", "train_sample"].includes(item.source)));
     };
     load();
   }, [runId]);
@@ -93,8 +84,8 @@ export default function RunDetails() {
           <h3 className="card-title">Checkpoints</h3>
           <ul>
             {checkpoints.map((ckpt) => (
-              <li key={ckpt} className="muted">
-                {ckpt}
+              <li key={ckpt.path || ckpt.name} className="muted">
+                <a href={absoluteDownloadUrl(ckpt) || "#"}>{ckpt.path || ckpt.name}</a>
               </li>
             ))}
           </ul>
@@ -106,9 +97,9 @@ export default function RunDetails() {
           <h3 className="card-title">Samples</h3>
           <div className="gallery-grid">
             {samples.map((item) => {
-              const url = toRunsUrl(item);
+              const url = absoluteFileUrl(item);
               return url ? (
-                <div key={item} className="image-card">
+                <div key={item.path || item.url || item} className="image-card">
                   <img src={url} alt="sample" />
                   <div className="image-meta">
                     <a href={url} target="_blank" rel="noreferrer">
