@@ -6,6 +6,8 @@ import torch
 def flow_timesteps(steps: int, *, device: torch.device, shift: float = 1.0) -> torch.Tensor:
     if steps <= 0:
         raise ValueError("steps must be positive.")
+    if float(shift) <= 0.0:
+        raise ValueError("shift must be positive.")
     ts = torch.linspace(1.0, 0.0, steps + 1, device=device)
     if shift != 1.0:
         s = float(shift)

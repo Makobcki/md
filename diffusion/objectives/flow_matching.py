@@ -66,7 +66,21 @@ class RectifiedFlowObjective:
         loss_weighting: str = "none",
         timestep_shift: float = 1.0,
     ) -> None:
-        self.timestep_sampling = timestep_sampling
+        allowed_sampling = {"uniform", "logit_normal", "shifted_logit_normal", "cosmap", "cosmap_like"}
+        if str(timestep_sampling) not in allowed_sampling:
+            allowed = ", ".join(sorted(allowed_sampling))
+            raise ValueError(f"Unsupported timestep sampling mode: {timestep_sampling}. Allowed: {allowed}.")
+        if float(logit_std) <= 0:
+            raise ValueError("logit_std must be positive.")
+        if not (0.0 <= float(train_t_min) <= 1.0 and 0.0 <= float(train_t_max) <= 1.0):
+            raise ValueError("train_t_min and train_t_max must be in [0, 1].")
+        if float(train_t_min) > float(train_t_max):
+            raise ValueError("train_t_min must be <= train_t_max.")
+        if float(timestep_shift) <= 0:
+            raise ValueError("timestep_shift must be positive.")
+        if str(loss_weighting) not in {"none"}:
+            raise ValueError("loss_weighting must be 'none'.")
+        self.timestep_sampling = str(timestep_sampling)
         self.logit_mean = float(logit_mean)
         self.logit_std = float(logit_std)
         self.train_t_min = float(train_t_min)
