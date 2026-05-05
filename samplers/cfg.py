@@ -42,6 +42,8 @@ def cfg_predict(
     for key, value in model_kwargs.items():
         if isinstance(value, torch.Tensor) and value.shape[:1] == x.shape[:1]:
             kwargs_in[key] = torch.cat([value, value], dim=0)
+        elif isinstance(value, (list, tuple)) and len(value) == x.shape[0]:
+            kwargs_in[key] = list(value) + list(value)
         else:
             kwargs_in[key] = value
     pred_uncond, pred_cond = model(x_in, t_in, text_in, **kwargs_in).chunk(2, dim=0)
