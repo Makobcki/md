@@ -118,7 +118,7 @@ def test_log_websocket_backlog_sends_existing_lines(app_module: object, tmp_path
         async def send_text(self, message: str) -> None:
             self.sent.append(message)
 
-    run_dir = tmp_path / "run"
+    run_dir = app_module.RUNS_DIR / "run-1"
     logs_dir = run_dir / "logs"
     logs_dir.mkdir(parents=True)
     stdout_path = logs_dir / "train.log"
@@ -165,7 +165,7 @@ def test_log_backlog_formats_json_events(app_module: object, tmp_path: Path) -> 
         async def send_text(self, message: str) -> None:
             self.sent.append(message)
 
-    run_dir = tmp_path / "run"
+    run_dir = app_module.RUNS_DIR / "run-1"
     logs_dir = run_dir / "logs"
     logs_dir.mkdir(parents=True)
     stdout_path = logs_dir / "train.log"
@@ -228,3 +228,63 @@ def test_websocket_requires_token(app_module: object, monkeypatch: pytest.Monkey
     accepted = _FakeWebSocket(token="secret")
     assert asyncio.run(app_module._require_ws_token(accepted)) is True
     assert accepted.closed_code is None
+
+
+def test_artifacts_endpoint_returns_backend_urls(app_module: object) -> None:
+    sample_dir = app_module.RUNS_DIR / "run-1" / "samples"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    img = sample_dir / "sample.png"
+    img.write_bytes(b"png")
+
+    payload = app_module.list_artifacts(run_id="run-1", source="all")
+
+    assert payload["total"] == 1
+    item = payload["items"][0]
+    assert item["url"].startswith("/api/files/")
+    assert item["download_url"].startswith("/api/files/download/")
+    assert item["source"] == "webui_sample"
+
+
+def test_download_token_rejects_unsupported_file(app_module: object) -> None:
+    path = app_module.RUNS_DIR / "run-1" / "state.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x", encoding="utf-8")
+    token = app_module._encode_file_token(path)
+
+    with pytest.raises(HTTPException) as exc:
+        app_module.download_safe_file(token)
+
+    assert exc.value.status_code == 403
+
+
+def test_file_token_is_signed(app_module: object) -> None:
+    path = app_module.RUNS_DIR / "run-1" / "samples" / "sample.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"png")
+    token = app_module._encode_file_token(path)
+    body, sig = token.split(".", 1)
+    forged = f"{body}.{'A' * len(sig)}"
+
+    with pytest.raises(HTTPException) as exc:
+        app_module.get_safe_file_by_token(forged)
+
+    assert exc.value.status_code == 400
+
+
+def test_direct_uploads_path_is_forbidden(app_module: object) -> None:
+    path = app_module.UPLOADS_DIR / "init" / "source.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"png")
+
+    with pytest.raises(HTTPException) as exc:
+        app_module.get_safe_file("_uploads/init/source.png")
+
+    assert exc.value.status_code == 403
+
+
+def test_upload_file_url_uses_signed_token(app_module: object) -> None:
+    path = app_module.UPLOADS_DIR / "init" / "source.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"png")
+
+    assert app_module._file_url_for_path(path).startswith("/api/files/by-path/")
