@@ -37,11 +37,18 @@ class TextConditioning:
         is_uncond = drop.to(device=self.tokens.device, dtype=torch.bool)
         if self.is_uncond is not None:
             is_uncond = torch.logical_or(self.is_uncond.to(is_uncond.device), is_uncond)
-        token_types = self.token_types
-        if token_types is None and empty.token_types is not None:
-            token_types = empty.token_types.to(device=self.tokens.device)
-        elif token_types is not None:
-            token_types = token_types.to(device=self.tokens.device)
+        if self.token_types is None:
+            token_types = None
+        else:
+            self_types = self.token_types.to(device=self.tokens.device, dtype=torch.long)
+            if empty.token_types is None:
+                empty_types = torch.zeros_like(self_types)
+            else:
+                empty_types = empty.token_types.to(device=self.tokens.device, dtype=torch.long)
+                if empty_types.shape[:1] == (1,) and self_types.shape[:1] != (1,):
+                    empty_types = empty_types.expand_as(self_types)
+            drop_types = drop.view(-1, *([1] * (self_types.dim() - 1))).to(device=self.tokens.device, dtype=torch.bool)
+            token_types = torch.where(drop_types, empty_types.to(self_types), self_types)
         return TextConditioning(
             tokens=torch.where(drop_tokens, empty.tokens.to(self.tokens), self.tokens),
             mask=torch.where(drop_mask, empty.mask.to(self.mask.device), self.mask),
