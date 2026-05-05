@@ -30,6 +30,7 @@ ml = [
 ]
 web = [
     "fastapi>=0.110.0",
+    "python-multipart>=0.0.9",
     "httpx>=0.27.0",
     "pydantic>=2.6.1",
     "uvicorn>=0.27.1",
@@ -41,6 +42,7 @@ all = [
     "diffusers",
     "einops>=0.8.0",
     "fastapi>=0.110.0",
+    "python-multipart>=0.0.9",
     "httpx>=0.27.0",
     "protobuf>=4.25",
     "pydantic>=2.6.1",
@@ -85,3 +87,13 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.setuptools.package-data]
+webui = [
+    "frontend/index.html",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/vite.config.js",
+    "frontend/src/**/*",
+    "frontend/dist/**/*",
+]
