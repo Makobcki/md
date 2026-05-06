@@ -210,7 +210,16 @@ def test_log_backlog_formats_json_events(app_module: object, tmp_path: Path) -> 
 
 
 def _request(scheme: str = "http") -> Request:
-    return Request({"type": "http", "scheme": scheme, "server": ("testserver", 80), "path": "/", "headers": []})
+    return Request(
+        {
+            "type": "http",
+            "scheme": scheme,
+            "server": ("testserver", 80),
+            "client": ("127.0.0.1", 12345),
+            "path": "/",
+            "headers": [],
+        }
+    )
 
 
 def test_websocket_requires_token(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -292,6 +301,36 @@ def test_auth_login_rejects_bad_token(app_module: object, monkeypatch: pytest.Mo
         app_module.login(app_module.AuthLoginRequest(token="wrong"), Response(), _request())
 
     assert exc.value.status_code == 401
+
+
+def test_auth_login_rate_limits_failed_attempts(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
+    monkeypatch.setattr(app_module, "_AUTH_MAX_FAILED_ATTEMPTS", 2)
+    monkeypatch.setattr(app_module, "_AUTH_LOCKOUT_SECONDS", 60)
+    app_module._auth_failures.clear()
+
+    with pytest.raises(HTTPException) as first:
+        app_module.login(app_module.AuthLoginRequest(token="wrong-1"), Response(), _request())
+    with pytest.raises(HTTPException) as second:
+        app_module.login(app_module.AuthLoginRequest(token="wrong-2"), Response(), _request())
+    with pytest.raises(HTTPException) as locked:
+        app_module.login(app_module.AuthLoginRequest(token="secret"), Response(), _request())
+
+    assert first.value.status_code == 401
+    assert second.value.status_code == 429
+    assert locked.value.status_code == 429
+    assert locked.value.headers["Retry-After"]
+
+
+def test_auth_login_success_clears_failed_attempts(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
+    app_module._auth_failures["127.0.0.1"] = {"count": 1, "first_failed_at": 1.0, "locked_until": 0.0}
+
+    response = Response()
+    payload = app_module.login(app_module.AuthLoginRequest(token="secret"), response, _request())
+
+    assert payload["authenticated"] is True
+    assert "127.0.0.1" not in app_module._auth_failures
 
 
 def test_wildcard_cors_is_rejected(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
