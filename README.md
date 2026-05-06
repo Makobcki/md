@@ -31,6 +31,20 @@ Then install the project:
 python -m pip install -e ".[all]"
 ```
 
+Run project linting before committing changes:
+
+```bash
+python -m scripts.lint
+# or, after installation:
+md-lint
+```
+
+Apply safe Ruff fixes and formatting:
+
+```bash
+md-lint --fix
+```
+
 Run a smoke dry-run:
 
 ```bash
