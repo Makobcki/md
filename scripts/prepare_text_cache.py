@@ -264,7 +264,8 @@ def prepare_text_cache(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="config/train.yaml")
+    parser.add_argument("--config", default="", help="Config path. Defaults to configs/cache.kdl.")
+    parser.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--out", default="")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--shard-size", type=int, default=1024)
@@ -273,7 +274,9 @@ def main() -> None:
     parser.add_argument("--dtype", choices=("auto", "fp32", "bf16", "fp16"), default=None)
     args = parser.parse_args()
 
-    cfg = TrainConfig.from_yaml(args.config)
+    from config.loader import load_cache_train_config, parse_cli_overrides
+
+    cfg = load_cache_train_config(args.config or None, overrides=parse_cli_overrides(args.set_values))
     out = Path(args.out) if args.out else Path(cfg.data_root) / str(cfg.text_cache_dir)
     device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device))
     prepare_text_cache(

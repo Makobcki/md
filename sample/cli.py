@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
+from dataclasses import replace
 
-from .api import (
-    SampleOptions,
-    _metadata_sidecar_path,
-    _sample_metadata,
-    _save_image_grid,
-    _write_sample_metadata,
-    run_sample,
-)
+from config.loader import load_sample_config, parse_cli_overrides
+
+from .api import SampleOptions, run_sample
 
 
 def _positive_int(value: str) -> int:
@@ -40,34 +37,85 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _apply_cli_args(options: SampleOptions, args: argparse.Namespace) -> SampleOptions:
+    updates: dict[str, object] = {}
+    for name in (
+        "ckpt",
+        "out",
+        "n",
+        "steps",
+        "prompt",
+        "neg_prompt",
+        "cfg",
+        "shift",
+        "sampler",
+        "seed",
+        "device",
+        "width",
+        "height",
+        "init_image",
+        "strength",
+        "mask",
+        "control_image",
+        "control_strength",
+        "control_type",
+        "task",
+    ):
+        value = getattr(args, name)
+        if value is not None:
+            updates[name] = value
+    if bool(args.latent_only):
+        updates["latent_only"] = True
+    if bool(args.fake_vae):
+        updates["fake_vae"] = True
+    if args.use_ema is not None:
+        updates["use_ema"] = bool(args.use_ema)
+    if updates:
+        options = replace(options, **updates)
+        options.validate()
+    return options
+
+
 def _main_impl() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--n", type=_positive_int, default=8)
-    ap.add_argument("--steps", type=_positive_int, default=30)
-    ap.add_argument("--prompt", default="")
-    ap.add_argument("--neg_prompt", "--negative-prompt", dest="neg_prompt", default="")
-    ap.add_argument("--cfg", type=float, default=5.0)
+    ap.add_argument("--config", default="", help="Config path. Defaults to configs/sample.kdl.")
+    ap.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE", help="Override config value, e.g. --set prompt.text='a landscape'.")
+    ap.add_argument("--print-config", action="store_true", help="Print resolved sample options and exit.")
+    ap.add_argument("--ckpt", default=None)
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--n", type=_positive_int, default=None)
+    ap.add_argument("--steps", type=_positive_int, default=None)
+    ap.add_argument("--prompt", default=None)
+    ap.add_argument("--neg_prompt", "--negative-prompt", dest="neg_prompt", default=None)
+    ap.add_argument("--cfg", type=float, default=None)
     ap.add_argument("--shift", type=_positive_float, default=None, help="Positive inference timestep shift override. Defaults to checkpoint/config sampling shift.")
-    ap.add_argument("--sampler", default="flow_heun", choices=("flow_euler", "flow_heun"))
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--device", default="auto")
+    ap.add_argument("--sampler", default=None, choices=("flow_euler", "flow_heun"))
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--device", default=None)
     ap.add_argument("--width", type=_positive_int, default=None)
     ap.add_argument("--height", type=_positive_int, default=None)
-    ap.add_argument("--init-image", dest="init_image", default="")
-    ap.add_argument("--strength", type=_bounded_strength, default=1.0)
-    ap.add_argument("--mask", default="")
-    ap.add_argument("--control-image", dest="control_image", default="")
-    ap.add_argument("--control-strength", dest="control_strength", type=_nonnegative_float, default=1.0)
-    ap.add_argument("--control-type", dest="control_type", default="image", choices=("none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"))
-    ap.add_argument("--task", default="txt2img", choices=("txt2img", "img2img", "inpaint", "control"))
+    ap.add_argument("--init-image", dest="init_image", default=None)
+    ap.add_argument("--strength", type=_bounded_strength, default=None)
+    ap.add_argument("--mask", default=None)
+    ap.add_argument("--control-image", dest="control_image", default=None)
+    ap.add_argument("--control-strength", dest="control_strength", type=_nonnegative_float, default=None)
+    ap.add_argument("--control-type", dest="control_type", default=None, choices=("none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"))
+    ap.add_argument("--task", default=None, choices=("txt2img", "img2img", "inpaint", "control"))
     ap.add_argument("--latent-only", dest="latent_only", action="store_true", help="Write final latent tensor instead of decoding through VAE.")
     ap.add_argument("--fake-vae", dest="fake_vae", action="store_true", help="Use deterministic fake VAE decoder for smoke tests.")
-    ap.add_argument("--use-ema", dest="use_ema", action="store_true", default=True)
+    ap.add_argument("--use-ema", dest="use_ema", action="store_true", default=None)
     ap.add_argument("--no-ema", dest="use_ema", action="store_false")
     args = ap.parse_args()
-    run_sample(SampleOptions(**vars(args)))
+
+    config = load_sample_config(
+        args.config or None,
+        overrides=parse_cli_overrides(args.set_values),
+    )
+    options = _apply_cli_args(config.options, args)
+    if args.print_config:
+        print(json.dumps(options.__dict__, indent=2, ensure_ascii=False), flush=True)
+        return
+    run_sample(options)
 
 
 def main() -> None:

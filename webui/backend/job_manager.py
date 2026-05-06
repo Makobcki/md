@@ -139,8 +139,7 @@ class JobManager:
         return format_event_line(event)
 
     def _read_train_config(self) -> Dict[str, Any]:
-        cfg_path = config_service.get_config_path(self.repo_root)
-        return TrainConfig.from_yaml(str(cfg_path)).to_dict()
+        return config_service.load_config_dict(self.repo_root)
 
     def _allowed_output_roots(self) -> list[Path]:
         roots = [self.repo_root, self.runs_dir]

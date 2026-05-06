@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import replace
 
-from config.loader import load_train_config
+from config.loader import load_train_config, parse_cli_overrides
 from config.train import TrainConfig
 
 
@@ -137,7 +138,7 @@ def _apply_overrides(cfg: TrainConfig, args: argparse.Namespace) -> TrainConfig:
 
 def _main_impl() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="")
+    ap.add_argument("--config", default="", help="Config path. Defaults to configs/train.kdl.")
     ap.add_argument(
         "--profile",
         default="",
@@ -148,6 +149,8 @@ def _main_impl() -> None:
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--ckpt-keep-last", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--print-config", action="store_true", help="Print the resolved TrainConfig and exit.")
+    ap.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE", help="Override config value, e.g. --set training.batch_size=8.")
     args = ap.parse_args()
 
     profile_to_config = {
@@ -166,9 +169,12 @@ def _main_impl() -> None:
         "distributed_smoke": "config/train_distributed_smoke.yaml",
         "fsdp_template": "config/train_fsdp_template.yaml",
     }
-    config_path = args.config or profile_to_config.get(args.profile, "config/train.yaml")
-    cfg = load_train_config(config_path)
+    config_path = args.config or profile_to_config.get(args.profile) or None
+    cfg = load_train_config(config_path, overrides=parse_cli_overrides(args.set_values))
     cfg = _apply_overrides(cfg, args)
+    if args.print_config:
+        print(json.dumps(cfg.to_dict(), indent=2, ensure_ascii=False), flush=True)
+        return
     if args.dry_run:
         _dry_run_light(cfg)
     else:

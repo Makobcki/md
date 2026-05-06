@@ -206,7 +206,8 @@ def write_training_cache_manifest(cfg: TrainConfig, *, entries: list[dict[str, A
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Prepare MMDiT RF text and latent caches.")
-    ap.add_argument("--config", default="config/train.yaml")
+    ap.add_argument("--config", default="", help="Config path. Defaults to configs/cache.kdl.")
+    ap.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
     ap.add_argument("--text-batch-size", type=int, default=8)
     ap.add_argument("--text-shard-size", type=int, default=1024)
     ap.add_argument("--text-limit", type=int, default=None)
@@ -223,7 +224,9 @@ def main() -> None:
     from scripts.prepare_latents import prepare_latent_cache_for_config
     from scripts.prepare_text_cache import _resolve_prepare_dtype, prepare_text_cache
 
-    cfg = TrainConfig.from_yaml(args.config)
+    from config.loader import load_cache_train_config, parse_cli_overrides
+
+    cfg = load_cache_train_config(args.config or None, overrides=parse_cli_overrides(args.set_values))
     device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device))
     entries = _dataset_entries(cfg)
     text_root = Path(cfg.data_root) / str(cfg.text_cache_dir)

@@ -522,7 +522,8 @@ class _ShardWriter:
 
 def _main_impl(argv: Optional[list[str]] = None) -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="./config/train.yaml")
+    ap.add_argument("--config", default="", help="Config path. Defaults to configs/cache.kdl.")
+    ap.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
     ap.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--batch-size", type=int, default=8)
@@ -543,7 +544,9 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
     provided_dests = _provided_cli_dests(ap, argv)
     args = ap.parse_args(argv)
 
-    cfg = TrainConfig.from_yaml(args.config)
+    from config.loader import load_cache_train_config, parse_cli_overrides
+
+    cfg = load_cache_train_config(args.config or None, overrides=parse_cli_overrides(args.set_values))
     options = _resolve_prepare_options(cfg, args, provided_dests)
     if cfg.mode != "latent":
         raise RuntimeError("prepare_latents requires mode=latent in config.")

@@ -78,7 +78,8 @@ def validate_cache(cfg, *, strict: bool | None = None, text_only: bool = False, 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Validate text/latent training cache metadata and shard readability.")
-    parser.add_argument("--config", default="config/train.yaml")
+    parser.add_argument("--config", default="", help="Config path. Defaults to configs/cache.kdl.")
+    parser.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument("--strict", action="store_true", help="Treat warnings as errors, overriding config cache.strict.")
     parser.add_argument("--non-strict", action="store_true", help="Turn compatible mismatches into warnings.")
     parser.add_argument("--text-only", action="store_true")
@@ -87,9 +88,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.text_only and args.latents_only:
         raise SystemExit("--text-only and --latents-only are mutually exclusive")
-    from config.train import TrainConfig
+    from config.loader import load_cache_train_config, parse_cli_overrides
 
-    cfg = TrainConfig.from_yaml(args.config)
+    cfg = load_cache_train_config(args.config or None, overrides=parse_cli_overrides(args.set_values))
     strict = True if args.strict else False if args.non_strict else None
     report = validate_cache(cfg, strict=strict, text_only=bool(args.text_only), latents_only=bool(args.latents_only))
     print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
