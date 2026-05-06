@@ -33,6 +33,7 @@ from diffusion.perf.triton_compat import patch_triton_cuda_python_include_order
 from diffusion.utils import EMA, build_run_metadata, seed_everything
 from diffusion.vae import VAEWrapper
 from model.mmdit import MMDiTConfig, MMDiTFlowModel
+from model.registry import build_model
 from model.text.cache import TextCache
 from model.text.conditioning import TextConditioning, TrainBatch
 from model.text.pretrained import FrozenTextEncoderBundle
@@ -1135,7 +1136,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
         coarse_patch_size=int(cfg.coarse_patch_size),
         x0_aux_weight=float(cfg.x0_aux_weight),
     )
-    model = MMDiTFlowModel(mmdit_cfg).to(device)
+    model = build_model(cfg).to(device)
     opt = _build_optimizer(cfg, model, device)
     ema = EMA(model, decay=float(cfg.ema_decay))
     if dist.backend != "none":

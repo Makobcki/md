@@ -387,6 +387,144 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(debug, dict) and "dataset_limit" in debug and "dataset_limit" not in flat:
         flat["dataset_limit"] = debug["dataset_limit"]
 
+
+    # KDL v2 compatibility mappings. New target configs are nested and describe
+    # semantics (model.family/model.variant) rather than a concrete Python
+    # class. The trainer still consumes the legacy flat TrainConfig, so this
+    # layer maps stable nested names into existing fields.
+    output = data.get("output")
+    if isinstance(output, dict) and "dir" in output and "out_dir" not in flat:
+        flat["out_dir"] = output["dir"]
+
+    data_section = data.get("data")
+    if isinstance(data_section, dict):
+        data_mapping = {
+            "dataset_path": "data_root",
+            "root": "data_root",
+            "image_dir": "image_dir",
+            "meta_dir": "meta_dir",
+            "tags_dir": "tags_dir",
+            "caption_field": "caption_field",
+            "text_field": "text_field",
+            "text_fields": "text_fields",
+            "min_tag_count": "min_tag_count",
+            "require_512": "require_512",
+            "val_ratio": "val_ratio",
+            "cache_dir": "cache_dir",
+            "failed_list": "failed_list",
+            "dataset_limit": "dataset_limit",
+        }
+        for src, dst in data_mapping.items():
+            if src in data_section and dst not in flat:
+                flat[dst] = data_section[src]
+
+    training_section = data.get("training")
+    if isinstance(training_section, dict):
+        optimizer_section = training_section.get("optimizer")
+        if isinstance(optimizer_section, dict):
+            optimizer_mapping = {
+                "name": "optimizer",
+                "lr": "lr",
+                "learning_rate": "lr",
+                "weight_decay": "weight_decay",
+            }
+            for src, dst in optimizer_mapping.items():
+                if src in optimizer_section and dst not in flat:
+                    flat[dst] = optimizer_section[src]
+        if isinstance(flat.get("optimizer"), dict):
+            optimizer_values = flat["optimizer"]
+            if "name" in optimizer_values:
+                flat["optimizer"] = optimizer_values["name"]
+            else:
+                flat.pop("optimizer", None)
+            if "lr" in optimizer_values and "lr" not in flat:
+                flat["lr"] = optimizer_values["lr"]
+            if "learning_rate" in optimizer_values and "lr" not in flat:
+                flat["lr"] = optimizer_values["learning_rate"]
+            if "weight_decay" in optimizer_values and "weight_decay" not in flat:
+                flat["weight_decay"] = optimizer_values["weight_decay"]
+
+        precision = training_section.get("precision")
+        if isinstance(precision, dict):
+            precision_mapping = {
+                "amp": "amp",
+                "amp_dtype": "amp_dtype",
+                "dtype": "amp_dtype",
+                "tf32": "tf32",
+            }
+            for src, dst in precision_mapping.items():
+                if src in precision and dst not in flat:
+                    flat[dst] = precision[src]
+
+    if isinstance(model, dict):
+        architecture = model.get("architecture")
+        if isinstance(architecture, dict):
+            architecture_mapping = {
+                "latent_channels": "latent_channels",
+                "patch_size": "latent_patch_size",
+                "latent_patch_size": "latent_patch_size",
+                "hidden_size": "hidden_dim",
+                "hidden_dim": "hidden_dim",
+                "depth": "depth",
+                "num_heads": "num_heads",
+                "mlp_ratio": "mlp_ratio",
+                "qk_norm": "qk_norm",
+                "rms_norm": "rms_norm",
+                "swiglu": "swiglu",
+                "double_stream_blocks": "double_stream_blocks",
+                "single_stream_blocks": "single_stream_blocks",
+                "dropout": "dropout",
+                "attn_dropout": "attn_dropout",
+                "gradient_checkpointing": "gradient_checkpointing",
+            }
+            for src, dst in architecture_mapping.items():
+                if src in architecture and dst not in flat:
+                    flat[dst] = architecture[src]
+            if "image_size" in architecture and "image_size" not in flat:
+                flat["image_size"] = architecture["image_size"]
+            rope = architecture.get("rope")
+            if isinstance(rope, dict):
+                for src, dst in {
+                    "scaling": "rope_scaling",
+                    "base_grid": "rope_base_grid_hw",
+                    "theta": "rope_theta",
+                }.items():
+                    if src in rope and dst not in flat:
+                        flat[dst] = rope[src]
+        diffusion = model.get("diffusion")
+        if isinstance(diffusion, dict):
+            if "objective" in diffusion and "objective" not in flat:
+                flat["objective"] = diffusion["objective"]
+            if "prediction_type" in diffusion and "prediction_type" not in flat:
+                prediction_type = diffusion["prediction_type"]
+                if prediction_type == "velocity":
+                    prediction_type = "flow_velocity"
+                flat["prediction_type"] = prediction_type
+
+    sampler_section = data.get("sampler")
+    if isinstance(sampler_section, dict):
+        sampler_name = str(sampler_section.get("name", "") or "")
+        sampler_aliases = {
+            "rf_euler": "flow_euler",
+            "euler": "flow_euler",
+            "flow_euler": "flow_euler",
+            "rf_heun": "flow_heun",
+            "heun": "flow_heun",
+            "flow_heun": "flow_heun",
+        }
+        if sampler_name and "sampling_sampler" not in flat:
+            flat["sampling_sampler"] = sampler_aliases.get(sampler_name, sampler_name)
+        if sampler_name and "eval_sampler" not in flat:
+            flat["eval_sampler"] = sampler_aliases.get(sampler_name, sampler_name)
+
+    sampling_section = data.get("sampling")
+    if isinstance(sampling_section, dict):
+        if "guidance_scale" in sampling_section and "sampling_cfg_scale" not in flat:
+            flat["sampling_cfg_scale"] = sampling_section["guidance_scale"]
+        if "sampler" in sampling_section and "sampling_sampler" not in flat:
+            flat["sampling_sampler"] = str(sampling_section["sampler"])
+
+
     return flat
 
 

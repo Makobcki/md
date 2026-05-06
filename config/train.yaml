@@ -26,10 +26,10 @@ out_dir: ./runs/mmdit_base
 eval_prompts_file: ./data/eval_prompts/mmdit_core.txt
 
 model:
-  hidden_dim: 576
-  depth: 8
-  num_heads: 9
-  mlp_ratio: 3.0
+  hidden_dim: 1024
+  depth: 24
+  num_heads: 16
+  mlp_ratio: 4.0
 
   qk_norm: true
   rms_norm: true
@@ -37,8 +37,8 @@ model:
   adaln_zero: true
   pos_embed: rope_2d
 
-  double_stream_blocks: 6
-  single_stream_blocks: 2
+  double_stream_blocks: 16
+  single_stream_blocks: 8
 
   dropout: 0.05
   attn_dropout: 0.0

@@ -10,6 +10,7 @@ from config.train import TrainConfig
 from diffusion.utils import EMA, load_ckpt
 from diffusion.vae import VAEWrapper
 from model.mmdit import MMDiTConfig, MMDiTFlowModel
+from model.registry import build_model
 from model.text.pretrained import FrozenTextEncoderBundle
 from model.text.conditioning import TextConditioning
 from model.text.cache import TextCache
@@ -204,7 +205,7 @@ def build_all(
     if str(cfg.get("mode", "latent")) != "latent":
         raise RuntimeError("MMDiT RF sampling requires latent mode.")
 
-    model = MMDiTFlowModel(MMDiTConfig.from_dict(cfg))
+    model = build_model(cfg)
     model.load_state_dict(ck["model"], strict=True)
     if use_ema and "ema" in ck and isinstance(ck["ema"], dict):
         ema = EMA(model)
