@@ -4,8 +4,15 @@ import { api, absoluteFileUrl, absoluteDownloadUrl } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 import LineChart from "../components/LineChart.jsx";
 import StatusPill from "../components/StatusPill.jsx";
+import useRunLogStream from "../hooks/useRunLogStream.js";
 import { formatDate, formatRunId, formatRunType, parseRunDate } from "../utils/formatters.js";
 
+const MAX_LOG_LINES = 10000;
+
+const appendCappedLine = (prev, line) => {
+  const next = [...prev, line];
+  return next.length <= MAX_LOG_LINES ? next : next.slice(-MAX_LOG_LINES);
+};
 
 export default function RunDetails() {
   const { runId } = useParams();
@@ -25,10 +32,6 @@ export default function RunDetails() {
         const cfg = await api.getRunConfig(runId);
         setConfig(cfg.content);
       }
-      const outLog = await api.getRunLog(runId, "stdout");
-      const errLog = await api.getRunLog(runId, "stderr");
-      setStdout(outLog.content.split("\n").filter(Boolean));
-      setStderr(errLog.content.split("\n").filter(Boolean));
       const metricsData = await api.getRunMetrics(runId);
       setMetrics(metricsData.items || []);
       const artifactData = await api.listArtifacts({ runId });
@@ -38,6 +41,23 @@ export default function RunDetails() {
     };
     load();
   }, [runId]);
+
+  useEffect(() => {
+    setStdout([]);
+    setStderr([]);
+  }, [runId]);
+
+  useRunLogStream(runId, {
+    backlog: 2000,
+    onLog: (payload) => {
+      if (payload.stream === "stdout") {
+        setStdout((prev) => appendCappedLine(prev, payload.line));
+      } else if (payload.stream === "stderr") {
+        setStderr((prev) => appendCappedLine(prev, payload.line));
+      }
+    },
+    onError: (err) => console.warn("failed to stream logs", err),
+  });
 
   if (!run) {
     return <div className="card">Loading...</div>;

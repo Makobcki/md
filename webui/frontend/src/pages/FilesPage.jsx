@@ -3,6 +3,8 @@ import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 import StatusPill from "../components/StatusPill.jsx";
+import useLogBuffer from "../hooks/useLogBuffer.js";
+import useRunLogStream from "../hooks/useRunLogStream.js";
 import { formatDate, formatRunType, parseRunDate } from "../utils/formatters.js";
 
 const parseLogLine = (line) => {
@@ -23,13 +25,15 @@ const parseLogLine = (line) => {
 export default function FilesPage() {
   const [runs, setRuns] = useState([]);
   const [selectedRunId, setSelectedRunId] = useState("");
-  const [stdout, setStdout] = useState([]);
-  const [stderr, setStderr] = useState([]);
   const [level, setLevel] = useState("all");
   const [query, setQuery] = useState("");
   const [timeStart, setTimeStart] = useState("");
   const [timeEnd, setTimeEnd] = useState("");
   const [error, setError] = useState("");
+  const logKey = selectedRunId ? `files:logs:${selectedRunId}` : "files:logs:idle";
+  const { lines: logLines, appendLines, replaceLines } = useLogBuffer(logKey, {
+    maxLines: 10000,
+  });
 
   useEffect(() => {
     const load = async () => {
@@ -49,27 +53,17 @@ export default function FilesPage() {
   }, [selectedRunId]);
 
   useEffect(() => {
-    if (!selectedRunId) return;
-    const loadLogs = async () => {
-      try {
-        const [outLog, errLog] = await Promise.all([
-          api.getRunLog(selectedRunId, "stdout", { raw: true }),
-          api.getRunLog(selectedRunId, "stderr", { raw: true }),
-        ]);
-        setStdout(outLog.content.split("\n").filter(Boolean).map((line) => `[stdout] ${line}`));
-        setStderr(errLog.content.split("\n").filter(Boolean).map((line) => `[stderr] ${line}`));
-      } catch (err) {
-        setError(err.message);
-      }
-    };
-    loadLogs();
-    const timer = setInterval(loadLogs, 1000);
-    return () => clearInterval(timer);
-  }, [selectedRunId]);
+    if (selectedRunId) replaceLines([]);
+  }, [selectedRunId, replaceLines]);
+
+  useRunLogStream(selectedRunId, {
+    backlog: 5000,
+    onLog: (payload) => appendLines(`[${payload.stream}] ${payload.line}`),
+    onError: (err) => setError(err.message),
+  });
 
   const filteredLines = useMemo(() => {
-    const source = [...stdout, ...stderr];
-    const parsed = source.map(parseLogLine);
+    const parsed = logLines.map(parseLogLine);
     return parsed
       .filter((item) => (level === "all" ? true : item.level === level))
       .filter((item) => (query ? item.raw.toLowerCase().includes(query.toLowerCase()) : true))
@@ -83,7 +77,7 @@ export default function FilesPage() {
         return true;
       })
       .map((item) => item.raw);
-  }, [stdout, stderr, level, query, timeStart, timeEnd]);
+  }, [logLines, level, query, timeStart, timeEnd]);
 
   return (
     <div className="page">
