@@ -1,0 +1,16 @@
+preset kind="data" name="latent_cache_1024" version=1 {
+  image_size 1024
+  latent_cache true
+  latent_cache_dir ".cache/latents_1024"
+  latent_cache_index "index.jsonl"
+  text_cache true
+  text_cache_dir ".cache/text"
+
+  data {
+    image_dir "images"
+    meta_dir ""
+    tags_dir ""
+    caption_field "caption"
+    require_512 false
+  }
+}

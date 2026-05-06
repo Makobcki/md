@@ -1,0 +1,24 @@
+config target="sample" version=2 {
+  use "presets/model/mmdit_576.kdl"
+  use "presets/sampler/rf_euler.kdl"
+
+  model {
+    checkpoint "checkpoints/model.safetensors"
+  }
+
+  sampling {
+    steps 30
+    guidance_scale 4.5
+    seed 42
+    n 1
+  }
+
+  prompt {
+    text ""
+    negative ""
+  }
+
+  output {
+    dir "outputs/sample"
+  }
+}

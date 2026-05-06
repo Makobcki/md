@@ -1,0 +1,10 @@
+preset kind="sampler" name="rf_heun" version=1 {
+  sampler {
+    name "flow_heun"
+  }
+
+  sampling {
+    sampler "flow_heun"
+    shift 3.0
+  }
+}

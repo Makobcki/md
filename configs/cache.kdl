@@ -1,0 +1,21 @@
+config target="cache" version=2 {
+  use "presets/model/mmdit_576.kdl"
+  use "presets/data/latent_cache_576.kdl"
+  use "presets/training/bf16_adamw.kdl"
+
+  data {
+    dataset_path "data/train"
+  }
+
+  cache {
+    latent_cache true
+    text_cache true
+    strict true
+    validate_on_start true
+    auto_prepare true
+  }
+
+  output {
+    dir "runs/cache"
+  }
+}

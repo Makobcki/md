@@ -1,0 +1,25 @@
+preset kind="model" name="mmdit_576" version=1 {
+  model {
+    family "mmdit"
+    variant "576"
+
+    architecture {
+      image_size 576
+      latent_channels 16
+      patch_size 2
+      hidden_size 1152
+      depth 24
+      num_heads 16
+      double_stream_blocks 16
+      single_stream_blocks 8
+    }
+
+    diffusion {
+      objective "rectified_flow"
+      prediction_type "velocity"
+    }
+  }
+
+  image_size 576
+  latent_downsample_factor 8
+}

@@ -1,0 +1,9 @@
+preset kind="webui" name="production" version=1 {
+  webui {
+    host "0.0.0.0"
+    port 7860
+    auto_open false
+    reload false
+    frontend true
+  }
+}

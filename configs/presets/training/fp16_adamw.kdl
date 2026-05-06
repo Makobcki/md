@@ -1,0 +1,17 @@
+preset kind="training" name="fp16_adamw" version=1 {
+  training {
+    optimizer {
+      name "adamw"
+      lr 0.0001
+      weight_decay 0.0001
+    }
+
+    precision {
+      amp true
+      dtype "fp16"
+      tf32 true
+    }
+  }
+
+  latent_dtype "fp16"
+}

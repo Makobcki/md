@@ -1,0 +1,17 @@
+config target="eval" version=2 {
+  use "presets/model/mmdit_576.kdl"
+  use "presets/sampler/rf_heun.kdl"
+
+  model {
+    checkpoint null
+  }
+
+  eval {
+    prompt_root "data/eval_prompts"
+    out_dir "runs/eval"
+    seed 42
+    steps 28
+    cfg 4.5
+    n_per_prompt 1
+  }
+}

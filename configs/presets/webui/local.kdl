@@ -1,0 +1,9 @@
+preset kind="webui" name="local" version=1 {
+  webui {
+    host "127.0.0.1"
+    port 7860
+    auto_open true
+    reload false
+    frontend true
+  }
+}

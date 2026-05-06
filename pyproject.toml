@@ -66,6 +66,7 @@ md-prepare-text-cache = "scripts.prepare_text_cache:main"
 md-prepare-training-cache = "scripts.prepare_training_cache:main"
 md-eval = "train.eval_cli:main"
 md-cache-validate = "scripts.validate_cache:main"
+md-config-resolve = "config.cli:main"
 md-lint = "scripts.lint:main"
 
 [tool.setuptools]

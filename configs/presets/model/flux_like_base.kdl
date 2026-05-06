@@ -1,0 +1,25 @@
+preset kind="model" name="flux_like_base" version=1 {
+  model {
+    family "flux_like"
+    variant "base"
+
+    architecture {
+      image_size 1024
+      latent_channels 16
+      patch_size 2
+      hidden_size 1536
+      depth 28
+      num_heads 24
+      double_stream_blocks 18
+      single_stream_blocks 10
+    }
+
+    diffusion {
+      objective "rectified_flow"
+      prediction_type "velocity"
+    }
+  }
+
+  image_size 1024
+  latent_downsample_factor 8
+}

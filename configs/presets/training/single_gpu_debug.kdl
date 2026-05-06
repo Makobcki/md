@@ -1,0 +1,15 @@
+preset kind="training" name="single_gpu_debug" version=1 {
+  training {
+    batch_size 1
+    grad_accum_steps 1
+    max_steps 20
+    num_workers 0
+    persistent_workers false
+    save_every 10
+    log_every 1
+  }
+
+  debug {
+    dataset_limit 8
+  }
+}
