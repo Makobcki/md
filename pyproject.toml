@@ -118,8 +118,15 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN", "D2", "D3", "D4"]
+ignore = ["E501", "ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/smoke_mmdit_rf.py" = ["E402"]
+"tests/**/*.py" = ["ANN", "E402"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.lint.isort]
 known-first-party = [
