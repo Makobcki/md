@@ -3,7 +3,6 @@
 .git/
 .pytest_cache/
 webui/frontend/node_modules/
-webui/frontend/dist/
 data/dataset/
 data/*.py
 data_loader/raw/

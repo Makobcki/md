@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterator
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request, Response
 
 from webui.backend.job_manager import RunRecord
 
@@ -209,11 +209,20 @@ def test_log_backlog_formats_json_events(app_module: object, tmp_path: Path) -> 
     ]
 
 
+def _request(scheme: str = "http") -> Request:
+    return Request({"type": "http", "scheme": scheme, "server": ("testserver", 80), "path": "/", "headers": []})
+
+
 def test_websocket_requires_token(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeWebSocket:
-        def __init__(self, token: str | None = None, authorization: str | None = None) -> None:
-            self.query_params = {"token": token} if token is not None else {}
+        def __init__(
+            self,
+            authorization: str | None = None,
+            auth_cookie: str | None = None,
+        ) -> None:
+            self.query_params = {}
             self.headers = {"authorization": authorization} if authorization is not None else {}
+            self.cookies = {"webui_auth": auth_cookie} if auth_cookie is not None else {}
             self.closed_code = None
 
         async def close(self, code: int) -> None:
@@ -225,9 +234,71 @@ def test_websocket_requires_token(app_module: object, monkeypatch: pytest.Monkey
     assert asyncio.run(app_module._require_ws_token(rejected)) is False
     assert rejected.closed_code == 1008
 
-    accepted = _FakeWebSocket(token="secret")
+    accepted = _FakeWebSocket(authorization="Bearer secret")
     assert asyncio.run(app_module._require_ws_token(accepted)) is True
     assert accepted.closed_code is None
+
+    cookie = app_module._auth_cookie_value()
+    accepted_cookie = _FakeWebSocket(auth_cookie=cookie)
+    assert asyncio.run(app_module._require_ws_token(accepted_cookie)) is True
+    assert accepted_cookie.closed_code is None
+
+
+def test_http_auth_accepts_header_or_cookie(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
+    cookie = app_module._auth_cookie_value()
+
+    app_module._require_token(authorization="Bearer secret", auth_cookie=None)
+    app_module._require_token(authorization=None, auth_cookie=cookie)
+
+    with pytest.raises(HTTPException) as exc:
+        app_module._require_token(authorization=None, auth_cookie="wrong")
+
+    assert exc.value.status_code == 401
+
+
+def test_auth_token_normalizes_bearer_prefix(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_AUTH_TOKEN", "Bearer secret")
+
+    assert app_module._token_is_valid("secret")
+    assert app_module._token_is_valid("Bearer secret")
+    assert app_module.get_auth_status(authorization="Bearer secret")["authenticated"] is True
+
+
+def test_auth_login_sets_cookie_session(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
+    response = Response()
+
+    payload = app_module.login(app_module.AuthLoginRequest(token="secret"), response, _request())
+    cookie = response.headers["set-cookie"].split("webui_auth=", 1)[1].split(";", 1)[0]
+
+    assert payload["authenticated"] is True
+    assert app_module._auth_cookie_is_valid(cookie)
+    app_module._require_token(authorization=None, auth_cookie=cookie)
+    assert app_module.get_auth_status(auth_cookie=cookie)["authenticated"] is True
+
+
+def test_auth_cookie_has_server_side_expiry(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
+    monkeypatch.setattr(app_module, "_AUTH_COOKIE_MAX_AGE", -1)
+
+    assert app_module._auth_cookie_is_valid(app_module._auth_cookie_value()) is False
+
+
+def test_auth_login_rejects_bad_token(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
+
+    with pytest.raises(HTTPException) as exc:
+        app_module.login(app_module.AuthLoginRequest(token="wrong"), Response(), _request())
+
+    assert exc.value.status_code == 401
+
+
+def test_wildcard_cors_is_rejected(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_CORS_ORIGINS", "*")
+
+    with pytest.raises(RuntimeError, match="not allowed"):
+        app_module._cors_allowed_origins()
 
 
 def test_artifacts_endpoint_returns_backend_urls(app_module: object) -> None:
