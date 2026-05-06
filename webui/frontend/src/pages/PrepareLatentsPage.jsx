@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api, wsUrl } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 import useLogBuffer from "../hooks/useLogBuffer.js";
+import useRunLogStream from "../hooks/useRunLogStream.js";
 import ArgField from "../components/ArgField.jsx";
 import StatusPill from "../components/StatusPill.jsx";
 import { isMetricEvent, mergeMetricEvents } from "../utils/metrics.js";
@@ -77,42 +78,14 @@ export default function PrepareLatentsPage() {
   }, []);
 
   useEffect(() => {
-    if (!runId) return;
-    let cancelled = false;
-    const loadLogs = async () => {
-      try {
-        const [stdout, stderr] = await Promise.all([
-          api.getRunLog(runId, "stdout"),
-          api.getRunLog(runId, "stderr"),
-        ]);
-        if (cancelled) return;
-        replaceLines([
-          ...stdout.content.split("\n").filter(Boolean).map((line) => `[stdout] ${line}`),
-          ...stderr.content.split("\n").filter(Boolean).map((line) => `[stderr] ${line}`),
-        ]);
-      } catch (err) {
-        console.warn("failed to load log tail", err);
-      }
-    };
-    loadLogs();
-    const timer = setInterval(loadLogs, 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    if (runId) replaceLines([]);
   }, [runId, replaceLines]);
 
-  useEffect(() => {
-    if (!runId) return;
-    const ws = new WebSocket(wsUrl(`/ws/logs/${runId}?backlog=0`));
-    ws.onmessage = (event) => {
-      const payload = JSON.parse(event.data);
-      if (payload.type === "log") {
-        appendLines(`[${payload.stream}] ${payload.line}`);
-      }
-    };
-    return () => ws.close();
-  }, [runId, appendLines]);
+  useRunLogStream(runId, {
+    backlog: 2000,
+    onLog: (payload) => appendLines(`[${payload.stream}] ${payload.line}`),
+    onError: (err) => console.warn("failed to stream logs", err),
+  });
 
   useEffect(() => {
     if (!runId) return;

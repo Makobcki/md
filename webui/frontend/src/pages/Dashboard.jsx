@@ -10,7 +10,6 @@ import {
   formatRunId,
   formatRunType,
   isToday,
-  lastUsefulLogLine,
   parseRunDate,
 } from "../utils/formatters.js";
 
@@ -24,7 +23,6 @@ export default function Dashboard() {
   const [error, setError] = useState("");
   const [runFilters, setRunFilters] = useState({ failedOnly: false, todayOnly: false });
   const [sortDir, setSortDir] = useState("desc");
-  const [errorHints, setErrorHints] = useState({});
 
   useEffect(() => {
     const load = async () => {
@@ -47,32 +45,6 @@ export default function Dashboard() {
   }, []);
 
   const activeRun = status.active ? status.run : null;
-
-  useEffect(() => {
-    const failedRuns = runs.filter((run) => run.status === "failed" && !errorHints[run.run_id]);
-    if (failedRuns.length === 0) return;
-    let cancelled = false;
-    Promise.all(
-      failedRuns.slice(0, 12).map(async (run) => {
-        try {
-          const stderr = await api.getRunLog(run.run_id, "stderr");
-          const stdout = await api.getRunLog(run.run_id, "stdout");
-          return [run.run_id, lastUsefulLogLine(stderr.content) || lastUsefulLogLine(stdout.content)];
-        } catch {
-          return [run.run_id, ""];
-        }
-      })
-    ).then((items) => {
-      if (cancelled) return;
-      setErrorHints((prev) => ({
-        ...prev,
-        ...Object.fromEntries(items.filter(([, hint]) => hint)),
-      }));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [runs, errorHints]);
 
   useEffect(() => {
     if (!activeRun?.run_id) return;
@@ -270,7 +242,7 @@ export default function Dashboard() {
                   onClick={() => navigate(`/runs/${run.run_id}`)}
                 >
                   <td>
-                    <StatusPill status={run.status} title={errorHints[run.run_id] || run.status} />
+                    <StatusPill status={run.status} title={run.status} />
                   </td>
                   <td>{formatRunType(run.run_type)}</td>
                   <td title={created ? formatDate(created) : run.created_at}>
