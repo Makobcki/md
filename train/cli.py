@@ -56,9 +56,7 @@ def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
     total += _norm_params(d, rms_norm=bool(cfg.rms_norm))
     if bool(getattr(cfg, "control_adapter", False)):
         inner = max(1, int(d * float(getattr(cfg, "control_adapter_ratio", 0.25))))
-        total += (
-            _norm_params(d, rms_norm=True) + _linear_params(d, inner) + _linear_params(inner, d)
-        )
+        total += _norm_params(d, rms_norm=True) + _linear_params(d, inner) + _linear_params(inner, d)
 
     qk_norm_params = 2 * head_dim if bool(cfg.qk_norm) else 0
     norm = _norm_params(d, rms_norm=bool(cfg.rms_norm))
@@ -71,9 +69,7 @@ def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
         resampler_layer += _linear_params(d, 2 * d)
         resampler_layer += qk_norm_params
         resampler_layer += _linear_params(d, d)
-        resampler_layer += _ff_params(
-            d, float(getattr(cfg, "text_resampler_mlp_ratio", 4.0)), swiglu=bool(cfg.swiglu)
-        )
+        resampler_layer += _ff_params(d, float(getattr(cfg, "text_resampler_mlp_ratio", 4.0)), swiglu=bool(cfg.swiglu))
         total += int(getattr(cfg, "text_resampler_depth", 2)) * resampler_layer
         total += norm
 
@@ -143,62 +139,15 @@ def _apply_overrides(cfg: TrainConfig, args: argparse.Namespace) -> TrainConfig:
 def _main_impl() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="", help="Config path. Defaults to configs/train.kdl.")
-    ap.add_argument(
-        "--profile",
-        default="",
-        choices=(
-            "",
-            "smoke",
-            "overfit",
-            "dev",
-            "base",
-            "full",
-            "stage_a",
-            "stage_b",
-            "stage_c",
-            "stage_d",
-            "milestone_a",
-            "milestone_b",
-            "milestone_c",
-            "distributed_smoke",
-            "fsdp_template",
-        ),
-        help="Convenience profile; ignored when --config is set.",
-    )
     ap.add_argument("--resume", default="")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--ckpt-keep-last", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument(
-        "--print-config", action="store_true", help="Print the resolved TrainConfig and exit."
-    )
-    ap.add_argument(
-        "--set",
-        dest="set_values",
-        action="append",
-        default=[],
-        metavar="KEY=VALUE",
-        help="Override config value, e.g. --set training.batch_size=8.",
-    )
+    ap.add_argument("--print-config", action="store_true", help="Print the resolved TrainConfig and exit.")
+    ap.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE", help="Override config value, e.g. --set training.batch_size=8.")
     args = ap.parse_args()
 
-    profile_to_config = {
-        "smoke": "config/train_smoke.yaml",
-        "overfit": "config/train_overfit.yaml",
-        "dev": "config/train_dev.yaml",
-        "base": "config/train_base.yaml",
-        "full": "config/train.yaml",
-        "stage_a": "config/train_stage_a.yaml",
-        "stage_b": "config/train_stage_b.yaml",
-        "stage_c": "config/train_stage_c.yaml",
-        "stage_d": "config/train_stage_d.yaml",
-        "milestone_a": "config/train_milestone_a.yaml",
-        "milestone_b": "config/train_milestone_b.yaml",
-        "milestone_c": "config/train_milestone_c.yaml",
-        "distributed_smoke": "config/train_distributed_smoke.yaml",
-        "fsdp_template": "config/train_fsdp_template.yaml",
-    }
-    config_path = args.config or profile_to_config.get(args.profile) or None
+    config_path = args.config or None
     cfg = load_train_config(config_path, overrides=parse_cli_overrides(args.set_values))
     cfg = _apply_overrides(cfg, args)
     if args.print_config:

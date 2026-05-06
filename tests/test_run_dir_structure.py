@@ -22,10 +22,8 @@ def test_prepare_train_run_structure_creates_reproducible_layout(tmp_path: Path)
     assert paths.samples_dir.exists()
     assert paths.eval_dir.exists()
     assert (paths.run_dir / "config.yaml").exists()
-    assert (paths.run_dir / "config_resolved.yaml").exists()
     assert paths.train_log_path.exists()
     assert json.loads(paths.cache_manifest_path.read_text(encoding="utf-8"))["version"] == 1
-
 
 import torch
 
@@ -114,6 +112,3 @@ def test_training_loop_writes_new_checkpoint_layout_and_latest(tmp_path: Path) -
     assert (checkpoint_dir / "step_000001.pt").exists()
     assert (checkpoint_dir / "latest.pt").exists()
     assert (checkpoint_dir / "final.pt").exists()
-    # Compatibility filenames remain available for existing scripts.
-    assert (tmp_path / "ckpt_0000001.pt").exists()
-    assert (tmp_path / "ckpt_latest.pt").exists()

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import importlib
-from collections.abc import Iterator
 from pathlib import Path
+import importlib
+from typing import Iterator
 
 import pytest
 
@@ -11,19 +11,18 @@ from sample.api import SampleOptions
 
 @pytest.fixture()
 def app_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[object]:
-    cfg_src = Path(__file__).resolve().parents[1] / "config" / "train.yaml"
-    cfg_dst = tmp_path / "train.yaml"
+    cfg_src = Path(__file__).resolve().parents[1] / "configs" / "train.kdl"
+    cfg_dst = tmp_path / "train.kdl"
     out_dir = tmp_path / "external_out"
-    content = "\n".join(
-        f"out_dir: {out_dir}" if line.startswith("out_dir:") else line
-        for line in cfg_src.read_text(encoding="utf-8").splitlines()
+    content = cfg_src.read_text(encoding="utf-8").replace(
+        'dir "runs/train"',
+        f'dir "{out_dir}"',
     )
     cfg_dst.write_text(content, encoding="utf-8")
     monkeypatch.setenv("WEBUI_CONFIG_PATH", str(cfg_dst))
     monkeypatch.setenv("WEBUI_RUNS_DIR", str(tmp_path / "webui_runs"))
     monkeypatch.setenv("WEBUI_ALLOWED_PATHS", str(tmp_path))
     import webui.backend.app as app_module
-
     importlib.reload(app_module)
     yield app_module
 
@@ -36,20 +35,14 @@ def test_sample_options_validate_img2img_and_inpaint_require_inputs() -> None:
     with pytest.raises(RuntimeError, match="requires --init-image"):
         SampleOptions(ckpt="ckpt.pt", out="out.png", task="img2img").validate()
     with pytest.raises(RuntimeError, match="requires --mask"):
-        SampleOptions(
-            ckpt="ckpt.pt", out="out.png", task="inpaint", init_image="input.png"
-        ).validate()
-    SampleOptions(
-        ckpt="ckpt.pt", out="out.png", task="inpaint", init_image="input.png", mask="mask.png"
-    ).validate()
+        SampleOptions(ckpt="ckpt.pt", out="out.png", task="inpaint", init_image="input.png").validate()
+    SampleOptions(ckpt="ckpt.pt", out="out.png", task="inpaint", init_image="input.png", mask="mask.png").validate()
 
 
 def test_sample_options_validate_control_requires_control_image() -> None:
     with pytest.raises(RuntimeError, match="requires --control-image"):
         SampleOptions(ckpt="ckpt.pt", out="out.png", task="control").validate()
-    SampleOptions(
-        ckpt="ckpt.pt", out="out.png", task="control", control_image="control.png"
-    ).validate()
+    SampleOptions(ckpt="ckpt.pt", out="out.png", task="control", control_image="control.png").validate()
 
 
 def test_webui_sample_args_emit_cli_aliases(app_module: object, tmp_path: Path) -> None:
@@ -95,9 +88,7 @@ def test_webui_sample_args_emit_direct_api_args(app_module: object, tmp_path: Pa
     assert "control-image" not in api_args
 
 
-def test_webui_sample_manager_calls_sample_api_directly(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_webui_sample_manager_calls_sample_api_directly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from webui.backend import job_manager as jm
 
     calls = []
@@ -137,10 +128,7 @@ def test_webui_sample_manager_calls_sample_api_directly(
     assert "sample.cli" not in " ".join(run.command)
 
     deadline = __import__("time").time() + 5
-    while __import__("time").time() < deadline and manager.get_run(run.run_id).status in {
-        "queued",
-        "running",
-    }:
+    while __import__("time").time() < deadline and manager.get_run(run.run_id).status in {"queued", "running"}:
         __import__("time").sleep(0.01)
 
     finished = manager.get_run(run.run_id)

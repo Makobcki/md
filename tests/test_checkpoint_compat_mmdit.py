@@ -11,12 +11,23 @@ from train.loop_mmdit_full import _build_ckpt
 
 
 def test_mmdit_checkpoint_compatibility_detects_mismatch() -> None:
-    ckpt = {"architecture": "mmdit_rf", "cfg": {"hidden_dim": 64, "depth": 2}}
+    ckpt = {
+        "metadata": {
+            "architecture": "mmdit_rf",
+            "objective": "rectified_flow",
+            "prediction_type": "flow_velocity",
+            "model_config": {"hidden_dim": 64, "depth": 2},
+            "text_config": {},
+            "vae_config": {},
+            "flow_config": {},
+            "train_config_hash": "",
+            "dataset_hash": "",
+            "step": 0,
+        }
+    }
     validate_mmdit_checkpoint_compatibility(ckpt, {"architecture": "mmdit_rf", "hidden_dim": 64})
     with pytest.raises(RuntimeError):
-        validate_mmdit_checkpoint_compatibility(
-            ckpt, {"architecture": "mmdit_rf", "hidden_dim": 128}
-        )
+        validate_mmdit_checkpoint_compatibility(ckpt, {"architecture": "mmdit_rf", "hidden_dim": 128})
 
 
 def test_mmdit_checkpoint_uses_human_step(tmp_path) -> None:
@@ -52,18 +63,29 @@ def test_mmdit_checkpoint_uses_human_step(tmp_path) -> None:
 
 def test_mmdit_checkpoint_text_encoder_compat_ignores_cache_metadata() -> None:
     ckpt = {
-        "architecture": "mmdit_rf",
-        "objective": "rectified_flow",
-        "text_encoders": [
-            {
-                "name": "t5",
-                "model_name": "google/t5-v1_1-base",
-                "max_length": 128,
-                "trainable": False,
-                "cache": True,
-                "dtype": "bfloat16",
-            }
-        ],
+        "metadata": {
+            "architecture": "mmdit_rf",
+            "objective": "rectified_flow",
+            "prediction_type": "flow_velocity",
+            "model_config": {},
+            "text_config": {
+                "encoders": [
+                    {
+                        "name": "t5",
+                        "model_name": "google/t5-v1_1-base",
+                        "max_length": 128,
+                        "trainable": False,
+                        "cache": True,
+                        "dtype": "bfloat16",
+                    }
+                ]
+            },
+            "vae_config": {},
+            "flow_config": {},
+            "train_config_hash": "",
+            "dataset_hash": "",
+            "step": 0,
+        }
     }
     cfg = {
         "architecture": "mmdit_rf",

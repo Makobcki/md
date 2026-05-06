@@ -7,15 +7,71 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("torch")
-yaml = pytest.importorskip("yaml")
-
-import torch
 from PIL import Image
 
 from config.train import TrainConfig
 from model.text.cache import TextCache
 from scripts.prepare_text_cache import prepare_text_cache
 from scripts.prepare_training_cache import main as prepare_training_cache_main
+
+import torch
+
+
+def _write_cache_config(path: Path, root: Path) -> None:
+    path.write_text(
+        f"""
+config target="cache" version=2 {{
+  data {{
+    dataset_path "{root}"
+    image_dir "images"
+    caption_field "caption"
+    require_512 true
+    val_ratio 0.0
+    cache_dir ".cache"
+  }}
+  cache {{
+    text_cache ".cache/text"
+    latent_cache ".cache/latents"
+    dtype "bf16"
+  }}
+  text {{
+    backend "fake"
+    text_dim 6
+    pooled_dim 4
+    encoder {{
+      name "fake"
+      model_name "fake"
+      max_length 3
+    }}
+  }}
+  model {{
+    family "mmdit"
+    variant "cache-test"
+    architecture {{
+      image_size 512
+      latent_channels 4
+      patch_size 2
+      hidden_size 16
+      depth 1
+      num_heads 4
+      double_stream_blocks 1
+      single_stream_blocks 0
+      gradient_checkpointing false
+    }}
+    diffusion {{
+      objective "rectified_flow"
+      prediction_type "velocity"
+    }}
+  }}
+  training {{
+    precision {{
+      amp_dtype "bf16"
+    }}
+  }}
+}}
+""",
+        encoding="utf-8",
+    )
 
 
 def _make_dataset(root: Path, *, n: int = 3) -> None:
@@ -25,9 +81,7 @@ def _make_dataset(root: Path, *, n: int = 3) -> None:
         md5 = f"sample{idx}"
         Image.new("RGB", (512, 512), color=(idx, idx, idx)).save(root / "images" / f"{md5}.png")
         rows.append({"md5": md5, "file_name": f"images/{md5}.png", "caption": f"caption {idx}"})
-    (root / "metadata.jsonl").write_text(
-        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
-    )
+    (root / "metadata.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
 
 def _cfg(root: Path) -> TrainConfig:
@@ -62,8 +116,8 @@ def _cfg(root: Path) -> TrainConfig:
 
 
 def _write_config(root: Path) -> Path:
-    cfg_path = root / "train.yaml"
-    cfg_path.write_text(yaml.safe_dump(_cfg(root).to_dict(), sort_keys=False), encoding="utf-8")
+    cfg_path = root / "cache.kdl"
+    _write_cache_config(cfg_path, root)
     return cfg_path
 
 
@@ -105,9 +159,7 @@ def _run_prepare(monkeypatch: pytest.MonkeyPatch, cfg_path: Path, *extra: str) -
     prepare_training_cache_main()
 
 
-def test_repair_regenerates_missing_text_shard(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_repair_regenerates_missing_text_shard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _make_dataset(tmp_path, n=3)
     cfg_path = _write_config(tmp_path)
     text_root = _prepare_text(tmp_path, shard_size=2)
@@ -121,9 +173,7 @@ def test_repair_regenerates_missing_text_shard(
     assert (tmp_path / ".cache" / "training_cache_manifest.json").exists()
 
 
-def test_repair_rejects_broken_metadata_unless_force(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_repair_rejects_broken_metadata_unless_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _make_dataset(tmp_path, n=2)
     cfg_path = _write_config(tmp_path)
     text_root = _prepare_text(tmp_path, shard_size=2)
@@ -137,9 +187,7 @@ def test_repair_rejects_broken_metadata_unless_force(
     assert metadata["text_dim"] == 6
 
 
-def test_repair_rejects_stale_dataset_hash_unless_rebuild(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_repair_rejects_stale_dataset_hash_unless_rebuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _make_dataset(tmp_path, n=2)
     cfg_path = _write_config(tmp_path)
     text_root = _prepare_text(tmp_path, shard_size=2)

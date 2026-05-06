@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from config.train import TrainConfig
+from config.loader import load_train_config
 from webui.backend.argparse_reader import parse_argparse_args
 
 
@@ -13,47 +13,38 @@ def test_sample_n_uses_positive_int_validator() -> None:
     assert n_arg["type"] == "_positive_int"
 
 
-def test_train_yaml_defaults_disable_compile_and_nonfinite_grad_fail() -> None:
-    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train.yaml"))
+def test_train_kdl_defaults_disable_compile_and_nonfinite_grad_fail() -> None:
+    cfg = load_train_config()
 
     assert cfg.compile is False
     assert cfg.fail_on_nonfinite_grad is False
 
 
-def test_train_config_accepts_main_yaml() -> None:
-    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train.yaml"))
+def test_train_config_accepts_default_kdl() -> None:
+    cfg = load_train_config()
 
     assert cfg.architecture == "mmdit_rf"
     assert cfg.objective == "rectified_flow"
     assert cfg.prediction_type == "flow_velocity"
-    assert cfg.hidden_dim == 1024
+    assert cfg.hidden_dim == 1152
     assert cfg.pos_embed == "rope_2d"
     assert cfg.eval_sampler == "flow_heun"
 
 
-def test_train_config_accepts_dev_yaml() -> None:
-    cfg = TrainConfig.from_yaml(
-        str(Path(__file__).resolve().parents[1] / "config" / "train_dev.yaml")
+def test_train_config_accepts_kdl_preset_overrides() -> None:
+    cfg = load_train_config(
+        overrides={
+            "model": {"preset": "mmdit_1024"},
+            "training": {"preset": "single_gpu_debug", "batch_size": 1},
+        }
     )
 
     assert cfg.architecture == "mmdit_rf"
     assert cfg.objective == "rectified_flow"
-    assert cfg.hidden_dim == 512
-    assert cfg.depth == 8
+    assert cfg.hidden_dim == 1536
+    assert cfg.depth == 28
     assert cfg.batch_size == 1
-    assert cfg.save_every == 1000
-
-
-def test_train_config_accepts_mmdit_smoke_yaml() -> None:
-    cfg = TrainConfig.from_yaml(
-        str(Path(__file__).resolve().parents[1] / "config" / "train_smoke.yaml")
-    )
-
-    assert cfg.architecture == "mmdit_rf"
-    assert cfg.hidden_dim == 64
-    assert cfg.depth == 1
-    assert cfg.dataset_limit == 1
-    assert cfg.eval_every == 0
+    assert cfg.dataset_limit == 8
 
 
 def test_prepare_text_cache_cpu_defaults_to_fp32() -> None:

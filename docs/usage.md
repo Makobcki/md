@@ -62,25 +62,25 @@ bash scripts/check_project.sh
 Run dry-run profiles:
 
 ```bash
-python -m train.cli --profile smoke --dry-run
-python -m train.cli --profile overfit --dry-run
-python -m train.cli --profile dev --dry-run
-python -m train.cli --profile base --dry-run
+python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run --set training.preset=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run
 ```
 
 Milestone profiles:
 
 ```bash
-python -m train.cli --profile milestone_a --dry-run
-python -m train.cli --profile milestone_b --dry-run
-python -m train.cli --profile milestone_c --dry-run
+python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run --set model.preset=mmdit_576
+python -m train.cli --dry-run --set model.preset=mmdit_1024
 ```
 
 Distributed/FSDP templates:
 
 ```bash
-python -m train.cli --profile distributed_smoke --dry-run
-python -m train.cli --profile fsdp_template --dry-run
+python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run
 ```
 
 ---
@@ -166,15 +166,15 @@ export HF_TOKEN=...
 For large datasets, prepare caches explicitly:
 
 ```bash
-python -m scripts.prepare_text_cache --config config/train.yaml
-python -m scripts.prepare_latents --config config/train.yaml
-python -m scripts.validate_cache --config config/train.yaml
+python -m scripts.prepare_text_cache --config configs/train.kdl
+python -m scripts.prepare_latents --config configs/train.kdl
+python -m scripts.validate_cache --config configs/train.kdl
 ```
 
 One-command cache preparation:
 
 ```bash
-python -m scripts.prepare_training_cache --config config/train.yaml
+python -m scripts.prepare_training_cache --config configs/train.kdl
 ```
 
 More details: [`cache.md`](cache.md).
@@ -186,38 +186,38 @@ More details: [`cache.md`](cache.md).
 Smoke run:
 
 ```bash
-python -m train.cli --profile smoke
+python -m train.cli --set training.preset=single_gpu_debug
 ```
 
 Overfit run:
 
 ```bash
-python -m train.cli --profile overfit
+python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
 ```
 
 Development run:
 
 ```bash
-python -m train.cli --profile dev
+python -m train.cli --set training.preset=single_gpu_debug
 ```
 
 Base run:
 
 ```bash
-python -m train.cli --profile base
+python -m train.cli
 ```
 
 Explicit config:
 
 ```bash
-python -m train.cli --config config/train.yaml
+python -m train.cli --config configs/train.kdl
 ```
 
 Resume:
 
 ```bash
 python -m train.cli \
-  --config config/train.yaml \
+  --config configs/train.kdl \
   --resume runs/.../checkpoints/latest.pt
 ```
 

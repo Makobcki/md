@@ -7,7 +7,7 @@ Distributed training uses Accelerate.
 ## Dry-run distributed profile
 
 ```bash
-python -m train.cli --profile distributed_smoke --dry-run
+python -m train.cli --dry-run --set training.preset=single_gpu_debug
 ```
 
 ---
@@ -23,7 +23,7 @@ accelerate config
 ## Launch distributed training
 
 ```bash
-accelerate launch -m train.cli --config config/train_distributed_smoke.yaml
+accelerate launch -m train.cli --config configs/train.kdl
 ```
 
 ---
@@ -43,14 +43,14 @@ FSDP is not enabled in the default trainer.
 Template and documentation files:
 
 ```text
-config/train_fsdp_template.yaml
+configs/train.kdl
 docs/distributed_and_fsdp.md
 ```
 
 Validate FSDP template:
 
 ```bash
-python -m train.cli --profile fsdp_template --dry-run
+python -m train.cli --dry-run
 ```
 
 Use the template as a starting point only after the standard single-GPU and distributed smoke paths work.

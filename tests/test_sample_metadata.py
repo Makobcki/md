@@ -4,7 +4,7 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
-from sample.cli import _metadata_sidecar_path, _sample_metadata, _write_sample_metadata
+from sample.api import _metadata_sidecar_path, _sample_metadata, _write_sample_metadata
 
 
 def test_sample_metadata_helpers_write_reproducible_json(tmp_path: Path) -> None:
@@ -13,7 +13,7 @@ def test_sample_metadata_helpers_write_reproducible_json(tmp_path: Path) -> None
     assert sidecar == tmp_path / "sample.json"
 
     args = Namespace(
-        ckpt="./runs/mmdit_smoke/ckpt_final.pt",
+        ckpt="./runs/mmdit_smoke/checkpoints/final.pt",
         prompt="1girl, simple background",
         neg_prompt="low quality",
         steps=2,
@@ -48,16 +48,14 @@ def test_sample_metadata_helpers_write_reproducible_json(tmp_path: Path) -> None
         latent_w=64,
         checkpoint_step=123,
         checkpoint_metadata={},
-        text_encoder=Namespace(
-            metadata=lambda: {"backend": "fake", "encoders": [], "text_dim": 32, "pooled_dim": 32}
-        ),
+        text_encoder=Namespace(metadata=lambda: {"backend": "fake", "encoders": [], "text_dim": 32, "pooled_dim": 32}),
     )
     metadata = _sample_metadata(args, built, sampler="flow_heun", seed=42)
     written = _write_sample_metadata(out, metadata)
 
     assert written == sidecar
     payload = json.loads(written.read_text(encoding="utf-8"))
-    assert payload["checkpoint_path"] == "./runs/mmdit_smoke/ckpt_final.pt"
+    assert payload["checkpoint_path"] == "./runs/mmdit_smoke/checkpoints/final.pt"
     assert payload["checkpoint_step"] == 123
     assert payload["architecture"] == "mmdit_rf"
     assert payload["objective"] == "rectified_flow"
@@ -75,9 +73,4 @@ def test_sample_metadata_helpers_write_reproducible_json(tmp_path: Path) -> None
     assert payload["model_config"]["depth"] == 1
     assert payload["model_config"]["num_heads"] == 4
     assert payload["vae_config"]["pretrained"] == "./vae_sd_mse"
-    assert payload["text_encoder_config"] == {
-        "backend": "fake",
-        "encoders": [],
-        "text_dim": 32,
-        "pooled_dim": 32,
-    }
+    assert payload["text_encoder_config"] == {"backend": "fake", "encoders": [], "text_dim": 32, "pooled_dim": 32}

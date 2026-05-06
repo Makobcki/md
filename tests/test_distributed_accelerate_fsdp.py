@@ -16,13 +16,6 @@ from train.dist import DistributedContext, create_distributed_context
 from train.loop_mmdit_full import run_mmdit_training_loop
 from train.runner import dry_run
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def _load(name: str) -> TrainConfig:
-    return TrainConfig.from_yaml(str(ROOT / "config" / name))
-
-
 class _FakeNonMainAccelerator:
     is_main_process = False
     process_index = 1
@@ -107,8 +100,30 @@ def _tiny_batch() -> TrainBatch:
     return TrainBatch(x0=torch.randn(1, 4, 8, 8), text=text)
 
 
-def test_distributed_smoke_profile_dry_runs_and_maps_nested_config() -> None:
-    cfg = _load("train_distributed_smoke.yaml")
+def test_distributed_smoke_config_dry_runs_and_maps_nested_config() -> None:
+    cfg = TrainConfig.from_dict(
+        {
+            "distributed": {
+                "backend": "accelerate",
+                "save_on_rank0_only": True,
+                "metrics_aggregation": True,
+            },
+            "fsdp": {"enabled": False},
+            "model": {
+                "architecture": {
+                    "hidden_size": 64,
+                    "depth": 1,
+                    "num_heads": 4,
+                    "double_stream_blocks": 1,
+                    "single_stream_blocks": 0,
+                }
+            },
+            "training": {"batch_size": 1, "grad_accum_steps": 1, "max_steps": 4},
+            "eval_every": 0,
+            "eval_steps": 2,
+            "sampling": {"steps": 2, "cfg_scale": 1.0},
+        }
+    )
     assert cfg.distributed_backend == "accelerate"
     assert cfg.save_on_rank0_only is True
     assert cfg.distributed_metrics_aggregation is True
@@ -118,8 +133,20 @@ def test_distributed_smoke_profile_dry_runs_and_maps_nested_config() -> None:
     assert "architecture=mmdit_rf" in out.getvalue()
 
 
-def test_fsdp_template_is_present_but_disabled_by_default() -> None:
-    cfg = _load("train_fsdp_template.yaml")
+def test_fsdp_template_settings_are_valid_when_disabled() -> None:
+    cfg = TrainConfig.from_dict(
+        {
+            "distributed": {"backend": "accelerate", "metrics_aggregation": True},
+            "fsdp": {
+                "enabled": False,
+                "min_hidden_dim": 1024,
+                "min_num_params": 500000000,
+                "sharding_strategy": "full_shard",
+                "auto_wrap_policy": "transformer_block",
+                "cpu_offload": False,
+            },
+        }
+    )
     assert cfg.distributed_backend == "accelerate"
     assert cfg.fsdp_enabled is False
     assert cfg.fsdp_min_hidden_dim >= 1024
@@ -145,9 +172,7 @@ def test_create_distributed_context_none_is_noop() -> None:
 
 
 def test_distributed_context_uses_fake_accelerator_rank_state() -> None:
-    ctx = DistributedContext(
-        backend="accelerate", accelerator=_FakeNonMainAccelerator(), device=torch.device("cpu")
-    )
+    ctx = DistributedContext(backend="accelerate", accelerator=_FakeNonMainAccelerator(), device=torch.device("cpu"))
     assert ctx.is_main_process is False
     assert ctx.rank == 1
     assert ctx.world_size == 2
@@ -160,9 +185,7 @@ def test_training_loop_rank_gates_checkpoint_and_event_writes(tmp_path: Path) ->
     model = _tiny_model()
     batch = _tiny_batch()
     checkpoint_dir = tmp_path / "checkpoints"
-    dist = DistributedContext(
-        backend="accelerate", accelerator=_FakeNonMainAccelerator(), device=torch.device("cpu")
-    )
+    dist = DistributedContext(backend="accelerate", accelerator=_FakeNonMainAccelerator(), device=torch.device("cpu"))
 
     run_mmdit_training_loop(
         cfg=cfg,
@@ -185,7 +208,6 @@ def test_training_loop_rank_gates_checkpoint_and_event_writes(tmp_path: Path) ->
 
     assert not (tmp_path / "events.jsonl").exists()
     assert not (checkpoint_dir / "latest.pt").exists()
-    assert not (tmp_path / "ckpt_latest.pt").exists()
 
 
 def test_training_loop_main_rank_still_writes_outputs(tmp_path: Path) -> None:
@@ -193,9 +215,7 @@ def test_training_loop_main_rank_still_writes_outputs(tmp_path: Path) -> None:
     model = _tiny_model()
     batch = _tiny_batch()
     checkpoint_dir = tmp_path / "checkpoints"
-    dist = DistributedContext(
-        backend="accelerate", accelerator=_FakeMainAccelerator(), device=torch.device("cpu")
-    )
+    dist = DistributedContext(backend="accelerate", accelerator=_FakeMainAccelerator(), device=torch.device("cpu"))
 
     run_mmdit_training_loop(
         cfg=cfg,
@@ -218,4 +238,3 @@ def test_training_loop_main_rank_still_writes_outputs(tmp_path: Path) -> None:
 
     assert (tmp_path / "events.jsonl").exists()
     assert (checkpoint_dir / "latest.pt").exists()
-    assert (tmp_path / "ckpt_latest.pt").exists()

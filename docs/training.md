@@ -11,16 +11,16 @@ Before starting real training, validate profiles and configs.
 Profiles:
 
 ```bash
-python -m train.cli --profile smoke --dry-run
-python -m train.cli --profile overfit --dry-run
-python -m train.cli --profile dev --dry-run
-python -m train.cli --profile base --dry-run
+python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run --set training.preset=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run
 ```
 
 Explicit config:
 
 ```bash
-python -m train.cli --config config/train.yaml --dry-run
+python -m train.cli --config configs/train.kdl --dry-run
 ```
 
 ---
@@ -30,33 +30,33 @@ python -m train.cli --config config/train.yaml --dry-run
 Smoke run:
 
 ```bash
-python -m train.cli --profile smoke
+python -m train.cli --set training.preset=single_gpu_debug
 ```
 
 Overfit run:
 
 ```bash
-python -m train.cli --profile overfit
+python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
 ```
 
 Development run:
 
 ```bash
-python -m train.cli --profile dev
+python -m train.cli --set training.preset=single_gpu_debug
 ```
 
 Base run:
 
 ```bash
-python -m train.cli --profile base
+python -m train.cli
 ```
 
 Milestone runs:
 
 ```bash
-python -m train.cli --profile milestone_a
-python -m train.cli --profile milestone_b
-python -m train.cli --profile milestone_c
+python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set model.preset=mmdit_576
+python -m train.cli --set model.preset=mmdit_1024
 ```
 
 ---
@@ -64,7 +64,7 @@ python -m train.cli --profile milestone_c
 ## Explicit config
 
 ```bash
-python -m train.cli --config config/train.yaml
+python -m train.cli --config configs/train.kdl
 ```
 
 ---
@@ -73,7 +73,7 @@ python -m train.cli --config config/train.yaml
 
 ```bash
 python -m train.cli \
-  --config config/train.yaml \
+  --config configs/train.kdl \
   --resume runs/.../checkpoints/latest.pt
 ```
 
@@ -89,8 +89,6 @@ Training writes outputs to a run directory:
 runs/
   2026-05-03_001_dev768/
     config.yaml
-    config_resolved.yaml
-    config_snapshot.yaml
     train.log
     events.jsonl
     checkpoints/
@@ -158,15 +156,15 @@ Example validation event:
 Commands:
 
 ```bash
-python -m train.cli --config config/train.yaml --dry-run
+python -m train.cli --config configs/train.kdl --dry-run
 
-python -m scripts.prepare_text_cache --config config/train.yaml
-python -m scripts.prepare_latents --config config/train.yaml
-python -m scripts.validate_cache --config config/train.yaml
+python -m scripts.prepare_text_cache --config configs/train.kdl
+python -m scripts.prepare_latents --config configs/train.kdl
+python -m scripts.validate_cache --config configs/train.kdl
 
-python -m train.cli --profile smoke
-python -m train.cli --profile overfit
-python -m train.cli --profile dev
+python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --set training.preset=single_gpu_debug
 ```
 
 ---
@@ -191,7 +189,7 @@ model:
 Use a smaller profile first:
 
 ```bash
-python -m train.cli --profile smoke
-python -m train.cli --profile overfit
-python -m train.cli --profile dev
+python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --set training.preset=single_gpu_debug
 ```

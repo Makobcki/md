@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterator
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 from fastapi import HTTPException
@@ -10,13 +10,12 @@ from fastapi import HTTPException
 
 @pytest.fixture()
 def app_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[object]:
-    cfg_src = Path(__file__).resolve().parents[1] / "config" / "train.yaml"
-    cfg_dst = tmp_path / "train.yaml"
+    cfg_src = Path(__file__).resolve().parents[1] / "configs" / "train.kdl"
+    cfg_dst = tmp_path / "train.kdl"
     cfg_dst.write_text(cfg_src.read_text(encoding="utf-8"), encoding="utf-8")
     monkeypatch.setenv("WEBUI_CONFIG_PATH", str(cfg_dst))
     monkeypatch.setenv("WEBUI_RUNS_DIR", str(tmp_path / "webui_runs"))
     import webui.backend.app as app_module
-
     importlib.reload(app_module)
     yield app_module
 
@@ -39,9 +38,7 @@ def test_update_config_validation(app_module: object) -> None:
 
 def test_eval_steps_must_be_positive(app_module: object) -> None:
     current = app_module.get_train_config()["content"]
-    invalid = "\n".join(
-        "eval_steps: 0" if line.startswith("eval_steps:") else line for line in current.splitlines()
-    )
+    invalid = current.rstrip()[:-1] + "\n  eval_steps 0\n}\n"
 
     with pytest.raises(HTTPException) as exc:
         app_module.update_train_config({"content": invalid})

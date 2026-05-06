@@ -7,7 +7,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from data_loader import DataConfig, build_or_load_index, indexing
+from data_loader import DataConfig, build_or_load_index
+from data_loader import indexing
 
 
 def test_index_cache_with_stale_image_paths_is_rebuilt(tmp_path: Path) -> None:
@@ -39,9 +40,7 @@ def test_index_cache_with_stale_image_paths_is_rebuilt(tmp_path: Path) -> None:
     cache_path.write_text(
         "\n".join(
             [
-                json.dumps(
-                    {"type": "meta", "schema_version": 3, "config": indexing._cache_metadata(cfg)}
-                ),
+                json.dumps({"type": "meta", "schema_version": 3, "config": indexing._cache_metadata(cfg)}),
                 json.dumps({"split": "train", "entry": stale_entry}),
                 json.dumps({"type": "done", "schema_version": 3}),
             ]
@@ -123,9 +122,9 @@ def test_frozen_text_encoder_bundle_uses_t5_encoder_model(monkeypatch) -> None:
 def test_mmdit_smoke_config_indexes_metadata_jsonl(tmp_path: Path) -> None:
     from dataclasses import replace
 
-    from config.train import TrainConfig
+    from config.loader import load_train_config
 
-    cfg = TrainConfig.from_yaml("config/train_smoke.yaml")
+    cfg = load_train_config(overrides={"training": {"preset": "single_gpu_debug"}})
     root = tmp_path / "pixso_512"
     image_dir = root / cfg.image_dir
     image_dir.mkdir(parents=True)

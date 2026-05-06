@@ -5,8 +5,6 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from config.formats.kdl_loader import KdlParseError, loads_kdl
 from config.loader import load_train_config
 from config.train import TrainConfig
@@ -28,15 +26,12 @@ def read_config_text(repo_root: Path) -> str:
 
 def _parse_config_mapping(text: str) -> dict[str, Any]:
     stripped = text.lstrip()
-    if stripped.startswith(("config ", "preset ")):
-        data = loads_kdl(text, source="<webui-config-editor>")
-        return {key: value for key, value in data.items() if not key.startswith("__")}
-    data = yaml.safe_load(text)
-    if data is None:
+    if not stripped:
         return {}
-    if not isinstance(data, dict):
-        raise ValueError("config must be a YAML mapping or a KDL config document")
-    return data
+    if not stripped.startswith(("config ", "preset ")):
+        raise ValueError("config editor accepts KDL documents only")
+    data = loads_kdl(text, source="<webui-config-editor>")
+    return {key: value for key, value in data.items() if not key.startswith("__")}
 
 
 def parse_config_text(text: str) -> TrainConfig:

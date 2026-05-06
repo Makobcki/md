@@ -45,48 +45,57 @@ def _install_fast_smoke_runtime(monkeypatch: pytest.MonkeyPatch) -> dict[str, li
     return {"sampler_calls": sampler_calls}
 
 
-def test_smoke_skips_eval_prompts_when_eval_disabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cfg_path = tmp_path / "smoke.yaml"
+def test_smoke_skips_eval_prompts_when_eval_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_path = tmp_path / "smoke.kdl"
     cfg_path.write_text(
         f"""
-architecture: mmdit_rf
-mode: latent
-image_size: 64
-latent_channels: 4
-latent_downsample_factor: 8
-latent_patch_size: 2
-objective: rectified_flow
-prediction_type: flow_velocity
-out_dir: {tmp_path / "run"}
-eval_prompts_file: {tmp_path / "missing_prompts.txt"}
-model:
-  hidden_dim: 32
-  depth: 1
-  num_heads: 4
-  mlp_ratio: 2.0
-  qk_norm: true
-  rms_norm: true
-  swiglu: true
-  adaln_zero: true
-  pos_embed: sincos_2d
-  double_stream_blocks: 1
-  single_stream_blocks: 0
-  gradient_checkpointing: false
-text:
-  enabled: true
-  text_dim: 32
-  pooled_dim: 32
-training:
-  eval_every: 0
-  amp: false
-flow:
-  timestep_sampling: uniform
-sampling:
-  steps: 1
-  cfg_scale: 1.0
-  shift: 1.0
+config target="train" version=2 {{
+  model {{
+    family "mmdit"
+    variant "smoke"
+    architecture {{
+      image_size 64
+      latent_channels 4
+      patch_size 2
+      hidden_size 32
+      depth 1
+      num_heads 4
+      mlp_ratio 2.0
+      qk_norm true
+      rms_norm true
+      swiglu true
+      adaln_zero true
+      double_stream_blocks 1
+      single_stream_blocks 0
+      gradient_checkpointing false
+    }}
+    diffusion {{
+      objective "rectified_flow"
+      prediction_type "velocity"
+    }}
+  }}
+  text {{
+    enabled true
+    text_dim 32
+    pooled_dim 32
+  }}
+  training {{
+    eval_every 0
+    amp false
+  }}
+  flow {{
+    timestep_sampling "uniform"
+  }}
+  sampling {{
+    steps 1
+    cfg_scale 1.0
+    shift 1.0
+  }}
+  output {{
+    dir "{tmp_path / "run"}"
+  }}
+  eval_prompts_file "{tmp_path / "missing_prompts.txt"}"
+}}
 """,
         encoding="utf-8",
     )
@@ -120,48 +129,57 @@ sampling:
     assert runtime["sampler_calls"]
 
 
-def test_synthetic_smoke_does_not_touch_dataset_or_caches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cfg_path = tmp_path / "synthetic.yaml"
+def test_synthetic_smoke_does_not_touch_dataset_or_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg_path = tmp_path / "synthetic.kdl"
     cfg_path.write_text(
         f"""
-architecture: mmdit_rf
-mode: latent
-image_size: 64
-latent_channels: 4
-latent_downsample_factor: 8
-latent_patch_size: 2
-objective: rectified_flow
-prediction_type: flow_velocity
-out_dir: {tmp_path / "run"}
-eval_prompts_file: {tmp_path / "missing_prompts.txt"}
-model:
-  hidden_dim: 32
-  depth: 1
-  num_heads: 4
-  mlp_ratio: 2.0
-  qk_norm: true
-  rms_norm: true
-  swiglu: true
-  adaln_zero: true
-  pos_embed: sincos_2d
-  double_stream_blocks: 1
-  single_stream_blocks: 0
-  gradient_checkpointing: false
-text:
-  enabled: true
-  text_dim: 32
-  pooled_dim: 32
-training:
-  eval_every: 500
-  amp: false
-flow:
-  timestep_sampling: uniform
-sampling:
-  steps: 99
-  cfg_scale: 1.0
-  shift: 1.0
+config target="train" version=2 {{
+  model {{
+    family "mmdit"
+    variant "smoke"
+    architecture {{
+      image_size 64
+      latent_channels 4
+      patch_size 2
+      hidden_size 32
+      depth 1
+      num_heads 4
+      mlp_ratio 2.0
+      qk_norm true
+      rms_norm true
+      swiglu true
+      adaln_zero true
+      double_stream_blocks 1
+      single_stream_blocks 0
+      gradient_checkpointing false
+    }}
+    diffusion {{
+      objective "rectified_flow"
+      prediction_type "velocity"
+    }}
+  }}
+  text {{
+    enabled true
+    text_dim 32
+    pooled_dim 32
+  }}
+  training {{
+    eval_every 500
+    amp false
+  }}
+  flow {{
+    timestep_sampling "uniform"
+  }}
+  sampling {{
+    steps 99
+    cfg_scale 1.0
+    shift 1.0
+  }}
+  output {{
+    dir "{tmp_path / "run"}"
+  }}
+  eval_prompts_file "{tmp_path / "missing_prompts.txt"}"
+}}
 """,
         encoding="utf-8",
     )

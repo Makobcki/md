@@ -48,13 +48,13 @@ md-lint --fix
 Run a smoke dry-run:
 
 ```bash
-python -m train.cli --profile smoke --dry-run
+python -m train.cli --dry-run --set training.preset=single_gpu_debug
 ```
 
 Run smoke training:
 
 ```bash
-python -m train.cli --profile smoke
+python -m train.cli --set training.preset=single_gpu_debug
 ```
 
 Generate a sample:
@@ -336,15 +336,15 @@ Supported conditioning modes:
 Commands:
 
 ```bash
-python -m train.cli --config config/train.yaml --dry-run
+python -m train.cli --config configs/train.kdl --dry-run
 
-python -m scripts.prepare_text_cache --config config/train.yaml
-python -m scripts.prepare_latents --config config/train.yaml
-python -m scripts.validate_cache --config config/train.yaml
+python -m scripts.prepare_text_cache --config configs/train.kdl
+python -m scripts.prepare_latents --config configs/train.kdl
+python -m scripts.validate_cache --config configs/train.kdl
 
-python -m train.cli --profile smoke
-python -m train.cli --profile overfit
-python -m train.cli --profile dev
+python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --set training.preset=single_gpu_debug
 ```
 
 ---
@@ -383,8 +383,6 @@ Generated outputs are usually written to:
 runs/
   <timestamp>_<profile>/
     config.yaml
-    config_resolved.yaml
-    config_snapshot.yaml
     train.log
     events.jsonl
     checkpoints/

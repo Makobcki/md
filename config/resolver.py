@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from .formats.kdl_loader import load_kdl
-from .formats.yaml_loader import load_yaml
-
 PRESET_ALIAS_KINDS = ("model", "sampler", "training", "data", "webui")
 
 
@@ -24,6 +22,7 @@ class ResolvedConfig:
 
 def recursive_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge dictionaries recursively with scalar/list replacement semantics."""
+
     result = deepcopy(base)
     for key, value in override.items():
         if (
@@ -39,18 +38,12 @@ def recursive_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str,
 
 
 def load_raw_config(path: str | Path) -> dict[str, Any]:
-    """Load KDL or YAML config based on file extension."""
+    """Load a KDL config document."""
+
     file_path = Path(path)
-    suffix = file_path.suffix.lower()
-    if suffix == ".kdl":
-        return load_kdl(file_path)
-    if suffix in {".yaml", ".yml"}:
-        data = load_yaml(file_path)
-        data.setdefault("__kind__", "config")
-        data.setdefault("__meta__", {})
-        data.setdefault("__source__", str(file_path))
-        return data
-    raise RuntimeError(f"Unsupported config extension for {file_path}; expected .kdl/.yaml/.yml")
+    if file_path.suffix.lower() != ".kdl":
+        raise RuntimeError(f"Unsupported config extension for {file_path}; expected .kdl")
+    return load_kdl(file_path)
 
 
 def _strip_internal(data: dict[str, Any]) -> dict[str, Any]:
@@ -126,16 +119,15 @@ def _alias_presets(
     return presets
 
 
-def _validate_target(
-    data: dict[str, Any], expected_target: str | None, source: Path
-) -> tuple[str, int]:
+def _validate_target(data: dict[str, Any], expected_target: str | None, source: Path) -> tuple[str, int]:
     meta = data.get("__meta__") if isinstance(data.get("__meta__"), dict) else {}
     target = str(meta.get("target", data.get("target", "")) or "")
     version = int(meta.get("version", data.get("version", 1)) or 1)
     if not target:
-        # YAML compatibility path: if the caller provided a target, treat it as
-        # the target while older YAML files remain readable.
-        target = str(expected_target or "train")
+        raise RuntimeError(
+            f"Missing config target metadata in {source}; expected root like "
+            'config target="train" version=2.'
+        )
     if expected_target and target != expected_target:
         raise RuntimeError(
             f"Config target mismatch for {source}: expected target={expected_target!r}, got {target!r}"
@@ -150,11 +142,12 @@ def resolve_config(
     expected_target: str | None = None,
 ) -> ResolvedConfig:
     """Resolve a target config, presets, preset aliases, and CLI overrides."""
+
     config_path = Path(path).resolve()
     raw = load_raw_config(config_path)
-    target, version = _validate_target(raw, expected_target, config_path)
     if str(raw.get("__kind__", "config")) == "preset":
         raise RuntimeError(f"Preset files cannot be used as launch configs: {config_path}")
+    target, version = _validate_target(raw, expected_target, config_path)
 
     data, sources, _ = _resolve_file(config_path, stack=(), allow_preset_root=False)
     overrides = deepcopy(overrides or {})

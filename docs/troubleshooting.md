@@ -12,7 +12,7 @@ Rebuild text cache:
 
 ```bash
 rm -rf data/dataset/.cache/text
-python -m scripts.prepare_text_cache --config config/train.yaml
+python -m scripts.prepare_text_cache --config configs/train.kdl
 ```
 
 ---
@@ -25,7 +25,7 @@ Rebuild text cache:
 
 ```bash
 rm -rf data/dataset/.cache/text
-python -m scripts.prepare_text_cache --config config/train.yaml
+python -m scripts.prepare_text_cache --config configs/train.kdl
 ```
 
 ---
@@ -47,13 +47,13 @@ Rebuild latent cache:
 
 ```bash
 rm -rf data/dataset/.cache/latents
-python -m scripts.prepare_latents --config config/train.yaml
+python -m scripts.prepare_latents --config configs/train.kdl
 ```
 
 Or overwrite:
 
 ```bash
-python -m scripts.prepare_latents --config config/train.yaml --overwrite
+python -m scripts.prepare_latents --config configs/train.kdl --overwrite
 ```
 
 ---
@@ -75,7 +75,7 @@ Then rebuild latent cache:
 
 ```bash
 rm -rf data/dataset/.cache/latents
-python -m scripts.prepare_latents --config config/train.yaml
+python -m scripts.prepare_latents --config configs/train.kdl
 ```
 
 ---
@@ -95,8 +95,6 @@ Relevant files:
 ```text
 runs/.../
   config.yaml
-  config_resolved.yaml
-  config_snapshot.yaml
 ```
 
 ---
@@ -173,9 +171,9 @@ model:
 Also use a smaller profile first:
 
 ```bash
-python -m train.cli --profile smoke
-python -m train.cli --profile overfit
-python -m train.cli --profile dev
+python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --set training.preset=single_gpu_debug
 ```
 
 ---
@@ -211,8 +209,8 @@ Then rerun the command that downloads or loads the model.
 Before expensive runs:
 
 ```bash
-python -m train.cli --config config/train.yaml --dry-run
-python -m scripts.validate_cache --config config/train.yaml
+python -m train.cli --config configs/train.kdl --dry-run
+python -m scripts.validate_cache --config configs/train.kdl
 ```
 
 This catches most dataset/cache/config mismatches before training starts.

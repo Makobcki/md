@@ -6,7 +6,6 @@ from .loader import (
     load_sample_config,
     load_train_config,
     load_webui_config,
-    load_yaml,
     parse_cli_overrides,
     resolve_target_config,
 )
@@ -21,7 +20,6 @@ __all__ = [
     "load_sample_config",
     "load_train_config",
     "load_webui_config",
-    "load_yaml",
     "parse_cli_overrides",
     "resolve_target_config",
 ]

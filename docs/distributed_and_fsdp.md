@@ -6,7 +6,7 @@ The trainer has a rank-aware distributed path through `accelerate`:
 
 ```bash
 accelerate config
-accelerate launch -m train.cli --config config/train_distributed_smoke.yaml
+accelerate launch -m train.cli --config configs/train.kdl
 ```
 
 The current implementation keeps single-process behavior unchanged. With
@@ -36,7 +36,7 @@ Supported behavior:
 
 FSDP is intentionally **not enabled by default** and the trainer rejects
 `fsdp.enabled: true` for now. The config path is reserved in
-`config/train_fsdp_template.yaml` so the future large-model path has a stable
+`configs/train.kdl` so the future large-model path has a stable
 shape without silently enabling untested behavior.
 
 Only consider enabling FSDP later when at least one of these is true:

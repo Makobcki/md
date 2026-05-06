@@ -1,6 +1,6 @@
 # Configuration
 
-This project uses YAML configs for architecture, dataset, cache, training and sampling settings.
+This project uses KDL target configs plus reusable presets for architecture, dataset, cache, training and sampling settings.
 
 ---
 
@@ -160,13 +160,13 @@ For CUDA OOM, reduce `batch_size`, increase `grad_accum_steps`, and enable `grad
 Dry-run a config:
 
 ```bash
-python -m train.cli --config config/train.yaml --dry-run
+python -m train.cli --config configs/train.kdl --dry-run
 ```
 
 Dry-run a profile:
 
 ```bash
-python -m train.cli --profile smoke --dry-run
+python -m train.cli --dry-run --set training.preset=single_gpu_debug
 ```
 
 ---
@@ -179,8 +179,6 @@ Each run writes resolved config files to the run directory:
 runs/
   <run_name>/
     config.yaml
-    config_resolved.yaml
-    config_snapshot.yaml
 ```
 
 Use these files to reproduce a previous run.

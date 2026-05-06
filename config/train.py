@@ -3,72 +3,31 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
+
 TEXT_ENCODER_PRESETS: dict[str, dict[str, Any]] = {
     "clip_l_t5_base": {
         "text_dim": 1024,
         "pooled_dim": 1024,
         "encoders": [
-            {
-                "name": "clip_l",
-                "model_name": "openai/clip-vit-large-patch14",
-                "max_length": 77,
-                "trainable": False,
-                "cache": True,
-            },
-            {
-                "name": "t5_base",
-                "model_name": "google/t5-v1_1-base",
-                "max_length": 256,
-                "trainable": False,
-                "cache": True,
-            },
+            {"name": "clip_l", "model_name": "openai/clip-vit-large-patch14", "max_length": 77, "trainable": False, "cache": True},
+            {"name": "t5_base", "model_name": "google/t5-v1_1-base", "max_length": 256, "trainable": False, "cache": True},
         ],
     },
     "clip_l_t5_large": {
         "text_dim": 1024,
         "pooled_dim": 1024,
         "encoders": [
-            {
-                "name": "clip_l",
-                "model_name": "openai/clip-vit-large-patch14",
-                "max_length": 77,
-                "trainable": False,
-                "cache": True,
-            },
-            {
-                "name": "t5_large",
-                "model_name": "google/t5-v1_1-large",
-                "max_length": 256,
-                "trainable": False,
-                "cache": True,
-            },
+            {"name": "clip_l", "model_name": "openai/clip-vit-large-patch14", "max_length": 77, "trainable": False, "cache": True},
+            {"name": "t5_large", "model_name": "google/t5-v1_1-large", "max_length": 256, "trainable": False, "cache": True},
         ],
     },
     "clip_l_clip_bigG_t5_large": {
         "text_dim": 1024,
         "pooled_dim": 1024,
         "encoders": [
-            {
-                "name": "clip_l",
-                "model_name": "openai/clip-vit-large-patch14",
-                "max_length": 77,
-                "trainable": False,
-                "cache": True,
-            },
-            {
-                "name": "clip_bigG",
-                "model_name": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
-                "max_length": 77,
-                "trainable": False,
-                "cache": True,
-            },
-            {
-                "name": "t5_large",
-                "model_name": "google/t5-v1_1-large",
-                "max_length": 256,
-                "trainable": False,
-                "cache": True,
-            },
+            {"name": "clip_l", "model_name": "openai/clip-vit-large-patch14", "max_length": 77, "trainable": False, "cache": True},
+            {"name": "clip_bigG", "model_name": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", "max_length": 77, "trainable": False, "cache": True},
+            {"name": "t5_large", "model_name": "google/t5-v1_1-large", "max_length": 256, "trainable": False, "cache": True},
         ],
     },
 }
@@ -94,7 +53,7 @@ def _apply_text_preset(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
-    """Accept the current nested YAML shape while exposing a flat TrainConfig."""
+    """Map resolved nested KDL sections into the runtime ``TrainConfig`` fields."""
     data = _apply_text_preset(data)
     flat = dict(data)
 
@@ -214,6 +173,14 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
                     flat[dst] = hierarchical[src]
     text = data.get("text")
     if isinstance(text, dict):
+        text = dict(text)
+        encoder_nodes = text.get("encoder")
+        if "encoders" not in text and encoder_nodes:
+            if isinstance(encoder_nodes, list):
+                text["encoders"] = [item for item in encoder_nodes if isinstance(item, dict)]
+            elif isinstance(encoder_nodes, dict):
+                text["encoders"] = [encoder_nodes]
+        flat["text"] = text
         for key in ("text_dim", "pooled_dim"):
             if key in text and key not in flat:
                 flat[key] = text[key]
@@ -315,8 +282,9 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
                 flat[dst] = hierarchical[src]
 
     loss = data.get("loss")
-    if isinstance(loss, dict) and "x0_aux_weight" in loss and "x0_aux_weight" not in flat:
-        flat["x0_aux_weight"] = loss["x0_aux_weight"]
+    if isinstance(loss, dict):
+        if "x0_aux_weight" in loss and "x0_aux_weight" not in flat:
+            flat["x0_aux_weight"] = loss["x0_aux_weight"]
 
     flow = data.get("flow")
     if isinstance(flow, dict):
@@ -428,10 +396,10 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(debug, dict) and "dataset_limit" in debug and "dataset_limit" not in flat:
         flat["dataset_limit"] = debug["dataset_limit"]
 
-    # KDL v2 compatibility mappings. New target configs are nested and describe
-    # semantics (model.family/model.variant) rather than a concrete Python
-    # class. The trainer still consumes the legacy flat TrainConfig, so this
-    # layer maps stable nested names into existing fields.
+
+    # Target configs describe model semantics (model.family/model.variant)
+    # rather than a concrete Python class. The trainer still consumes the flat
+    # runtime TrainConfig, so this layer maps stable nested names into fields.
     output = data.get("output")
     if isinstance(output, dict) and "dir" in output and "out_dir" not in flat:
         flat["out_dir"] = output["dir"]
@@ -563,6 +531,7 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
             flat["sampling_cfg_scale"] = sampling_section["guidance_scale"]
         if "sampler" in sampling_section and "sampling_sampler" not in flat:
             flat["sampling_sampler"] = str(sampling_section["sampler"])
+
 
     return flat
 
@@ -735,16 +704,7 @@ class TrainConfig:
     inpaint_loss_unmask_weight: float = 0.1
 
     control_enabled: bool = False
-    control_types: dict[str, bool] = field(
-        default_factory=lambda: {
-            "image": True,
-            "canny": True,
-            "depth": False,
-            "pose": False,
-            "lineart": False,
-            "normal": False,
-        }
-    )
+    control_types: dict[str, bool] = field(default_factory=lambda: {"image": True, "canny": True, "depth": False, "pose": False, "lineart": False, "normal": False})
     control_strength: float = 1.0
     control_num_streams: int = 1
 
@@ -813,9 +773,7 @@ class TrainConfig:
         if self.latent_cache_sharded and not self.latent_cache:
             raise ValueError("latent_cache_sharded requires latent_cache=true.")
         if bool(self.aspect_buckets_enabled) and bool(self.latent_cache_sharded):
-            raise ValueError(
-                "aspect_buckets_enabled currently requires cache.sharded=false because buckets produce variable latent shapes."
-            )
+            raise ValueError("aspect_buckets_enabled currently requires cache.sharded=false because buckets produce variable latent shapes.")
         if self.latent_shard_cache_size <= 0:
             raise ValueError("latent_shard_cache_size must be positive.")
         if self.text_shard_cache_size <= 0:
@@ -824,13 +782,9 @@ class TrainConfig:
             raise ValueError("text_cache=false is only allowed when allow_on_the_fly_text=true.")
         if not isinstance(self.text_field, str):
             raise ValueError("text_field must be a string.")
-        if not isinstance(self.text_fields, list) or any(
-            not isinstance(x, str) for x in self.text_fields
-        ):
+        if not isinstance(self.text_fields, list) or any(not isinstance(x, str) for x in self.text_fields):
             raise ValueError("text_fields must be a list of strings.")
-        if self.text_field.strip() and self.text_field.strip() not in [
-            x.strip() for x in self.text_fields if x.strip()
-        ]:
+        if self.text_field.strip() and self.text_field.strip() not in [x.strip() for x in self.text_fields if x.strip()]:
             # text_field is valid as a shortcut and will be prepended to text_fields at read time.
             pass
 
@@ -879,17 +833,11 @@ class TrainConfig:
         if self.fsdp_min_num_params <= 0:
             raise ValueError("fsdp_min_num_params must be positive.")
         if self.fsdp_sharding_strategy not in {"full_shard", "shard_grad_op", "hybrid_shard"}:
-            raise ValueError(
-                "fsdp_sharding_strategy must be one of: full_shard, shard_grad_op, hybrid_shard."
-            )
+            raise ValueError("fsdp_sharding_strategy must be one of: full_shard, shard_grad_op, hybrid_shard.")
         if self.fsdp_auto_wrap_policy not in {"transformer_block", "size_based", "none"}:
-            raise ValueError(
-                "fsdp_auto_wrap_policy must be one of: transformer_block, size_based, none."
-            )
+            raise ValueError("fsdp_auto_wrap_policy must be one of: transformer_block, size_based, none.")
         if bool(self.fsdp_enabled):
-            raise ValueError(
-                "fsdp.enabled=true is reserved for future large-model runs and is not supported by this trainer yet."
-            )
+            raise ValueError("fsdp.enabled=true is reserved for future large-model runs and is not supported by this trainer yet.")
         if self.lr_scheduler not in {"cosine", "linear"}:
             raise ValueError("lr_scheduler must be 'cosine' or 'linear'.")
         if self.optimizer not in {"adamw", "adamw_8bit"}:
@@ -912,9 +860,7 @@ class TrainConfig:
         if self.pos_embed not in {"rope_2d", "sincos_2d", "none"}:
             raise ValueError("pos_embed must be one of: rope_2d, sincos_2d, none.")
         if self.pos_embed == "sincos_2d" and int(self.hidden_dim) % 4 != 0:
-            raise ValueError(
-                "sincos_2d requires hidden_dim divisible by 4; set hidden_dim to a multiple of 4 or use pos_embed=rope_2d/none."
-            )
+            raise ValueError("sincos_2d requires hidden_dim divisible by 4; set hidden_dim to a multiple of 4 or use pos_embed=rope_2d/none.")
         if self.rope_scaling not in {"none", "linear", "ntk"}:
             raise ValueError("rope_scaling must be one of: none, linear, ntk.")
         rope_base_grid = tuple(self.rope_base_grid_hw)
@@ -928,9 +874,7 @@ class TrainConfig:
         allowed_tasks = {"txt2img", "img2img", "inpaint", "control"}
         unknown_tasks = sorted(set(self.dataset_tasks) - allowed_tasks)
         if unknown_tasks:
-            raise ValueError(
-                "dataset_tasks contains unsupported task(s): " + ", ".join(unknown_tasks)
-            )
+            raise ValueError("dataset_tasks contains unsupported task(s): " + ", ".join(unknown_tasks))
         if any(float(v) < 0 for v in self.dataset_tasks.values()):
             raise ValueError("dataset_tasks weights must be non-negative.")
         if sum(float(v) for v in self.dataset_tasks.values()) <= 0:
@@ -940,30 +884,17 @@ class TrainConfig:
             ("inpaint", float(self.inpaint_strength_min), float(self.inpaint_strength_max)),
         ):
             if lo < 0.0 or hi > 1.0 or lo > hi:
-                raise ValueError(
-                    f"{name} strength range must satisfy 0 <= strength_min <= strength_max <= 1."
-                )
+                raise ValueError(f"{name} strength range must satisfy 0 <= strength_min <= strength_max <= 1.")
         if float(self.dataset_tasks.get("control", 0.0)) > 0 and not bool(self.control_enabled):
             raise ValueError("dataset_tasks.control is reserved unless control.enabled=true.")
         if self.control_strength < 0:
             raise ValueError("control_strength must be non-negative.")
         if self.control_num_streams <= 0:
             raise ValueError("control_num_streams must be positive.")
-        allowed_control_types = {
-            "none",
-            "latent_identity",
-            "image",
-            "canny",
-            "depth",
-            "pose",
-            "lineart",
-            "normal",
-        }
+        allowed_control_types = {"none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"}
         unknown_control_types = sorted(set(self.control_types) - allowed_control_types)
         if unknown_control_types:
-            raise ValueError(
-                "control_types contains unsupported type(s): " + ", ".join(unknown_control_types)
-            )
+            raise ValueError("control_types contains unsupported type(s): " + ", ".join(unknown_control_types))
         if any(not isinstance(v, bool) for v in self.control_types.values()):
             raise ValueError("control_types values must be boolean.")
         if bool(self.control_enabled) and not any(bool(v) for v in self.control_types.values()):
@@ -986,32 +917,17 @@ class TrainConfig:
                 if base_latent_side % patch_size != 0:
                     raise ValueError(f"base latent size must be divisible by {name}={patch_size}.")
 
-        if not (
-            0.0 <= float(self.inpaint_mask_min_area) <= float(self.inpaint_mask_max_area) <= 1.0
-        ):
+        if not (0.0 <= float(self.inpaint_mask_min_area) <= float(self.inpaint_mask_max_area) <= 1.0):
             raise ValueError("inpaint mask area must satisfy 0 <= min <= max <= 1.")
-        allowed_mask_modes = {
-            "rectangle",
-            "brush",
-            "center_rectangle",
-            "full",
-            "small",
-            "large",
-            "random_blocks",
-        }
+        allowed_mask_modes = {"rectangle", "brush", "center_rectangle", "full", "small", "large", "random_blocks"}
         unknown_mask_modes = sorted(set(self.inpaint_mask_modes) - allowed_mask_modes)
         if unknown_mask_modes:
-            raise ValueError(
-                "inpaint_mask_modes contains unsupported mode(s): " + ", ".join(unknown_mask_modes)
-            )
+            raise ValueError("inpaint_mask_modes contains unsupported mode(s): " + ", ".join(unknown_mask_modes))
         if any(float(v) < 0 for v in self.inpaint_mask_modes.values()):
             raise ValueError("inpaint_mask_modes weights must be non-negative.")
         if sum(float(v) for v in self.inpaint_mask_modes.values()) <= 0:
             raise ValueError("inpaint_mask_modes must include at least one positive weight.")
-        if (
-            float(self.inpaint_mask_modes.get("full", 0.0)) > 0
-            and float(self.inpaint_mask_max_area) < 1.0
-        ):
+        if float(self.inpaint_mask_modes.get("full", 0.0)) > 0 and float(self.inpaint_mask_max_area) < 1.0:
             raise ValueError("inpaint_mask_modes.full requires inpaint_mask_max_area=1.0.")
         if self.inpaint_loss_mask_weight < 0 or self.inpaint_loss_unmask_weight < 0:
             raise ValueError("inpaint loss weights must be non-negative.")
@@ -1026,16 +942,8 @@ class TrainConfig:
                 raise ValueError(f"{name} must be in [0, 1].")
         if not (0.0 <= self.flow_train_t_min <= self.flow_train_t_max <= 1.0):
             raise ValueError("flow_train_t_min/max must satisfy 0 <= min <= max <= 1.")
-        if self.flow_timestep_sampling not in {
-            "uniform",
-            "logit_normal",
-            "shifted_logit_normal",
-            "cosmap",
-            "cosmap_like",
-        }:
-            raise ValueError(
-                "flow_timestep_sampling must be one of: uniform, logit_normal, shifted_logit_normal, cosmap, cosmap_like."
-            )
+        if self.flow_timestep_sampling not in {"uniform", "logit_normal", "shifted_logit_normal", "cosmap", "cosmap_like"}:
+            raise ValueError("flow_timestep_sampling must be one of: uniform, logit_normal, shifted_logit_normal, cosmap, cosmap_like.")
         if self.flow_timestep_shift <= 0:
             raise ValueError("flow_timestep_shift must be positive.")
         if self.flow_loss_weighting not in {"none"}:
@@ -1073,18 +981,11 @@ class TrainConfig:
         if self.curriculum_steps < 0:
             raise ValueError("curriculum_steps must be non-negative.")
         if self.curriculum_solo_weight <= 0 or self.curriculum_non_solo_weight <= 0:
-            raise ValueError(
-                "curriculum_solo_weight and curriculum_non_solo_weight must be positive."
-            )
+            raise ValueError("curriculum_solo_weight and curriculum_non_solo_weight must be positive.")
+
 
     @classmethod
-    def from_yaml(cls, path: str) -> TrainConfig:
-        from .loader import load_yaml
-
-        return cls.from_dict(load_yaml(path))
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TrainConfig:
+    def from_dict(cls, data: dict[str, Any]) -> "TrainConfig":
         data = _flatten_nested_config(data)
         fields = {f.name for f in cls.__dataclass_fields__.values()}
         kwargs = {k: v for k, v in data.items() if k in fields}

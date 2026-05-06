@@ -24,7 +24,7 @@ data/dataset/
 Prepare text cache:
 
 ```bash
-python -m scripts.prepare_text_cache --config config/train.yaml
+python -m scripts.prepare_text_cache --config configs/train.kdl
 ```
 
 Expected output:
@@ -43,7 +43,7 @@ data/dataset/.cache/text/
 Validate text cache:
 
 ```bash
-python -m scripts.validate_cache --config config/train.yaml --text
+python -m scripts.validate_cache --config configs/train.kdl --text
 ```
 
 ---
@@ -53,7 +53,7 @@ python -m scripts.validate_cache --config config/train.yaml --text
 Prepare latent cache:
 
 ```bash
-python -m scripts.prepare_latents --config config/train.yaml
+python -m scripts.prepare_latents --config configs/train.kdl
 ```
 
 Expected output:
@@ -70,7 +70,7 @@ data/dataset/.cache/latents/
 Validate latent cache:
 
 ```bash
-python -m scripts.validate_cache --config config/train.yaml --latents
+python -m scripts.validate_cache --config configs/train.kdl --latents
 ```
 
 ---
@@ -80,15 +80,15 @@ python -m scripts.validate_cache --config config/train.yaml --latents
 Prepare text cache, latent cache and manifest in one command:
 
 ```bash
-python -m scripts.prepare_training_cache --config config/train.yaml
+python -m scripts.prepare_training_cache --config configs/train.kdl
 ```
 
 Repair modes:
 
 ```bash
-python -m scripts.prepare_training_cache --config config/train.yaml --repair
-python -m scripts.prepare_training_cache --config config/train.yaml --repair --force
-python -m scripts.prepare_training_cache --config config/train.yaml --repair --rebuild
+python -m scripts.prepare_training_cache --config configs/train.kdl --repair
+python -m scripts.prepare_training_cache --config configs/train.kdl --repair --force
+python -m scripts.prepare_training_cache --config configs/train.kdl --repair --rebuild
 ```
 
 ---
@@ -105,9 +105,9 @@ cache:
 For large datasets, explicit manual cache preparation is recommended:
 
 ```bash
-python -m scripts.prepare_text_cache --config config/train.yaml
-python -m scripts.prepare_latents --config config/train.yaml
-python -m scripts.validate_cache --config config/train.yaml
+python -m scripts.prepare_text_cache --config configs/train.kdl
+python -m scripts.prepare_latents --config configs/train.kdl
+python -m scripts.validate_cache --config configs/train.kdl
 ```
 
 ---
@@ -128,7 +128,7 @@ Command:
 
 ```bash
 rm -rf data/dataset/.cache/text
-python -m scripts.prepare_text_cache --config config/train.yaml
+python -m scripts.prepare_text_cache --config configs/train.kdl
 ```
 
 ---
@@ -149,13 +149,13 @@ Command:
 
 ```bash
 rm -rf data/dataset/.cache/latents
-python -m scripts.prepare_latents --config config/train.yaml
+python -m scripts.prepare_latents --config configs/train.kdl
 ```
 
 Alternative overwrite mode:
 
 ```bash
-python -m scripts.prepare_latents --config config/train.yaml --overwrite
+python -m scripts.prepare_latents --config configs/train.kdl --overwrite
 ```
 
 ---
@@ -163,7 +163,7 @@ python -m scripts.prepare_latents --config config/train.yaml --overwrite
 ## Validate all caches
 
 ```bash
-python -m scripts.validate_cache --config config/train.yaml
+python -m scripts.validate_cache --config configs/train.kdl
 ```
 
 Use validation before long training runs.
