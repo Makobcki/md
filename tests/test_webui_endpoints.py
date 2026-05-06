@@ -274,6 +274,31 @@ def test_auth_token_normalizes_bearer_prefix(app_module: object, monkeypatch: py
     assert app_module.get_auth_status(authorization="Bearer secret")["authenticated"] is True
 
 
+def test_auth_token_accepts_non_ascii(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_AUTH_TOKEN", "секрет")
+
+    assert app_module._token_is_valid("секрет")
+    assert app_module._token_is_valid("Bearer секрет")
+    assert app_module._token_is_valid("другой") is False
+
+
+def test_auth_login_accepts_non_ascii_token(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_AUTH_TOKEN", "секрет")
+    response = Response()
+
+    payload = app_module.login(app_module.AuthLoginRequest(token="секрет"), response, _request())
+    cookie = response.headers["set-cookie"].split("webui_auth=", 1)[1].split(";", 1)[0]
+
+    assert payload["authenticated"] is True
+    assert app_module._auth_cookie_is_valid(cookie)
+
+
+def test_non_ascii_cookie_signature_is_rejected_without_type_error(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
+
+    assert app_module._auth_cookie_is_valid("body.подпись") is False
+
+
 def test_auth_login_sets_cookie_session(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
     response = Response()

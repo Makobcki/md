@@ -133,11 +133,15 @@ def _normalize_auth_token(value: str | None) -> str:
     return token
 
 
+def _constant_time_equal(left: str, right: str) -> bool:
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
 def _token_is_valid(value: str | None) -> bool:
     expected = _normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN"))
     if not expected:
         return True
-    return hmac.compare_digest(_normalize_auth_token(value), expected)
+    return _constant_time_equal(_normalize_auth_token(value), expected)
 
 
 def _auth_cookie_value(expected: str | None = None) -> str:
@@ -162,7 +166,7 @@ def _auth_cookie_is_valid(value: str | None) -> bool:
     try:
         body, sig = str(value).split(".", 1)
         expected_sig = _b64url(hmac.new(_FILE_TOKEN_SECRET, body.encode("ascii"), hashlib.sha256).digest())
-        if not hmac.compare_digest(sig, expected_sig):
+        if not _constant_time_equal(sig, expected_sig):
             return False
         payload = json.loads(_b64url_decode(body).decode("utf-8"))
         digest = payload.get("digest") if isinstance(payload, dict) else None
@@ -170,7 +174,7 @@ def _auth_cookie_is_valid(value: str | None) -> bool:
         if not isinstance(expires_at, int) or expires_at < int(time.time()):
             return False
         expected_digest = hashlib.sha256(expected.encode("utf-8")).hexdigest()
-        return isinstance(digest, str) and hmac.compare_digest(digest, expected_digest)
+        return isinstance(digest, str) and _constant_time_equal(digest, expected_digest)
     except Exception:
         return False
 
