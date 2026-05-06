@@ -76,6 +76,10 @@ _FILE_TOKEN_SECRET = (
 _AUTH_COOKIE_NAME = "webui_auth"
 _AUTH_COOKIE_MAX_AGE = int(os.environ.get("WEBUI_AUTH_COOKIE_MAX_AGE", str(30 * 24 * 60 * 60)))
 _AUTH_COOKIE_SECURE = os.environ.get("WEBUI_AUTH_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+_AUTH_MAX_FAILED_ATTEMPTS = int(os.environ.get("WEBUI_AUTH_MAX_FAILED_ATTEMPTS", "5"))
+_AUTH_LOCKOUT_SECONDS = int(os.environ.get("WEBUI_AUTH_LOCKOUT_SECONDS", "300"))
+_AUTH_FAILURE_WINDOW_SECONDS = int(os.environ.get("WEBUI_AUTH_FAILURE_WINDOW_SECONDS", "300"))
+_auth_failures: dict[str, dict[str, float | int]] = {}
 ws_manager = WSManager()
 job_manager = JobManager(ROOT_DIR, ws_manager, RUNS_DIR)
 
@@ -186,6 +190,46 @@ def _set_auth_cookie(response: Response, request: Request | None = None) -> None
 
 def _clear_auth_cookie(response: Response) -> None:
     response.delete_cookie(_AUTH_COOKIE_NAME, path="/", samesite="lax")
+
+
+def _auth_client_key(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    if forwarded_for:
+        return forwarded_for
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _auth_retry_after(key: str, now: float | None = None) -> int:
+    current = time.time() if now is None else now
+    record = _auth_failures.get(key)
+    if not record:
+        return 0
+    locked_until = float(record.get("locked_until", 0.0))
+    if locked_until <= current:
+        return 0
+    return max(1, int(locked_until - current))
+
+
+def _record_auth_failure(key: str, now: float | None = None) -> int:
+    current = time.time() if now is None else now
+    record = _auth_failures.get(key)
+    if not record or current - float(record.get("first_failed_at", 0.0)) > _AUTH_FAILURE_WINDOW_SECONDS:
+        record = {"count": 0, "first_failed_at": current, "locked_until": 0.0}
+        _auth_failures[key] = record
+    record["count"] = int(record.get("count", 0)) + 1
+    if int(record["count"]) >= _AUTH_MAX_FAILED_ATTEMPTS:
+        record["locked_until"] = current + _AUTH_LOCKOUT_SECONDS
+        return _AUTH_LOCKOUT_SECONDS
+    return 0
+
+
+def _clear_auth_failures(key: str) -> None:
+    _auth_failures.pop(key, None)
 
 
 def _require_token(
@@ -690,9 +734,26 @@ def get_auth_status(
 @app.post("/api/auth/login")
 def login(payload: AuthLoginRequest, response: Response, request: Request) -> Dict[str, Any]:
     required = bool(_normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN")))
+    client_key = _auth_client_key(request)
+    retry_after = _auth_retry_after(client_key)
+    if required and retry_after > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"too many failed auth attempts; retry after {retry_after} seconds",
+            headers={"Retry-After": str(retry_after)},
+        )
     if required and not _token_is_valid(payload.token):
         _clear_auth_cookie(response)
-        raise HTTPException(status_code=401, detail="invalid auth token")
+        retry_after = _record_auth_failure(client_key)
+        headers = {"Retry-After": str(retry_after)} if retry_after > 0 else None
+        status_code = 429 if retry_after > 0 else 401
+        detail = (
+            f"too many failed auth attempts; retry after {retry_after} seconds"
+            if retry_after > 0
+            else "invalid auth token"
+        )
+        raise HTTPException(status_code=status_code, detail=detail, headers=headers)
+    _clear_auth_failures(client_key)
     if required:
         _set_auth_cookie(response, request)
     else:
