@@ -37,6 +37,7 @@ web = [
 ]
 dev = [
     "pytest>=8.2.0",
+    "ruff>=0.8.0",
 ]
 all = [
     "diffusers",
@@ -47,6 +48,7 @@ all = [
     "protobuf>=4.25",
     "pydantic>=2.6.1",
     "pytest>=8.2.0",
+    "ruff>=0.8.0",
     "safetensors>=0.4.5",
     "sentencepiece>=0.2.0",
     "torch",
@@ -64,6 +66,7 @@ md-prepare-text-cache = "scripts.prepare_text_cache:main"
 md-prepare-training-cache = "scripts.prepare_training_cache:main"
 md-eval = "train.eval_cli:main"
 md-cache-validate = "scripts.validate_cache:main"
+md-lint = "scripts.lint:main"
 
 [tool.setuptools]
 py-modules = ["main"]
@@ -96,4 +99,38 @@ webui = [
     "frontend/vite.config.js",
     "frontend/src/**/*",
     "frontend/dist/**/*",
+]
+
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    "data/dataset",
+    "data_loader/raw",
+    "runs",
+    "samples",
+    "vae_sd_mse",
+    "webui/frontend/dist",
+    "webui/frontend/node_modules",
+    "webui_runs",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "config",
+    "control",
+    "data_loader",
+    "diffusion",
+    "model",
+    "sample",
+    "samplers",
+    "scripts",
+    "tg_bot",
+    "train",
+    "webui",
 ]
