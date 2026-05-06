@@ -11,6 +11,7 @@ export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
+run_checked 30 python -m scripts.lint
 python -m pytest -q
 run_checked 30 python -m train.cli --profile smoke --dry-run
 run_checked 30 python -m train.cli --profile overfit --dry-run
