@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import importlib
-from typing import Iterator
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 

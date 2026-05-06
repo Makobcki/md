@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import time
-from typing import Optional
+from pathlib import Path
 
 import torch
 from tqdm import tqdm
@@ -11,17 +10,17 @@ from config.train import TrainConfig
 from diffusion.io.events import AsyncEventBus, JsonlFileSink
 from diffusion.objectives import RectifiedFlowObjective
 from diffusion.utils import EMA, unwrap_model
+from diffusion.vae import VAEWrapper
 from model.mmdit import MMDiTFlowModel
 from model.text.conditioning import TextConditioning, TrainBatch
 from model.text.pretrained import FrozenTextEncoderBundle
-from diffusion.vae import VAEWrapper
 from train.checkpoint import _prune_checkpoints, save_ckpt
-from train.eval_mmdit import run_mmdit_eval_sampling
-from train.schedulers import _apply_lr, _compute_lr
-from train.webui import _is_webui_mode, _webui_metrics_path
-from train.metrics import loss_by_t_bins
 from train.checkpoint_mmdit import build_mmdit_checkpoint_metadata
 from train.dist import DistributedContext
+from train.eval_mmdit import run_mmdit_eval_sampling
+from train.metrics import loss_by_t_bins
+from train.schedulers import _apply_lr, _compute_lr
+from train.webui import _is_webui_mode, _webui_metrics_path
 
 
 def _assert_finite(name: str, x: torch.Tensor) -> None:
@@ -174,7 +173,7 @@ def _run_validation(
     amp_dtype: torch.dtype,
     inpaint_loss_mask_weight: float = 1.0,
     inpaint_loss_unmask_weight: float = 1.0,
-) -> tuple[Optional[float], dict[str, float]]:
+) -> tuple[float | None, dict[str, float]]:
     if dataloader is None or max_batches <= 0:
         return None, {}
     was_training = model.training
@@ -306,9 +305,9 @@ def run_mmdit_training_loop(
     checkpoint_dir: Path | None = None,
     start_step: int,
     text_metadata: dict,
-    eval_prompts: Optional[list[str]] = None,
-    eval_text_encoder: Optional[FrozenTextEncoderBundle] = None,
-    eval_vae: Optional[VAEWrapper] = None,
+    eval_prompts: list[str] | None = None,
+    eval_text_encoder: FrozenTextEncoderBundle | None = None,
+    eval_vae: VAEWrapper | None = None,
     dist: DistributedContext | None = None,
 ) -> None:
     try:

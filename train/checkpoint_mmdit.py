@@ -5,8 +5,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import torch
-
 from diffusion.io.ckpt import _torch_load
 
 _REQUIRED_METADATA_FIELDS = (

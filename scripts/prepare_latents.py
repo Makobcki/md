@@ -9,18 +9,17 @@ import threading
 import time
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
-from diffusion.io.ckpt import _torch_load
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from config.train import TrainConfig
 from data_loader import (
-    DataConfig,
     AspectBucketBatchSampler,
+    DataConfig,
     assign_bucket,
     build_or_load_index,
     latent_cache_path,
@@ -29,6 +28,7 @@ from data_loader import (
     validate_buckets,
 )
 from diffusion.events import EventBus, JsonlFileSink, StdoutJsonSink
+from diffusion.io.ckpt import _torch_load
 from diffusion.utils import build_run_metadata
 from diffusion.utils.oom import is_torch_oom_error, print_torch_oom
 from diffusion.vae import VAEWrapper
@@ -60,14 +60,14 @@ def _config_text_enabled(cfg: TrainConfig) -> bool:
     if isinstance(text_section, dict) and "enabled" in text_section:
         return bool(text_section["enabled"])
     if hasattr(cfg, "text_enabled"):
-        return bool(getattr(cfg, "text_enabled"))
+        return bool(cfg.text_enabled)
     return True
 
 
 @dataclass(frozen=True)
 class _LatentPrepareOptions:
     overwrite: bool = False
-    limit: Optional[int] = None
+    limit: int | None = None
     batch_size: int = 16
     num_workers: int = 4
     prefetch_factor: int = 2
@@ -317,9 +317,9 @@ class _LatentPrepDataset(Dataset):
         self,
         entries: list[dict],
         *,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         decode_backend: str = "auto",
-        buckets: Optional[list[Any]] = None,
+        buckets: list[Any] | None = None,
         image_size: int = 512,
     ) -> None:
         self.entries = entries[:limit] if limit is not None else entries
@@ -471,7 +471,7 @@ class _ShardWriter:
         else:
             self.index_fp = self.tmp_index_path.open("w", encoding="utf-8")
 
-    def add(self, md5: str, latent: torch.Tensor) -> Optional[tuple[Path, list[str]]]:
+    def add(self, md5: str, latent: torch.Tensor) -> tuple[Path, list[str]] | None:
         self.current_md5s.append(md5)
         self.current_latents.append(latent)
         self.current_count += 1
@@ -479,7 +479,7 @@ class _ShardWriter:
             return self.flush()
         return None
 
-    def flush(self) -> Optional[tuple[Path, list[str]]]:
+    def flush(self) -> tuple[Path, list[str]] | None:
         if self.current_count == 0:
             return None
         shard_name = f"shard_{self.shard_id:06d}.pt"
@@ -510,7 +510,7 @@ class _ShardWriter:
         self.tmp_index_path.replace(self.index_path)
 
 
-def _main_impl(argv: Optional[list[str]] = None, cfg_override: TrainConfig | None = None) -> None:
+def _main_impl(argv: list[str] | None = None, cfg_override: TrainConfig | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="", help="Config path. Defaults to configs/cache.kdl.")
     ap.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
@@ -717,7 +717,7 @@ def _main_impl(argv: Optional[list[str]] = None, cfg_override: TrainConfig | Non
     manifest_path = cache_dir / "manifest.json"
     manifest_path.write_text(json.dumps({"version": 1, "status": "preparing", "meta_common": meta_common}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    shard_writer: Optional[_ShardWriter] = None
+    shard_writer: _ShardWriter | None = None
     existing_md5s: set[str] = set()
     if options.shard_size > 0:
         shard_dir.mkdir(parents=True, exist_ok=True)
@@ -772,7 +772,7 @@ def _main_impl(argv: Optional[list[str]] = None, cfg_override: TrainConfig | Non
             start_shard_id=start_shard_id,
         )
 
-    task_queue: queue.Queue[Optional[_SaveTask]] = queue.Queue(
+    task_queue: queue.Queue[_SaveTask | None] = queue.Queue(
         maxsize=int(options.queue_size)
     )
     queue_wait_ms = {"value": 0.0}
@@ -1052,7 +1052,7 @@ def _save_latent_cpu(
     cfg: TrainConfig,
     dtype: torch.dtype,
     dtype_name: str,
-    code_version: Optional[str],
+    code_version: str | None,
     expected_shape: tuple[int, int, int] | None = None,
 ) -> None:
     _validate_latent_tensor(z, cfg, expected_shape=expected_shape)
@@ -1102,7 +1102,7 @@ def _validate_latent_tensor(z: torch.Tensor, cfg: TrainConfig, *, expected_shape
         )
 
 
-def main(argv: Optional[list[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     try:
         _main_impl(argv)
     except Exception as exc:

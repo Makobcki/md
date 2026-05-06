@@ -4,23 +4,21 @@ import asyncio
 import json
 import os
 import signal
-import contextlib
 import subprocess
 import sys
 import threading
 import time
 import traceback
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from config.train import TrainConfig
 from diffusion.events import format_event_line
 from sample.api import SampleOptions, run_sample
+
 from .services import config_service
 from .services.atomic import atomic_write_json, atomic_write_text
-
 
 METRIC_EVENT_TYPES = {"metric", "progress", "train", "eval", "sample"}
 
@@ -34,19 +32,19 @@ class RunRecord:
     run_id: str
     run_type: str
     status: str
-    command: List[str]
+    command: list[str]
     created_at: str
-    pid: Optional[int]
+    pid: int | None
     started_at: str
-    ended_at: Optional[str]
-    exit_code: Optional[int]
+    ended_at: str | None
+    exit_code: int | None
     run_dir: str
-    config_snapshot: Optional[str]
+    config_snapshot: str | None
     log_stdout: str
     log_stderr: str
-    metrics_path: Optional[str]
-    output_path: Optional[str]
-    notes: Dict[str, Any]
+    metrics_path: str | None
+    output_path: str | None
+    notes: dict[str, Any]
 
 
 class JobManager:
@@ -56,12 +54,12 @@ class JobManager:
         self.state_path = self.runs_dir / "state.json"
         self.ws_manager = ws_manager
         self.lock = threading.Lock()
-        self.process: Optional[subprocess.Popen] = None
-        self.worker_thread: Optional[threading.Thread] = None
-        self.metric_tailers: Dict[str, tuple[threading.Event, threading.Thread]] = {}
-        self.current_run_id: Optional[str] = None
-        self.runs: Dict[str, RunRecord] = {}
-        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.process: subprocess.Popen | None = None
+        self.worker_thread: threading.Thread | None = None
+        self.metric_tailers: dict[str, tuple[threading.Event, threading.Thread]] = {}
+        self.current_run_id: str | None = None
+        self.runs: dict[str, RunRecord] = {}
+        self.loop: asyncio.AbstractEventLoop | None = None
         self._load_state()
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -119,7 +117,7 @@ class JobManager:
             return False
         return True
 
-    def _write_notes(self, run_dir: Path, notes: Dict[str, Any]) -> None:
+    def _write_notes(self, run_dir: Path, notes: dict[str, Any]) -> None:
         notes_path = run_dir / "notes.json"
         atomic_write_json(notes_path, notes)
 
@@ -138,7 +136,7 @@ class JobManager:
             return line
         return format_event_line(event)
 
-    def _read_train_config(self) -> Dict[str, Any]:
+    def _read_train_config(self) -> dict[str, Any]:
         return config_service.load_config_dict(self.repo_root)
 
     def _allowed_output_roots(self) -> list[Path]:
@@ -160,7 +158,7 @@ class JobManager:
         resolved = path.resolve()
         return any(resolved == root or resolved.is_relative_to(root) for root in self._allowed_output_roots())
 
-    def list_runs(self) -> List[RunRecord]:
+    def list_runs(self) -> list[RunRecord]:
         return sorted(self.runs.values(), key=lambda r: r.created_at, reverse=True)
 
     def get_run(self, run_id: str) -> RunRecord:
@@ -187,7 +185,7 @@ class JobManager:
         if self._has_active_job_locked():
             raise RuntimeError("Another job is running.")
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> dict[str, Any]:
         if not self.current_run_id:
             return {"active": False}
         run = self.runs[self.current_run_id]
@@ -209,7 +207,7 @@ class JobManager:
                 return {"active": False}
         return {"active": True, "run": asdict(run)}
 
-    def list_checkpoints(self) -> List[str]:
+    def list_checkpoints(self) -> list[str]:
         cfg = self._read_train_config()
         out_dir = Path(cfg.get("out_dir", "./runs"))
         if not out_dir.is_absolute():
@@ -283,7 +281,7 @@ class JobManager:
         stop_event.set()
         thread.join(timeout=3.0)
 
-    def _start_process(self, run: RunRecord, env: Dict[str, str]) -> None:
+    def _start_process(self, run: RunRecord, env: dict[str, str]) -> None:
         run_dir = Path(run.run_dir)
         logs_dir = run_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -376,7 +374,7 @@ class JobManager:
 
         threading.Thread(target=_waiter, daemon=True).start()
 
-    def start_train(self, resume: Optional[str] = None) -> RunRecord:
+    def start_train(self, resume: str | None = None) -> RunRecord:
         with self.lock:
             self._ensure_no_active_job_locked()
             run_id = self._new_run_id()
@@ -420,7 +418,7 @@ class JobManager:
             )
             self.runs[run_id] = run
             self._save_state()
-            notes: Dict[str, Any] = {"type": "train"}
+            notes: dict[str, Any] = {"type": "train"}
             try:
                 cfg_dict = self._read_train_config()
                 out_dir = Path(str(cfg_dict.get("out_dir", "./runs")))
@@ -446,7 +444,7 @@ class JobManager:
             return run
 
     class _ThreadLogWriter:
-        def __init__(self, manager: "JobManager", run: RunRecord, stream_name: str, file_obj: Any) -> None:
+        def __init__(self, manager: JobManager, run: RunRecord, stream_name: str, file_obj: Any) -> None:
             self.manager = manager
             self.run = run
             self.stream_name = stream_name
@@ -482,8 +480,8 @@ class JobManager:
                 self.manager.ws_manager.send_from_thread(self.run.run_id, "metrics", line)
 
     @staticmethod
-    def _normalize_sample_args(args: Dict[str, Any]) -> Dict[str, Any]:
-        normalized: Dict[str, Any] = {}
+    def _normalize_sample_args(args: dict[str, Any]) -> dict[str, Any]:
+        normalized: dict[str, Any] = {}
         aliases = {
             "negative-prompt": "neg_prompt",
             "neg-prompt": "neg_prompt",
@@ -568,7 +566,7 @@ class JobManager:
         self._save_state()
         thread.start()
 
-    def start_sample(self, args: Dict[str, Any]) -> RunRecord:
+    def start_sample(self, args: dict[str, Any]) -> RunRecord:
         with self.lock:
             self._ensure_no_active_job_locked()
             run_id = self._new_run_id()
@@ -579,7 +577,7 @@ class JobManager:
 
             normalized_args = self._normalize_sample_args(dict(args))
             output_path = normalized_args.get("out")
-            notes: Dict[str, Any] = {"args": normalized_args, "backend": "sample.api"}
+            notes: dict[str, Any] = {"args": normalized_args, "backend": "sample.api"}
             if not output_path:
                 suffix = ".pt" if bool(normalized_args.get("latent_only")) else ".png"
                 output_path = samples_dir / f"sample{suffix}"
@@ -656,7 +654,7 @@ class JobManager:
             env["PYTHONPATH"] = repo_root_str + os.pathsep + env.get("PYTHONPATH", "")
             self._start_process(run, env)
             return run
-    def start_prepare_latents(self, args: Dict[str, Any]) -> RunRecord:
+    def start_prepare_latents(self, args: dict[str, Any]) -> RunRecord:
         with self.lock:
             self._ensure_no_active_job_locked()
             run_id = self._new_run_id()
@@ -722,7 +720,7 @@ class JobManager:
         timeout_int: int = 8,
         timeout_term: int = 5,
         timeout_kill: int = 2,
-    ) -> Optional[RunRecord]:
+    ) -> RunRecord | None:
         def _send(pid: int, sig: signal.Signals) -> None:
             try:
                 os.killpg(pid, sig)

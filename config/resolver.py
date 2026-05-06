@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .formats.kdl_loader import load_kdl
+
 PRESET_ALIAS_KINDS = ("model", "sampler", "training", "data", "webui")
 
 
@@ -22,7 +23,6 @@ class ResolvedConfig:
 
 def recursive_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge dictionaries recursively with scalar/list replacement semantics."""
-
     result = deepcopy(base)
     for key, value in override.items():
         if (
@@ -39,7 +39,6 @@ def recursive_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str,
 
 def load_raw_config(path: str | Path) -> dict[str, Any]:
     """Load a KDL config document."""
-
     file_path = Path(path)
     if file_path.suffix.lower() != ".kdl":
         raise RuntimeError(f"Unsupported config extension for {file_path}; expected .kdl")
@@ -142,7 +141,6 @@ def resolve_config(
     expected_target: str | None = None,
 ) -> ResolvedConfig:
     """Resolve a target config, presets, preset aliases, and CLI overrides."""
-
     config_path = Path(path).resolve()
     raw = load_raw_config(config_path)
     if str(raw.get("__kind__", "config")) == "preset":

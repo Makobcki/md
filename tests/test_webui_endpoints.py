@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 from fastapi import HTTPException, Request, Response

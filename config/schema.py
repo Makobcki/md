@@ -33,7 +33,7 @@ class SampleConfig:
     raw: dict[str, Any]
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SampleConfig":
+    def from_dict(cls, data: dict[str, Any]) -> SampleConfig:
         model = _section(data, "model")
         sampling = _section(data, "sampling")
         sampler = _section(data, "sampler")
@@ -103,7 +103,7 @@ class WebUIConfig:
     raw: dict[str, Any]
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "WebUIConfig":
+    def from_dict(cls, data: dict[str, Any]) -> WebUIConfig:
         webui = _section(data, "webui")
         return cls(
             target=str(data.get("target", "webui")),
@@ -124,7 +124,7 @@ class EvalConfig:
     raw: dict[str, Any]
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "EvalConfig":
+    def from_dict(cls, data: dict[str, Any]) -> EvalConfig:
         return cls(
             target=str(data.get("target", "eval")),
             version=int(data.get("version", 1)),
@@ -141,7 +141,7 @@ class CacheConfig:
     raw: dict[str, Any]
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CacheConfig":
+    def from_dict(cls, data: dict[str, Any]) -> CacheConfig:
         return cls(
             target=str(data.get("target", "cache")),
             version=int(data.get("version", 1)),

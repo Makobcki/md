@@ -7,14 +7,13 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("torch")
+import torch
 from PIL import Image
 
 from config.train import TrainConfig
 from model.text.cache import TextCache
 from scripts.prepare_text_cache import prepare_text_cache
 from scripts.prepare_training_cache import main as prepare_training_cache_main
-
-import torch
 
 
 def _write_cache_config(path: Path, root: Path) -> None:

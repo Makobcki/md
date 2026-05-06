@@ -1,33 +1,46 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
-import os
-from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Annotated, Any, AsyncIterator, Dict, List, Literal, Optional
-import re
-import shutil
-import time
-import uuid
 import base64
 import hashlib
 import hmac
+import json
+import logging
 import mimetypes
+import os
+import re
 import secrets
-import yaml
+import time
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Annotated, Any, Literal
 
-from fastapi import Cookie, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+import yaml
+from fastapi import (
+    Cookie,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .argparse_reader import parse_argparse_args
 from .job_manager import JobManager
 from .services import config_service
-
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 RUNS_DIR = Path(os.environ.get("WEBUI_RUNS_DIR", ROOT_DIR / "webui_runs"))
@@ -36,8 +49,8 @@ UPLOADS_DIR = RUNS_DIR / "_uploads"
 
 class WSManager:
     def __init__(self) -> None:
-        self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self.connections: Dict[str, Dict[str, List[WebSocket]]] = {}
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.connections: dict[str, dict[str, list[WebSocket]]] = {}
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
@@ -356,18 +369,18 @@ class SampleArgs(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     ckpt: str
-    out: Optional[str] = None
+    out: str | None = None
     n: int = Field(default=8, ge=1, le=64)
     steps: int = Field(default=30, ge=1, le=500)
     prompt: str = ""
     neg_prompt: str = ""
     cfg: float = Field(default=5.0, ge=0.0, le=30.0)
-    shift: Optional[float] = Field(default=None, gt=0.0, le=100.0)
+    shift: float | None = Field(default=None, gt=0.0, le=100.0)
     sampler: Literal["flow_euler", "flow_heun"] = "flow_heun"
-    seed: Optional[int] = 42
+    seed: int | None = 42
     device: Literal["auto", "cpu", "cuda"] = "auto"
-    width: Optional[int] = Field(default=None, ge=1)
-    height: Optional[int] = Field(default=None, ge=1)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
     task: Literal["txt2img", "img2img", "inpaint", "control"] = "txt2img"
     init_image: str = Field(default="", alias="init-image")
     strength: float = Field(default=1.0, ge=0.0, le=1.0)
@@ -380,7 +393,7 @@ class SampleArgs(BaseModel):
     use_ema: bool = Field(default=True, alias="use-ema")
 
     @model_validator(mode="after")
-    def _validate_paths(self) -> "SampleArgs":
+    def _validate_paths(self) -> SampleArgs:
         self.ckpt = _bounded_path(self.ckpt, required=True) or self.ckpt
         self.out = _bounded_path(self.out)
         self.init_image = _bounded_path(self.init_image) or ""
@@ -414,7 +427,7 @@ class SampleArgs(BaseModel):
             raise ValueError("image outputs must use .png, .jpg, .jpeg or .webp extension")
         return self
 
-    def to_cli_args(self) -> Dict[str, Any]:
+    def to_cli_args(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=True, exclude_none=True)
         if data.get("device") == "auto":
             data.pop("device")
@@ -422,7 +435,7 @@ class SampleArgs(BaseModel):
             data.pop("use-ema", None)
         return data
 
-    def to_sample_options_args(self) -> Dict[str, Any]:
+    def to_sample_options_args(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=False, exclude_none=True)
         if data.get("device") == "auto":
             data.pop("device")
@@ -436,10 +449,10 @@ class SampleRequest(BaseModel):
 
 class TrainRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    resume: Optional[str] = None
+    resume: str | None = None
 
     @model_validator(mode="after")
-    def _validate_resume(self) -> "TrainRequest":
+    def _validate_resume(self) -> TrainRequest:
         self.resume = _bounded_path(self.resume)
         return self
 
@@ -449,7 +462,7 @@ class LatentArgs(BaseModel):
 
     config: str = "./configs/train.kdl"
     overwrite: bool = False
-    limit: Optional[int] = Field(default=None, ge=1)
+    limit: int | None = Field(default=None, ge=1)
     batch_size: int = Field(default=16, ge=1, le=512, alias="batch-size")
     num_workers: int = Field(default=4, ge=0, le=64, alias="num-workers")
     prefetch_factor: int = Field(default=2, ge=1, le=32, alias="prefetch-factor")
@@ -464,11 +477,11 @@ class LatentArgs(BaseModel):
     decode_backend: Literal["auto", "pil", "torchvision"] = Field(default="auto", alias="decode-backend")
 
     @model_validator(mode="after")
-    def _validate_config(self) -> "LatentArgs":
+    def _validate_config(self) -> LatentArgs:
         self.config = _bounded_path(self.config, required=True) or self.config
         return self
 
-    def to_cli_args(self) -> Dict[str, Any]:
+    def to_cli_args(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=True, exclude_none=True, exclude_defaults=True)
         data["config"] = self.config
         if data.get("device") == "auto":
@@ -504,10 +517,10 @@ _LATENT_PREPARE_ARG_KEYS = {
 }
 
 
-def _latent_prepare_arg_defaults() -> Dict[str, Any]:
+def _latent_prepare_arg_defaults() -> dict[str, Any]:
     cfg_path = config_service.get_config_path(ROOT_DIR)
     cfg = config_service.parse_config_text(cfg_path.read_text(encoding="utf-8"))
-    defaults: Dict[str, Any] = {
+    defaults: dict[str, Any] = {
         "config": str(cfg_path),
         "latent-dtype": cfg.latent_dtype,
         "autocast-dtype": cfg.latent_dtype,
@@ -590,7 +603,7 @@ def _download_url_for_path(path: Path) -> str:
     return f"/api/files/download/{_encode_file_token(path)}"
 
 
-def _artifact_record(path: Path, *, source: str, run_id: str | None = None, preview: bool | None = None) -> Dict[str, Any]:
+def _artifact_record(path: Path, *, source: str, run_id: str | None = None, preview: bool | None = None) -> dict[str, Any]:
     suffix = path.suffix.lower()
     is_image = suffix in _IMAGE_FILE_EXTS
     previewable = bool(is_image if preview is None else preview)
@@ -618,14 +631,14 @@ def _iter_files(root: Path, patterns: tuple[str, ...]) -> list[Path]:
     return [p for p in paths if p.is_file() or p.is_symlink()]
 
 
-def _collect_webui_samples(run_id: str | None = None, include_latents: bool = False) -> list[Dict[str, Any]]:
+def _collect_webui_samples(run_id: str | None = None, include_latents: bool = False) -> list[dict[str, Any]]:
     if run_id:
         run_roots = [RUNS_DIR / run_id]
     elif RUNS_DIR.exists():
         run_roots = [p for p in RUNS_DIR.iterdir() if p.is_dir() and p.name != "_uploads"]
     else:
         run_roots = []
-    records: list[Dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     patterns = ("*.png", "*.jpg", "*.jpeg", "*.webp") + (("*.pt", "*.pth") if include_latents else ())
     for run_root in run_roots:
         samples_root = run_root / "samples"
@@ -635,7 +648,7 @@ def _collect_webui_samples(run_id: str | None = None, include_latents: bool = Fa
     return records
 
 
-def _collect_train_samples(run_id: str | None = None) -> list[Dict[str, Any]]:
+def _collect_train_samples(run_id: str | None = None) -> list[dict[str, Any]]:
     roots: list[Path] = []
     if run_id:
         run = job_manager.runs.get(run_id)
@@ -651,7 +664,7 @@ def _collect_train_samples(run_id: str | None = None) -> list[Dict[str, Any]]:
             roots.append(_get_out_dir())
         except Exception:
             pass
-    records: list[Dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     seen: set[Path] = set()
     for root in roots:
         candidates = [root / "eval", root / "samples"]
@@ -667,7 +680,7 @@ def _collect_train_samples(run_id: str | None = None) -> list[Dict[str, Any]]:
     return records
 
 
-def _collect_run_checkpoints(run_id: str | None = None) -> list[Dict[str, Any]]:
+def _collect_run_checkpoints(run_id: str | None = None) -> list[dict[str, Any]]:
     roots: list[Path] = []
     if run_id:
         run = job_manager.runs.get(run_id)
@@ -683,7 +696,7 @@ def _collect_run_checkpoints(run_id: str | None = None) -> list[Dict[str, Any]]:
             roots.append(_get_out_dir())
         except Exception:
             pass
-    records: list[Dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     seen: set[Path] = set()
     for root in roots:
         for path in _iter_files(root, ("*.pt", "*.pth", "*.safetensors")):
@@ -727,7 +740,7 @@ def download_safe_file(token: str, _: None = Depends(_require_token)) -> FileRes
 def get_auth_status(
     authorization: str | None = Header(default=None),
     auth_cookie: str | None = Cookie(default=None, alias=_AUTH_COOKIE_NAME),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     required = bool(_normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN")))
     authenticated = (
         (not required)
@@ -738,7 +751,7 @@ def get_auth_status(
 
 
 @app.post("/api/auth/login")
-def login(payload: AuthLoginRequest, response: Response, request: Request) -> Dict[str, Any]:
+def login(payload: AuthLoginRequest, response: Response, request: Request) -> dict[str, Any]:
     required = bool(_normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN")))
     client_key = _auth_client_key(request)
     retry_after = _auth_retry_after(client_key)
@@ -768,7 +781,7 @@ def login(payload: AuthLoginRequest, response: Response, request: Request) -> Di
 
 
 @app.post("/api/auth/logout")
-def logout(response: Response) -> Dict[str, Any]:
+def logout(response: Response) -> dict[str, Any]:
     _clear_auth_cookie(response)
     return {"ok": True}
 
@@ -790,17 +803,17 @@ def get_safe_file(rel_path: str, _: None = Depends(_require_token)) -> FileRespo
 
 
 @app.get("/api/status")
-def get_status(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_status(_: None = Depends(_require_token)) -> dict[str, Any]:
     return job_manager.get_status()
 
 
 @app.get("/api/runs")
-def list_runs(_: None = Depends(_require_token)) -> List[Dict[str, Any]]:
+def list_runs(_: None = Depends(_require_token)) -> list[dict[str, Any]]:
     return [json.loads(json.dumps(r.__dict__)) for r in job_manager.list_runs()]
 
 
 @app.get("/api/runs/{run_id}")
-def get_run(run_id: str, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_run(run_id: str, _: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.get_run(run_id)
     except KeyError as exc:
@@ -809,7 +822,7 @@ def get_run(run_id: str, _: None = Depends(_require_token)) -> Dict[str, Any]:
 
 
 @app.get("/api/runs/{run_id}/config")
-def get_run_config(run_id: str, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_run_config(run_id: str, _: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.get_run(run_id)
     except KeyError as exc:
@@ -859,7 +872,7 @@ def get_run_log(
     limit: Annotated[int, Query(ge=1, le=50000)] = 2000,
     raw: Annotated[bool, Query()] = False,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if stream not in {"stdout", "stderr"}:
         raise HTTPException(status_code=400, detail="invalid log stream")
     try:
@@ -880,7 +893,7 @@ def get_run_metrics(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=50000)] = 2000,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     try:
         run = job_manager.get_run(run_id)
     except KeyError as exc:
@@ -906,13 +919,13 @@ def get_run_metrics(
 
 
 @app.get("/api/config")
-def get_train_config(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_train_config(_: None = Depends(_require_token)) -> dict[str, Any]:
     cfg_path = config_service.get_config_path(ROOT_DIR)
     return {"path": str(cfg_path), "content": config_service.read_config_text(ROOT_DIR)}
 
 
 @app.put("/api/config")
-def update_train_config(payload: Dict[str, Any], _: None = Depends(_require_token)) -> Dict[str, Any]:
+def update_train_config(payload: dict[str, Any], _: None = Depends(_require_token)) -> dict[str, Any]:
     content = payload.get("content")
     if not isinstance(content, str):
         raise HTTPException(status_code=400, detail="content must be a string")
@@ -924,12 +937,12 @@ def update_train_config(payload: Dict[str, Any], _: None = Depends(_require_toke
 
 
 @app.get("/api/checkpoints")
-def list_checkpoints(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def list_checkpoints(_: None = Depends(_require_token)) -> dict[str, Any]:
     return {"items": job_manager.list_checkpoints()}
 
 
 @app.get("/api/checkpoints/info")
-def get_checkpoint_info(path: str, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_checkpoint_info(path: str, _: None = Depends(_require_token)) -> dict[str, Any]:
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
     try:
@@ -961,6 +974,7 @@ def get_checkpoint_info(path: str, _: None = Depends(_require_token)) -> Dict[st
     # Legacy fallback for old checkpoints without sidecars. This endpoint is
     # authenticated and path-bounded; new checkpoints avoid this heavy path.
     import torch
+
     from diffusion.utils import load_ckpt
 
     try:
@@ -986,7 +1000,7 @@ def get_checkpoint_info(path: str, _: None = Depends(_require_token)) -> Dict[st
 
 
 @app.get("/api/out_dir/summary")
-def get_out_dir_summary(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_out_dir_summary(_: None = Depends(_require_token)) -> dict[str, Any]:
     out_dir = _get_out_dir()
     train_log = out_dir / "metrics" / "events.jsonl"
     config_snapshot = out_dir / "config.yaml"
@@ -1013,7 +1027,7 @@ def get_out_dir_summary(_: None = Depends(_require_token)) -> Dict[str, Any]:
     }
 
 
-def _sample_arg_specs() -> list[Dict[str, Any]]:
+def _sample_arg_specs() -> list[dict[str, Any]]:
     return [
         {"name": "ckpt", "flags": ["--ckpt"], "type": "str", "default": None, "required": True, "help": "Checkpoint path", "choices": None},
         {"name": "out", "flags": ["--out"], "type": "str", "default": "", "required": False, "help": "Optional output path. Defaults to this WebUI run samples directory.", "choices": None},
@@ -1042,12 +1056,12 @@ def _sample_arg_specs() -> list[Dict[str, Any]]:
 
 
 @app.get("/api/sample/args")
-def get_sample_args(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_sample_args(_: None = Depends(_require_token)) -> dict[str, Any]:
     return {"items": _sample_arg_specs()}
 
 
 @app.get("/api/latents/args")
-def get_latent_args(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_latent_args(_: None = Depends(_require_token)) -> dict[str, Any]:
     prep_path = ROOT_DIR / "scripts" / "prepare_latents.py"
     items = parse_argparse_args(prep_path)
     defaults = _latent_prepare_arg_defaults()
@@ -1065,8 +1079,8 @@ def list_artifacts(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
-    records: list[Dict[str, Any]] = []
+) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
     if source in {"all", "webui_samples", "latents"}:
         records.extend(_collect_webui_samples(run_id, include_latents=source in {"all", "latents"}))
     if source in {"all", "train_samples"}:
@@ -1083,7 +1097,7 @@ def list_generated_samples(
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
     run_id: str | None = None,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     records = sorted(_collect_webui_samples(run_id, include_latents=False), key=lambda item: float(item.get("mtime") or 0.0))
     return {"items": records[offset:offset + limit], "offset": offset, "total": len(records)}
 
@@ -1094,7 +1108,7 @@ def list_train_samples(
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
     run_id: str | None = None,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     records = sorted(_collect_train_samples(run_id), key=lambda item: float(item.get("mtime") or 0.0))
     return {"items": records[offset:offset + limit], "offset": offset, "total": len(records)}
 
@@ -1105,7 +1119,7 @@ def list_samples(
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
     run_id: str | None = None,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     records = sorted(_collect_webui_samples(run_id, include_latents=False), key=lambda item: float(item.get("mtime") or 0.0))
     return {"items": records[offset:offset + limit], "offset": offset, "total": len(records)}
 
@@ -1115,7 +1129,7 @@ async def upload_image(
     file: UploadFile = File(...),
     kind: str = Form(default="image"),
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="file is required")
     content_type = (file.content_type or "").lower()
@@ -1171,7 +1185,7 @@ async def upload_image(
 
 
 @app.post("/api/train/start")
-def start_train(req: TrainRequest | None = None, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def start_train(req: TrainRequest | None = None, _: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         resume = req.resume if req else None
         run = job_manager.start_train(resume=resume)
@@ -1181,7 +1195,7 @@ def start_train(req: TrainRequest | None = None, _: None = Depends(_require_toke
 
 
 @app.post("/api/train/stop")
-def stop_train(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def stop_train(_: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.stop_current(expected_type="train")
     except RuntimeError as exc:
@@ -1192,7 +1206,7 @@ def stop_train(_: None = Depends(_require_token)) -> Dict[str, Any]:
 
 
 @app.post("/api/sample/start")
-def start_sample(req: SampleRequest, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def start_sample(req: SampleRequest, _: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.start_sample(req.args.to_sample_options_args())
     except ValueError as exc:
@@ -1203,7 +1217,7 @@ def start_sample(req: SampleRequest, _: None = Depends(_require_token)) -> Dict[
 
 
 @app.post("/api/latents/start")
-def start_latent_cache(req: LatentCacheRequest, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def start_latent_cache(req: LatentCacheRequest, _: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.start_prepare_latents(req.args.to_cli_args())
     except RuntimeError as exc:
@@ -1212,7 +1226,7 @@ def start_latent_cache(req: LatentCacheRequest, _: None = Depends(_require_token
 
 
 @app.post("/api/sample/stop")
-def stop_sample(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def stop_sample(_: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.stop_current(expected_type="sample")
     except RuntimeError as exc:
@@ -1223,7 +1237,7 @@ def stop_sample(_: None = Depends(_require_token)) -> Dict[str, Any]:
 
 
 @app.post("/api/latents/stop")
-def stop_latent_cache(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def stop_latent_cache(_: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.stop_current(expected_type="latent_cache")
     except RuntimeError as exc:

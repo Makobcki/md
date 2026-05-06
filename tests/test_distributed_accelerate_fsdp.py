@@ -16,6 +16,7 @@ from train.dist import DistributedContext, create_distributed_context
 from train.loop_mmdit_full import run_mmdit_training_loop
 from train.runner import dry_run
 
+
 class _FakeNonMainAccelerator:
     is_main_process = False
     process_index = 1

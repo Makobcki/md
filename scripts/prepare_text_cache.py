@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -237,7 +237,7 @@ def prepare_text_cache(
     manifest = {
         "version": 1,
         "status": "complete",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "num_samples": len(entries),
         "dataset_hash": metadata["dataset_hash"],
         "caption_field": metadata["caption_field"],

@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
-
 TEXT_ENCODER_PRESETS: dict[str, dict[str, Any]] = {
     "clip_l_t5_base": {
         "text_dim": 1024,
@@ -985,7 +984,7 @@ class TrainConfig:
 
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "TrainConfig":
+    def from_dict(cls, data: dict[str, Any]) -> TrainConfig:
         data = _flatten_nested_config(data)
         fields = {f.name for f in cls.__dataclass_fields__.values()}
         kwargs = {k: v for k, v in data.items() if k in fields}
