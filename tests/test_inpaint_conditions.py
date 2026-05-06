@@ -81,3 +81,25 @@ def test_flow_sampler_preserves_unmasked_inpaint_region() -> None:
         task="inpaint",
     )
     assert torch.equal(out * (1.0 - mask), source * (1.0 - mask))
+
+
+def test_preserve_inpaint_region_uses_noised_source_at_intermediate_timestep() -> None:
+    from samplers.cfg import preserve_inpaint_region
+
+    x = torch.full((1, 1, 2, 2), 9.0)
+    source = torch.full_like(x, 2.0)
+    eps = torch.full_like(x, -2.0)
+    mask = torch.tensor([[[[1.0, 0.0], [1.0, 0.0]]]])
+
+    out = preserve_inpaint_region(
+        x,
+        source_latent=source,
+        mask=mask,
+        task="inpaint",
+        reference_noise=eps,
+        t=torch.tensor(0.25),
+    )
+
+    expected_known = (1.0 - 0.25) * source + 0.25 * eps
+    assert torch.equal(out * (1.0 - mask), expected_known * (1.0 - mask))
+    assert torch.equal(out * mask, x * mask)

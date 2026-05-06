@@ -99,3 +99,8 @@ def test_mmdit_rejects_unknown_task() -> None:
     text = TextConditioning(torch.randn(1, 2, 16), torch.ones(1, 2, dtype=torch.bool), torch.randn(1, 16))
     with pytest.raises(ValueError, match="Unsupported MMDiT task"):
         model(x, torch.rand(1), text, task="bad_task")
+
+
+def test_sincos_requires_hidden_dim_divisible_by_four() -> None:
+    with pytest.raises(ValueError, match="sincos_2d requires hidden_dim divisible by 4"):
+        MMDiTConfig(hidden_dim=30, depth=1, num_heads=5, double_stream_blocks=1, single_stream_blocks=0, pos_embed="sincos_2d")

@@ -6,6 +6,16 @@ from model.text.conditioning import TextConditioning
 
 
 def concat_text_conditioning(items: list[TextConditioning]) -> TextConditioning:
+    any_token_types = any(x.token_types is not None for x in items)
+    token_types = None
+    if any_token_types:
+        normalized = []
+        for item in items:
+            if item.token_types is None:
+                normalized.append(torch.zeros(item.tokens.shape[:2], device=item.tokens.device, dtype=torch.long))
+            else:
+                normalized.append(item.token_types.to(device=item.tokens.device, dtype=torch.long))
+        token_types = torch.cat(normalized, dim=0)
     return TextConditioning(
         tokens=torch.cat([x.tokens for x in items], dim=0),
         mask=torch.cat([x.mask for x in items], dim=0),
@@ -15,11 +25,7 @@ def concat_text_conditioning(items: list[TextConditioning]) -> TextConditioning:
             if all(x.is_uncond is not None for x in items)
             else None
         ),
-        token_types=(
-            torch.cat([x.token_types for x in items], dim=0)
-            if all(x.token_types is not None for x in items)
-            else None
-        ),
+        token_types=token_types,
     )
 
 
@@ -57,6 +63,8 @@ def preserve_inpaint_region(
     source_latent: torch.Tensor | None = None,
     mask: torch.Tensor | None = None,
     task: str | list[str] | tuple[str, ...] = "txt2img",
+    reference_noise: torch.Tensor | None = None,
+    t: torch.Tensor | float | None = None,
 ) -> torch.Tensor:
     """Keep unmasked source pixels fixed for latent inpainting sampling.
 
@@ -70,6 +78,13 @@ def preserve_inpaint_region(
     if m.dim() == 3:
         m = m.unsqueeze(1)
     src = source_latent.to(device=x.device, dtype=x.dtype)
+    if reference_noise is not None and t is not None:
+        eps = reference_noise.to(device=x.device, dtype=x.dtype)
+        tt = t.to(device=x.device, dtype=x.dtype) if torch.is_tensor(t) else torch.tensor(float(t), device=x.device, dtype=x.dtype)
+        if tt.dim() == 0:
+            tt = tt.view(1)
+        tt = tt.reshape(-1, *([1] * (x.dim() - 1)))
+        src = (1.0 - tt) * src + tt * eps
     if isinstance(task, str):
         if task != "inpaint":
             return x

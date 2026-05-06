@@ -68,6 +68,8 @@ class MMDiTConfig:
             raise ValueError("double_stream_blocks + single_stream_blocks must equal depth.")
         if self.pos_embed not in {"rope_2d", "sincos_2d", "none"}:
             raise ValueError("pos_embed must be one of: rope_2d, sincos_2d, none.")
+        if self.pos_embed == "sincos_2d" and int(self.hidden_dim) % 4 != 0:
+            raise ValueError("sincos_2d requires hidden_dim divisible by 4; set hidden_dim to a multiple of 4 or use pos_embed=rope_2d/none.")
         if self.rope_scaling not in {"none", "linear", "ntk"}:
             raise ValueError("rope_scaling must be one of: none, linear, ntk.")
         if len(self.rope_base_grid_hw) != 2 or self.rope_base_grid_hw[0] <= 0 or self.rope_base_grid_hw[1] <= 0:

@@ -209,7 +209,7 @@ def test_log_backlog_formats_json_events(app_module: object, tmp_path: Path) -> 
     ]
 
 
-def _request(scheme: str = "http") -> Request:
+def _request(scheme: str = "http", headers: list[tuple[bytes, bytes]] | None = None) -> Request:
     return Request(
         {
             "type": "http",
@@ -217,7 +217,7 @@ def _request(scheme: str = "http") -> Request:
             "server": ("testserver", 80),
             "client": ("127.0.0.1", 12345),
             "path": "/",
-            "headers": [],
+            "headers": headers or [],
         }
     )
 
@@ -345,6 +345,16 @@ def test_auth_login_rate_limits_failed_attempts(app_module: object, monkeypatch:
     assert second.value.status_code == 429
     assert locked.value.status_code == 429
     assert locked.value.headers["Retry-After"]
+
+
+def test_auth_rate_limit_ignores_forwarded_headers_by_default(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WEBUI_TRUST_PROXY_HEADERS", raising=False)
+    req = _request(headers=[(b"x-forwarded-for", b"203.0.113.9")])
+
+    assert app_module._auth_client_key(req) == "127.0.0.1"
+
+    monkeypatch.setenv("WEBUI_TRUST_PROXY_HEADERS", "1")
+    assert app_module._auth_client_key(req) == "203.0.113.9"
 
 
 def test_auth_login_success_clears_failed_attempts(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:

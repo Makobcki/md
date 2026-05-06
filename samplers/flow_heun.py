@@ -36,6 +36,14 @@ def sample_flow_heun(
 ) -> torch.Tensor:
     device = _infer_sampling_device(model, text_cond, noise)
     x = torch.randn(shape, device=device, generator=generator) if noise is None else noise.to(device)
+    inpaint_reference_noise = None
+    if model_kwargs.get("task", "txt2img") == "inpaint" and model_kwargs.get("source_latent") is not None and model_kwargs.get("mask") is not None:
+        src = model_kwargs["source_latent"].to(device=device, dtype=x.dtype)
+        start = float(start_t)
+        if start > 0.0:
+            inpaint_reference_noise = (x - (1.0 - start) * src) / start
+        else:
+            inpaint_reference_noise = torch.zeros_like(src)
     ts = flow_timesteps(int(steps), device=device, shift=float(shift)) * float(start_t)
     total = len(ts) - 1
     for i in range(total):
@@ -49,6 +57,8 @@ def sample_flow_heun(
             source_latent=model_kwargs.get("source_latent"),
             mask=model_kwargs.get("mask"),
             task=model_kwargs.get("task", "txt2img"),
+            reference_noise=inpaint_reference_noise,
+            t=ts[i + 1],
         )
         v2 = cfg_predict(model, x_euler, t_next, text_cond, uncond, cfg_scale, **model_kwargs)
         x = x + dt.to(dtype=x.dtype) * 0.5 * (v1 + v2)
@@ -57,6 +67,8 @@ def sample_flow_heun(
             source_latent=model_kwargs.get("source_latent"),
             mask=model_kwargs.get("mask"),
             task=model_kwargs.get("task", "txt2img"),
+            reference_noise=inpaint_reference_noise,
+            t=ts[i + 1],
         )
         if progress_cb is not None:
             progress_cb(i + 1, total)

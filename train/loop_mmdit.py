@@ -188,7 +188,10 @@ def run_minimal_mmdit_loop(
                 source_latent=batch.source_latent.to(device) if batch.source_latent is not None else None,
                 mask=batch.mask.to(device) if batch.mask is not None else None,
                 control_latents=batch.control_latents.to(device) if batch.control_latents is not None else None,
+                control_type=batch.control_type.to(device) if batch.control_type is not None else None,
                 task=batch.task,
+                strength=batch.strength.to(device) if batch.strength is not None else None,
+                control_strength=batch.control_strength.to(device) if batch.control_strength is not None else None,
                 metadata=batch.metadata,
             )
             loss = training_step_mmdit(

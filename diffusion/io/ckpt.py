@@ -15,16 +15,22 @@ _KNOWN_PREFIXES = ("_orig_mod.", "module.")
 CKPT_FORMAT_VERSION = 2
 
 
-def _torch_load(path: str | Path, map_location: torch.device | str):
+def _torch_load(path: str | Path, map_location: torch.device | str, *, allow_unsafe: bool = False):
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
     except TypeError:
-        # Older PyTorch has no weights_only argument. These project checkpoints
-        # are trusted local training artifacts, not arbitrary uploads.
+        if not allow_unsafe:
+            raise RuntimeError(
+                "This PyTorch version cannot safely load checkpoints with weights_only=True. "
+                "Upgrade PyTorch or set allow_unsafe_checkpoint_load=true only for trusted local checkpoints."
+            )
         return torch.load(path, map_location=map_location)
     except (RuntimeError, pickle.UnpicklingError):
-        if os.environ.get("MD_ALLOW_UNSAFE_TORCH_LOAD", "1") not in {"1", "true", "True", "yes"}:
-            raise
+        if not allow_unsafe:
+            raise RuntimeError(
+                "Checkpoint requires unsafe pickle loading. Refusing by default; set "
+                "allow_unsafe_checkpoint_load=true in config only for trusted legacy checkpoints."
+            )
         # Backward compatibility for legacy project checkpoints containing Python
         # objects unsupported by weights_only.
         return torch.load(path, map_location=map_location, weights_only=False)
@@ -124,8 +130,8 @@ def normalize_state_dict_for_model(state_dict: dict, model: nn.Module, name: str
     return normalize_state_dict_for_keys(state_dict, model.state_dict().keys(), name)
 
 
-def load_ckpt(path: str, device: torch.device) -> dict:
-    ck = _torch_load(path, map_location=device)
+def load_ckpt(path: str, device: torch.device, *, allow_unsafe: bool = False) -> dict:
+    ck = _torch_load(path, map_location=device, allow_unsafe=allow_unsafe)
     ck = sanitize_ckpt(ck)
     if isinstance(ck, dict):
         format_version = int(ck.get("format_version", 1))

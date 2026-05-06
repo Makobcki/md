@@ -98,9 +98,20 @@ def _flatten_nested_config(data: Dict[str, Any]) -> Dict[str, Any]:
             "compile",
             "compile_warmup_steps",
             "compile_cudagraphs",
+            "allow_unsafe_checkpoint_load",
         ):
             if key in training and key not in flat:
                 flat[key] = training[key]
+
+    checkpoint = data.get("checkpoint")
+    if isinstance(checkpoint, dict):
+        mapping = {
+            "allow_unsafe_load": "allow_unsafe_checkpoint_load",
+            "allow_unsafe_checkpoint_load": "allow_unsafe_checkpoint_load",
+        }
+        for src, dst in mapping.items():
+            if src in checkpoint and dst not in flat:
+                flat[dst] = checkpoint[src]
 
     model = data.get("model")
     if isinstance(model, dict):
@@ -573,6 +584,7 @@ class TrainConfig:
     eval_n: int = 1
 
     ckpt_keep_last: int = 5
+    allow_unsafe_checkpoint_load: bool = False
 
     sanity_overfit_steps: int = 0
     sanity_overfit_images: int = 0
@@ -686,6 +698,8 @@ class TrainConfig:
             raise ValueError("optimizer must be one of: adamw, adamw_8bit.")
         if self.ckpt_keep_last < 0:
             raise ValueError("ckpt_keep_last must be non-negative.")
+        if not isinstance(self.allow_unsafe_checkpoint_load, bool):
+            raise ValueError("allow_unsafe_checkpoint_load must be boolean.")
 
         if self.hidden_dim <= 0:
             raise ValueError("hidden_dim must be positive.")
@@ -699,6 +713,8 @@ class TrainConfig:
             raise ValueError("double_stream_blocks + single_stream_blocks must equal depth.")
         if self.pos_embed not in {"rope_2d", "sincos_2d", "none"}:
             raise ValueError("pos_embed must be one of: rope_2d, sincos_2d, none.")
+        if self.pos_embed == "sincos_2d" and int(self.hidden_dim) % 4 != 0:
+            raise ValueError("sincos_2d requires hidden_dim divisible by 4; set hidden_dim to a multiple of 4 or use pos_embed=rope_2d/none.")
         if self.rope_scaling not in {"none", "linear", "ntk"}:
             raise ValueError("rope_scaling must be one of: none, linear, ntk.")
         rope_base_grid = tuple(self.rope_base_grid_hw)
@@ -743,8 +759,17 @@ class TrainConfig:
             raise ValueError("coarse_patch_size must be positive.")
         if int(self.latent_downsample_factor) > 0:
             base_latent_side = int(self.image_size) // int(self.latent_downsample_factor)
-            if bool(self.hierarchical_tokens_enabled) and base_latent_side % int(self.coarse_patch_size) != 0:
-                raise ValueError("base latent size must be divisible by coarse_patch_size when hierarchical tokens are enabled.")
+            patch_sizes = {
+                "latent_patch_size": int(self.latent_patch_size),
+                "source_patch_size": int(self.source_patch_size),
+                "mask_patch_size": int(self.mask_patch_size),
+                "control_patch_size": int(self.control_patch_size),
+            }
+            if bool(self.hierarchical_tokens_enabled):
+                patch_sizes["coarse_patch_size"] = int(self.coarse_patch_size)
+            for name, patch_size in patch_sizes.items():
+                if base_latent_side % patch_size != 0:
+                    raise ValueError(f"base latent size must be divisible by {name}={patch_size}.")
 
         if not (0.0 <= float(self.inpaint_mask_min_area) <= float(self.inpaint_mask_max_area) <= 1.0):
             raise ValueError("inpaint mask area must satisfy 0 <= min <= max <= 1.")

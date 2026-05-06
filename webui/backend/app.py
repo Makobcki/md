@@ -197,12 +197,14 @@ def _clear_auth_cookie(response: Response) -> None:
 
 
 def _auth_client_key(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
-    if forwarded_for:
-        return forwarded_for
-    real_ip = request.headers.get("x-real-ip", "").strip()
-    if real_ip:
-        return real_ip
+    trust_proxy = os.environ.get("WEBUI_TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes", "on"}
+    if trust_proxy:
+        forwarded_for = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+        if forwarded_for:
+            return forwarded_for
+        real_ip = request.headers.get("x-real-ip", "").strip()
+        if real_ip:
+            return real_ip
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
@@ -961,7 +963,12 @@ def get_checkpoint_info(path: str, _: None = Depends(_require_token)) -> Dict[st
     import torch
     from diffusion.utils import load_ckpt
 
-    ck = load_ckpt(str(ckpt_path), torch.device("cpu"))
+    try:
+        cfg = config_service.parse_config_text(config_service.read_config_text(ROOT_DIR))
+        allow_unsafe = bool(cfg.allow_unsafe_checkpoint_load)
+    except Exception:
+        allow_unsafe = False
+    ck = load_ckpt(str(ckpt_path), torch.device("cpu"), allow_unsafe=allow_unsafe)
     cfg = ck.get("cfg", {})
     use_text_conditioning = bool(cfg.get("use_text_conditioning", True))
     meta_flag = ck.get("meta", {}).get("use_text_conditioning")

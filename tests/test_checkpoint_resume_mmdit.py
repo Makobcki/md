@@ -16,6 +16,10 @@ from train.checkpoint_mmdit import validate_mmdit_checkpoint_compatibility
 from train.loop_mmdit_full import _build_ckpt, _loss_and_bins
 
 
+class _LegacyCheckpointObject:
+    pass
+
+
 def _cfg() -> TrainConfig:
     return TrainConfig.from_dict(
         {
@@ -132,3 +136,20 @@ def test_checkpoint_resume_restores_train_state_and_continues(tmp_path: Path) ->
     for _ in range(2):
         resumed_step = _train_one_step(model2, optimizer2, ema2, objective, empty_text, resumed_step)
     assert resumed_step == 4
+
+
+def test_checkpoint_unsafe_pickle_fallback_is_config_gated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MD_ALLOW_UNSAFE_TORCH_LOAD", raising=False)
+    path = tmp_path / "legacy.pt"
+    torch.save({"format_version": 2, "model": {}, "cfg": {}, "bad": _LegacyCheckpointObject()}, path)
+
+    with pytest.raises(RuntimeError, match="unsafe pickle loading|weights_only"):
+        load_ckpt(str(path), torch.device("cpu"))
+
+    loaded = load_ckpt(str(path), torch.device("cpu"), allow_unsafe=True)
+    assert loaded["format_version"] == 2
+
+
+def test_train_config_parses_unsafe_checkpoint_flag() -> None:
+    cfg = TrainConfig.from_dict({"checkpoint": {"allow_unsafe_load": True}})
+    assert cfg.allow_unsafe_checkpoint_load is True
