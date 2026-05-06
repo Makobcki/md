@@ -1457,23 +1457,62 @@ button.secondary.mask-toggle.active {
   gap: 10px;
 }
 
-.auth-controls {
+.auth-page {
+  min-height: 100vh;
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  padding: 24px;
+  background:
+    linear-gradient(180deg, var(--bg), var(--panel-alt));
 }
 
-.auth-controls input {
+.auth-page .preview-loader {
   width: 180px;
-  max-width: 22vw;
+  height: 180px;
+}
+
+.auth-panel {
+  width: min(100%, 360px);
+  display: grid;
+  gap: 18px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.auth-panel h1 {
+  margin: 0 0 6px;
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.auth-field {
+  display: grid;
+  gap: 8px;
+}
+
+.auth-error,
+.auth-toast {
+  color: var(--danger);
+}
+
+.auth-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  padding: 8px 12px;
+  border: 1px solid var(--status-failed-border);
+  border-radius: 8px;
+  background: var(--status-failed-bg);
 }
 
 @media (max-width: 900px) {
   .header-actions {
     width: 100%;
     justify-content: flex-end;
-  }
-  .auth-controls input {
-    max-width: 38vw;
   }
 }

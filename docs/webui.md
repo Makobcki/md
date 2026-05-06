@@ -102,11 +102,13 @@ Use absolute paths.
 
 ## Authentication token
 
-Set a token:
+Set the backend token before starting WebUI:
 
 ```bash
 export WEBUI_AUTH_TOKEN="secret"
 ```
+
+When authentication is enabled, the browser shows a login page. Enter the same token there once; WebUI stores the authenticated session in an HttpOnly cookie, so page refreshes keep working until logout or cookie expiry.
 
 Do not expose WebUI to the public internet without authentication.
 

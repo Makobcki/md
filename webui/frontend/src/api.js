@@ -2,18 +2,13 @@ const DEFAULT_API_BASE = window.location.origin;
 const API_BASE = (import.meta?.env?.VITE_API_BASE || DEFAULT_API_BASE).replace(/\/+$/, "");
 export const API_ORIGIN = new URL(API_BASE).origin;
 
-export function getAuthToken() {
-  return import.meta?.env?.VITE_AUTH_TOKEN || window.localStorage?.getItem("WEBUI_AUTH_TOKEN") || "";
+function normalizeAuthToken(token) {
+  const value = String(token || "").trim();
+  return value.toLowerCase().startsWith("bearer ") ? value.slice(7).trim() : value;
 }
 
-export const AUTH_TOKEN = getAuthToken();
-
-export function setAuthToken(token) {
-  if (token) {
-    window.localStorage?.setItem("WEBUI_AUTH_TOKEN", token);
-  } else {
-    window.localStorage?.removeItem("WEBUI_AUTH_TOKEN");
-  }
+export function clearLegacyAuthToken() {
+  window.localStorage?.removeItem("WEBUI_AUTH_TOKEN");
 }
 
 export function absoluteFileUrl(item) {
@@ -32,11 +27,6 @@ export function absoluteDownloadUrl(item) {
   return absoluteFileUrl(item);
 }
 
-function authHeaders() {
-  const token = getAuthToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 function errorMessage(detail, fallback) {
   if (Array.isArray(detail?.detail)) {
     return detail.detail
@@ -51,12 +41,12 @@ function errorMessage(detail, fallback) {
 export async function fetchJson(path, options = {}) {
   const headers = {
     "Content-Type": "application/json",
-    ...authHeaders(),
     ...(options.headers || {}),
   };
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers,
+    credentials: "include",
   });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
@@ -71,8 +61,8 @@ export async function uploadImage(file, kind = "image") {
   form.append("kind", kind);
   const res = await fetch(`${API_BASE}/api/uploads/image`, {
     method: "POST",
-    headers: authHeaders(),
     body: form,
+    credentials: "include",
   });
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
@@ -134,6 +124,9 @@ export const api = {
     fetchJson(`/api/checkpoints/info?path=${encodeURIComponent(path)}`),
   getOutDirSummary: () => fetchJson("/api/out_dir/summary"),
   getAuthStatus: () => fetchJson("/api/auth/status"),
+  login: (token) =>
+    fetchJson("/api/auth/login", { method: "POST", body: JSON.stringify({ token: normalizeAuthToken(token) }) }),
+  logout: () => fetchJson("/api/auth/logout", { method: "POST" }),
   listSamples: (runId = "") => {
     const suffix = runId ? `?run_id=${encodeURIComponent(runId)}` : "";
     return fetchJson(`/api/generated-samples${suffix}`);
@@ -167,9 +160,5 @@ export function wsUrl(path) {
   const url = new URL(API_BASE);
   const protocol = url.protocol === "https:" ? "wss" : "ws";
   const ws = new URL(path, `${protocol}://${url.host}`);
-  const token = getAuthToken();
-  if (token) {
-    ws.searchParams.set("token", token);
-  }
   return ws.toString();
 }

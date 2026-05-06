@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any, AsyncIterator, Dict, List, Literal, Optional
 import re
 import shutil
+import time
 import uuid
 import base64
 import hashlib
@@ -17,7 +18,7 @@ import mimetypes
 import secrets
 import yaml
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Cookie, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -72,8 +73,25 @@ _FILE_TOKEN_SECRET = (
     or os.environ.get("WEBUI_AUTH_TOKEN")
     or secrets.token_urlsafe(32)
 ).encode("utf-8")
+_AUTH_COOKIE_NAME = "webui_auth"
+_AUTH_COOKIE_MAX_AGE = int(os.environ.get("WEBUI_AUTH_COOKIE_MAX_AGE", str(30 * 24 * 60 * 60)))
+_AUTH_COOKIE_SECURE = os.environ.get("WEBUI_AUTH_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
 ws_manager = WSManager()
 job_manager = JobManager(ROOT_DIR, ws_manager, RUNS_DIR)
+
+
+def _cors_allowed_origins() -> list[str]:
+    origins = [
+        item.strip()
+        for item in os.environ.get(
+            "WEBUI_CORS_ORIGINS",
+            "http://127.0.0.1:5173,http://localhost:5173",
+        ).split(",")
+        if item.strip()
+    ]
+    if "*" in origins:
+        raise RuntimeError("WEBUI_CORS_ORIGINS='*' is not allowed with cookie authentication.")
+    return origins
 
 
 @asynccontextmanager
@@ -87,15 +105,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        item.strip()
-        for item in os.environ.get(
-            "WEBUI_CORS_ORIGINS",
-            "http://127.0.0.1:5173,http://localhost:5173",
-        ).split(",")
-        if item.strip()
-    ],
-    allow_credentials=False,
+    allow_origins=_cors_allowed_origins(),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -109,26 +120,90 @@ def _get_out_dir() -> Path:
     return out_dir
 
 
+def _normalize_auth_token(value: str | None) -> str:
+    if not isinstance(value, str):
+        return ""
+    token = value.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token
+
+
 def _token_is_valid(value: str | None) -> bool:
-    expected = os.environ.get("WEBUI_AUTH_TOKEN")
+    expected = _normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN"))
     if not expected:
         return True
-    return value == f"Bearer {expected}" or value == expected
+    return hmac.compare_digest(_normalize_auth_token(value), expected)
 
 
-def _require_token(authorization: str | None = Header(default=None)) -> None:
-    if _token_is_valid(authorization):
+def _auth_cookie_value(expected: str | None = None) -> str:
+    token = _normalize_auth_token(expected if expected is not None else os.environ.get("WEBUI_AUTH_TOKEN"))
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    body = _b64url(
+        json.dumps(
+            {"v": 1, "digest": digest, "exp": int(time.time()) + _AUTH_COOKIE_MAX_AGE},
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    sig = _b64url(hmac.new(_FILE_TOKEN_SECRET, body.encode("ascii"), hashlib.sha256).digest())
+    return f"{body}.{sig}"
+
+
+def _auth_cookie_is_valid(value: str | None) -> bool:
+    expected = _normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN"))
+    if not expected:
+        return True
+    if not value:
+        return False
+    try:
+        body, sig = str(value).split(".", 1)
+        expected_sig = _b64url(hmac.new(_FILE_TOKEN_SECRET, body.encode("ascii"), hashlib.sha256).digest())
+        if not hmac.compare_digest(sig, expected_sig):
+            return False
+        payload = json.loads(_b64url_decode(body).decode("utf-8"))
+        digest = payload.get("digest") if isinstance(payload, dict) else None
+        expires_at = payload.get("exp") if isinstance(payload, dict) else None
+        if not isinstance(expires_at, int) or expires_at < int(time.time()):
+            return False
+        expected_digest = hashlib.sha256(expected.encode("utf-8")).hexdigest()
+        return isinstance(digest, str) and hmac.compare_digest(digest, expected_digest)
+    except Exception:
+        return False
+
+
+def _set_auth_cookie(response: Response, request: Request | None = None) -> None:
+    secure = _AUTH_COOKIE_SECURE or bool(request and request.url.scheme == "https")
+    response.set_cookie(
+        _AUTH_COOKIE_NAME,
+        _auth_cookie_value(),
+        max_age=_AUTH_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=secure,
+        path="/",
+    )
+
+
+def _clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(_AUTH_COOKIE_NAME, path="/", samesite="lax")
+
+
+def _require_token(
+    authorization: str | None = Header(default=None),
+    auth_cookie: str | None = Cookie(default=None, alias=_AUTH_COOKIE_NAME),
+) -> None:
+    if _token_is_valid(authorization) or _auth_cookie_is_valid(auth_cookie):
         return
     raise HTTPException(status_code=401, detail="invalid auth token")
 
 
 async def _require_ws_token(websocket: WebSocket) -> bool:
-    expected = os.environ.get("WEBUI_AUTH_TOKEN")
+    expected = _normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN"))
     if not expected:
         return True
-    token = websocket.query_params.get("token")
     authorization = websocket.headers.get("authorization")
-    if _token_is_valid(authorization) or _token_is_valid(token):
+    auth_cookie = getattr(websocket, "cookies", {}).get(_AUTH_COOKIE_NAME)
+    if _token_is_valid(authorization) or _auth_cookie_is_valid(auth_cookie):
         return True
     await websocket.close(code=1008)
     return False
@@ -354,6 +429,11 @@ class LatentArgs(BaseModel):
 class LatentCacheRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     args: LatentArgs
+
+
+class AuthLoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = ""
 
 
 _LATENT_PREPARE_ARG_KEYS = {
@@ -594,9 +674,36 @@ def download_safe_file(token: str, _: None = Depends(_require_token)) -> FileRes
 
 
 @app.get("/api/auth/status")
-def get_auth_status(authorization: str | None = Header(default=None)) -> Dict[str, Any]:
-    required = bool(os.environ.get("WEBUI_AUTH_TOKEN"))
-    return {"auth_required": required, "authenticated": (not required) or _token_is_valid(authorization)}
+def get_auth_status(
+    authorization: str | None = Header(default=None),
+    auth_cookie: str | None = Cookie(default=None, alias=_AUTH_COOKIE_NAME),
+) -> Dict[str, Any]:
+    required = bool(_normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN")))
+    authenticated = (
+        (not required)
+        or _token_is_valid(authorization)
+        or _auth_cookie_is_valid(auth_cookie)
+    )
+    return {"auth_required": required, "authenticated": authenticated}
+
+
+@app.post("/api/auth/login")
+def login(payload: AuthLoginRequest, response: Response, request: Request) -> Dict[str, Any]:
+    required = bool(_normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN")))
+    if required and not _token_is_valid(payload.token):
+        _clear_auth_cookie(response)
+        raise HTTPException(status_code=401, detail="invalid auth token")
+    if required:
+        _set_auth_cookie(response, request)
+    else:
+        _clear_auth_cookie(response)
+    return {"auth_required": required, "authenticated": True}
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response) -> Dict[str, Any]:
+    _clear_auth_cookie(response)
+    return {"ok": True}
 
 
 @app.get("/api/files/{rel_path:path}")

@@ -47,7 +47,7 @@ def main() -> None:
             assert npm_path is not None
             cmd = [npm_path, "run", "dev", "--", "--host", str(args.frontend_host), "--port", str(args.frontend_port)]
             env = os.environ.copy()
-            env.setdefault("VITE_API_BASE", f"http://127.0.0.1:{int(args.port)}")
+            env.setdefault("VITE_BACKEND_TARGET", f"http://127.0.0.1:{int(args.port)}")
             frontend_proc = subprocess.Popen(cmd, cwd=str(frontend_dir), env=env)
             atexit.register(frontend_proc.terminate)
         elif mode == "missing":
