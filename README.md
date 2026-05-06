@@ -39,7 +39,7 @@ python -m scripts.lint
 md-lint
 ```
 
-Apply safe Ruff fixes and formatting:
+Apply supported source hygiene fixes:
 
 ```bash
 md-lint --fix

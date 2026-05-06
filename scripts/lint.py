@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import argparse
 import py_compile
-import shlex
-import shutil
-import subprocess
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
@@ -152,62 +149,88 @@ def _run_py_compile(paths: Sequence[Path], root: Path) -> int:
     return 1 if failures else 0
 
 
-def _run_subprocess(command: Sequence[str], root: Path) -> int:
-    """Run a linter subprocess from the project root."""
-    print(f"$ {shlex.join(command)}")
-    completed = subprocess.run(command, cwd=root, check=False)
-    return completed.returncode
-
-
-def _ruff_paths(paths: Sequence[Path], root: Path) -> list[str]:
-    """Convert paths to stable Ruff CLI arguments."""
-    return [_display_path(path, root) for path in paths if not _is_excluded(path, root)]
-
-
-def _run_ruff(paths: Sequence[Path], root: Path, *, fix: bool, skip_missing: bool) -> int:
-    """Run Ruff lint and format checks.
+def _normalize_source_text(text: str) -> str:
+    """Normalize source text using checks implemented by this script.
 
     Args:
-        paths: Existing files or directories to lint.
+        text: Original UTF-8 source text.
+
+    Returns:
+        Text with LF endings, no trailing horizontal whitespace, and a final newline.
+
+    """
+    if not text:
+        return text
+    lines = text.splitlines()
+    normalized = "\n".join(line.rstrip(" \t") for line in lines)
+    return f"{normalized}\n"
+
+
+def _source_hygiene_issues(path: Path, text: str, root: Path) -> list[str]:
+    """Return source hygiene issues for one Python file."""
+    display_path = _display_path(path, root)
+    issues: list[str] = []
+
+    for line_number, raw_line in enumerate(text.splitlines(keepends=True), start=1):
+        line = raw_line.rstrip("\r\n")
+        if line.endswith((" ", "\t")):
+            issues.append(f"{display_path}:{line_number}: trailing whitespace")
+
+    if text and not text.endswith("\n"):
+        issues.append(f"{display_path}: missing final newline")
+    if "\r\n" in text or "\r" in text.replace("\r\n", ""):
+        issues.append(f"{display_path}: non-LF line endings")
+
+    return issues
+
+
+def _run_source_hygiene(paths: Sequence[Path], root: Path, *, fix: bool) -> int:
+    """Check project source hygiene without external linter dependencies.
+
+    Args:
+        paths: Existing files or directories to check.
         root: Project root.
-        fix: Whether Ruff may modify files.
-        skip_missing: Whether missing Ruff should be treated as a warning.
+        fix: Whether this script may apply supported source hygiene fixes.
 
     Returns:
         Process return code.
 
     """
-    ruff = shutil.which("ruff")
-    if ruff is None:
-        message = (
-            "ruff executable was not found. Install project dev dependencies with "
-            "`python -m pip install -e '.[dev]'`."
-        )
-        if skip_missing:
-            print(f"warning: {message}", file=sys.stderr)
-            return 0
-        print(f"error: {message}", file=sys.stderr)
-        return 1
+    python_files = _iter_python_files(paths, root)
+    if not python_files:
+        print("source_hygiene: no Python files found")
+        return 0
 
-    lint_args = [ruff, "check"]
-    if fix:
-        lint_args.append("--fix")
-    lint_args.extend(_ruff_paths(paths, root))
+    print(f"source_hygiene: checking {len(python_files)} files")
+    has_failures = False
+    for path in python_files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            has_failures = True
+            print(f"{_display_path(path, root)}: invalid UTF-8: {exc}", file=sys.stderr)
+            continue
 
-    format_args = [ruff, "format"]
-    if not fix:
-        format_args.append("--check")
-    format_args.extend(_ruff_paths(paths, root))
+        normalized = _normalize_source_text(text)
+        if normalized == text:
+            continue
 
-    lint_status = _run_subprocess(lint_args, root)
-    format_status = _run_subprocess(format_args, root)
-    return lint_status or format_status
+        if fix:
+            path.write_text(normalized, encoding="utf-8", newline="\n")
+            print(f"fixed: {_display_path(path, root)}")
+            continue
+
+        has_failures = True
+        for issue in _source_hygiene_issues(path, text, root):
+            print(issue, file=sys.stderr)
+
+    return 1 if has_failures else 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser."""
     parser = argparse.ArgumentParser(
-        description="Run project syntax checks, Ruff linting, and Ruff formatting checks."
+        description="Run project syntax and source hygiene checks without external linters."
     )
     parser.add_argument(
         "paths",
@@ -218,7 +241,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fix",
         action="store_true",
-        help="Apply safe Ruff fixes and format files instead of only checking them.",
+        help="Apply supported source hygiene fixes instead of only checking them.",
     )
     parser.add_argument(
         "--no-py-compile",
@@ -226,14 +249,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip Python bytecode compilation syntax checks.",
     )
     parser.add_argument(
+        "--no-style",
+        action="store_true",
+        help="Skip source hygiene checks.",
+    )
+    parser.add_argument(
         "--no-ruff",
         action="store_true",
-        help="Skip Ruff linting and formatting checks.",
+        dest="no_style",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--skip-ruff-if-missing",
         action="store_true",
-        help="Treat a missing Ruff executable as a warning.",
+        help=argparse.SUPPRESS,
     )
     return parser
 
@@ -260,10 +289,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     status = 0
     if not args.no_py_compile:
         status = _run_py_compile(paths, root) or status
-    if not args.no_ruff:
-        status = (
-            _run_ruff(paths, root, fix=args.fix, skip_missing=args.skip_ruff_if_missing) or status
-        )
+    if not args.no_style:
+        status = _run_source_hygiene(paths, root, fix=args.fix) or status
     return status
 
 

@@ -37,7 +37,6 @@ web = [
 ]
 dev = [
     "pytest>=8.2.0",
-    "ruff>=0.8.0",
 ]
 all = [
     "diffusers",
@@ -48,7 +47,6 @@ all = [
     "protobuf>=4.25",
     "pydantic>=2.6.1",
     "pytest>=8.2.0",
-    "ruff>=0.8.0",
     "safetensors>=0.4.5",
     "sentencepiece>=0.2.0",
     "torch",
