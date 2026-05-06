@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import time
 from pathlib import Path
-from typing import Any
+import time
+from typing import Optional
 
 import torch
 from tqdm import tqdm
@@ -11,17 +11,17 @@ from config.train import TrainConfig
 from diffusion.io.events import AsyncEventBus, JsonlFileSink
 from diffusion.objectives import RectifiedFlowObjective
 from diffusion.utils import EMA, unwrap_model
-from diffusion.vae import VAEWrapper
 from model.mmdit import MMDiTFlowModel
 from model.text.conditioning import TextConditioning, TrainBatch
 from model.text.pretrained import FrozenTextEncoderBundle
-from train.checkpoint import _prune_checkpoints, link_checkpoint_alias, save_ckpt
-from train.checkpoint_mmdit import build_mmdit_checkpoint_metadata
-from train.dist import DistributedContext
+from diffusion.vae import VAEWrapper
+from train.checkpoint import _prune_checkpoints, save_ckpt
 from train.eval_mmdit import run_mmdit_eval_sampling
-from train.metrics import loss_by_t_bins
 from train.schedulers import _apply_lr, _compute_lr
 from train.webui import _is_webui_mode, _webui_metrics_path
+from train.metrics import loss_by_t_bins
+from train.checkpoint_mmdit import build_mmdit_checkpoint_metadata
+from train.dist import DistributedContext
 
 
 def _assert_finite(name: str, x: torch.Tensor) -> None:
@@ -50,23 +50,15 @@ def _move_batch(batch: TrainBatch, device: torch.device) -> TrainBatch:
         control_latents=batch.control_latents.to(device=device, dtype=torch.float32)
         if batch.control_latents is not None
         else None,
-        control_type=batch.control_type.to(device=device, dtype=torch.long)
-        if batch.control_type is not None
-        else None,
+        control_type=batch.control_type.to(device=device, dtype=torch.long) if batch.control_type is not None else None,
         task=batch.task,
-        strength=batch.strength.to(device=device, dtype=torch.float32)
-        if batch.strength is not None
-        else None,
-        control_strength=batch.control_strength.to(device=device, dtype=torch.float32)
-        if batch.control_strength is not None
-        else None,
+        strength=batch.strength.to(device=device, dtype=torch.float32) if batch.strength is not None else None,
+        control_strength=batch.control_strength.to(device=device, dtype=torch.float32) if batch.control_strength is not None else None,
         metadata=batch.metadata,
     )
 
 
-def _replace_text_where(
-    text: TextConditioning, empty_text: TextConditioning, drop_prob: float
-) -> TextConditioning:
+def _replace_text_where(text: TextConditioning, empty_text: TextConditioning, drop_prob: float) -> TextConditioning:
     if drop_prob <= 0:
         return text
     drop = torch.rand(text.tokens.shape[0], device=text.tokens.device) < float(drop_prob)
@@ -102,17 +94,11 @@ def _per_sample_flow_mse(
     if m.dim() == 3:
         m = m.unsqueeze(1)
     if m.shape[-2:] != pred.shape[-2:]:
-        raise RuntimeError(
-            f"mask shape {tuple(m.shape)} is incompatible with prediction shape {tuple(pred.shape)}"
-        )
+        raise RuntimeError(f"mask shape {tuple(m.shape)} is incompatible with prediction shape {tuple(pred.shape)}")
     if m.shape[0] != pred.shape[0]:
-        raise RuntimeError(
-            f"mask batch {m.shape[0]} is incompatible with prediction batch {pred.shape[0]}"
-        )
+        raise RuntimeError(f"mask batch {m.shape[0]} is incompatible with prediction batch {pred.shape[0]}")
     if m.shape[1] not in {1, pred.shape[1]}:
-        raise RuntimeError(
-            f"mask channel count {m.shape[1]} is incompatible with prediction channels {pred.shape[1]}"
-        )
+        raise RuntimeError(f"mask channel count {m.shape[1]} is incompatible with prediction channels {pred.shape[1]}")
     weights = m * float(mask_weight) + (1.0 - m) * float(unmask_weight)
     weights = weights.expand_as(err) if weights.shape[1] == 1 else weights
     denom = weights.sum(dim=[1, 2, 3])
@@ -124,12 +110,8 @@ def _per_sample_flow_mse(
         return weighted if task == "inpaint" else full
     tasks = list(task)
     if len(tasks) != pred.shape[0]:
-        raise RuntimeError(
-            f"task batch {len(tasks)} is incompatible with prediction batch {pred.shape[0]}"
-        )
-    inpaint_rows = torch.tensor(
-        [str(name) == "inpaint" for name in tasks], device=pred.device, dtype=torch.bool
-    )
+        raise RuntimeError(f"task batch {len(tasks)} is incompatible with prediction batch {pred.shape[0]}")
+    inpaint_rows = torch.tensor([str(name) == "inpaint" for name in tasks], device=pred.device, dtype=torch.bool)
     return torch.where(inpaint_rows, weighted, full)
 
 
@@ -173,16 +155,8 @@ def _loss_and_bins(
         if float(getattr(model.cfg, "x0_aux_weight", 0.0)) > 0:
             t_view = train_tuple.t.to(device=pred.device, dtype=pred.dtype).view(-1, 1, 1, 1)
             x0_pred = train_tuple.xt.to(device=pred.device, dtype=pred.dtype) - t_view * pred
-            x0_err = (
-                (x0_pred.float() - batch.x0.to(device=pred.device, dtype=torch.float32))
-                .pow(2)
-                .mean(dim=[1, 2, 3])
-            )
-            loss = (
-                loss
-                + float(model.cfg.x0_aux_weight)
-                * (x0_err * train_tuple.weight.to(device=x0_err.device, dtype=x0_err.dtype)).mean()
-            )
+            x0_err = (x0_pred.float() - batch.x0.to(device=pred.device, dtype=torch.float32)).pow(2).mean(dim=[1, 2, 3])
+            loss = loss + float(model.cfg.x0_aux_weight) * (x0_err * train_tuple.weight.to(device=x0_err.device, dtype=x0_err.dtype)).mean()
 
     stats = loss_by_t_bins(per.detach(), train_tuple.t.detach(), bins=10, prefix="loss_t_bin")
     return loss, stats
@@ -193,14 +167,14 @@ def _run_validation(
     *,
     model: MMDiTFlowModel,
     objective: RectifiedFlowObjective,
-    dataloader: Any,
+    dataloader,
     device: torch.device,
     max_batches: int,
     use_amp: bool,
     amp_dtype: torch.dtype,
     inpaint_loss_mask_weight: float = 1.0,
     inpaint_loss_unmask_weight: float = 1.0,
-) -> tuple[float | None, dict[str, float]]:
+) -> tuple[Optional[float], dict[str, float]]:
     if dataloader is None or max_batches <= 0:
         return None, {}
     was_training = model.training
@@ -235,9 +209,7 @@ def _run_validation(
                     unmask_weight=float(inpaint_loss_unmask_weight),
                 )
             losses.append(float(per.mean().cpu()))
-            for key, value in loss_by_t_bins(
-                per.detach(), train_tuple.t.detach(), bins=10, prefix="val_loss_t_bin"
-            ).items():
+            for key, value in loss_by_t_bins(per.detach(), train_tuple.t.detach(), bins=10, prefix="val_loss_t_bin").items():
                 bins.setdefault(key, []).append(value)
     finally:
         model.train(was_training)
@@ -258,7 +230,7 @@ def _grad_diagnostics(model: torch.nn.Module) -> dict[str, float | bool]:
         has_inf = has_inf or bool(torch.isinf(grad).any().item())
         finite_grad = torch.nan_to_num(grad.float(), nan=0.0, posinf=0.0, neginf=0.0)
         total += float(finite_grad.norm(2).item()) ** 2
-    norm = total**0.5
+    norm = total ** 0.5
     return {
         "grad_norm_total": norm,
         "grad_norm": norm,
@@ -322,8 +294,8 @@ def run_mmdit_training_loop(
     cfg: TrainConfig,
     cfg_dict: dict,
     model: MMDiTFlowModel,
-    dataloader: Any,
-    val_dataloader: Any,
+    dataloader,
+    val_dataloader,
     objective: RectifiedFlowObjective,
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
@@ -334,9 +306,9 @@ def run_mmdit_training_loop(
     checkpoint_dir: Path | None = None,
     start_step: int,
     text_metadata: dict,
-    eval_prompts: list[str] | None = None,
-    eval_text_encoder: FrozenTextEncoderBundle | None = None,
-    eval_vae: VAEWrapper | None = None,
+    eval_prompts: Optional[list[str]] = None,
+    eval_text_encoder: Optional[FrozenTextEncoderBundle] = None,
+    eval_vae: Optional[VAEWrapper] = None,
     dist: DistributedContext | None = None,
 ) -> None:
     try:
@@ -357,9 +329,7 @@ def run_mmdit_training_loop(
     val_batches = int(cfg.val_batches)
     base_lr = float(cfg.lr)
     warmup_steps = int(cfg.warmup_steps)
-    decay_steps = (
-        int(cfg.decay_steps) if int(cfg.decay_steps) > 0 else max(max_steps - warmup_steps, 0)
-    )
+    decay_steps = int(cfg.decay_steps) if int(cfg.decay_steps) > 0 else max(max_steps - warmup_steps, 0)
     min_lr_ratio = float(cfg.min_lr_ratio)
     use_amp = bool(cfg.amp) and device.type == "cuda"
     amp_dtype = torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16
@@ -372,16 +342,10 @@ def run_mmdit_training_loop(
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     sinks = []
     if write_outputs:
-        sinks.extend(
-            [JsonlFileSink(out_dir / "events.jsonl"), JsonlFileSink(metrics_dir / "events.jsonl")]
-        )
+        sinks.extend([JsonlFileSink(out_dir / "events.jsonl"), JsonlFileSink(metrics_dir / "events.jsonl")])
         metrics_path = _webui_metrics_path()
         if metrics_path is not None:
-            sinks.append(
-                JsonlFileSink(
-                    metrics_path, event_types=["metric", "progress", "train", "eval", "sample"]
-                )
-            )
+            sinks.append(JsonlFileSink(metrics_path, event_types=["metric", "progress", "train", "eval", "sample"]))
     event_bus = AsyncEventBus(sinks)
 
     pbar = tqdm(
@@ -406,9 +370,7 @@ def run_mmdit_training_loop(
 
     try:
         while step < max_steps:
-            sampler = getattr(dataloader, "batch_sampler", None) or getattr(
-                dataloader, "sampler", None
-            )
+            sampler = getattr(dataloader, "batch_sampler", None) or getattr(dataloader, "sampler", None)
             if hasattr(sampler, "set_epoch"):
                 sampler.set_epoch(epoch_idx)
             dataset = getattr(dataloader, "dataset", None)
@@ -453,9 +415,7 @@ def run_mmdit_training_loop(
                         scaler.unscale_(optimizer)
                     grad_stats = _grad_diagnostics(model)
                     grad_norm = float(grad_stats["grad_norm_total"])
-                    has_nonfinite_grad = bool(grad_stats["has_nan_grad"]) or bool(
-                        grad_stats["has_inf_grad"]
-                    )
+                    has_nonfinite_grad = bool(grad_stats["has_nan_grad"]) or bool(grad_stats["has_inf_grad"])
                     if has_nonfinite_grad:
                         if bool(cfg.fail_on_nonfinite_grad):
                             for name, param in model.named_parameters():
@@ -467,18 +427,12 @@ def run_mmdit_training_loop(
                         continue
                     if grad_clip > 0:
                         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                    old_scale = (
-                        float(scaler.get_scale()) if use_amp and scaler.is_enabled() else 1.0
-                    )
+                    old_scale = float(scaler.get_scale()) if use_amp and scaler.is_enabled() else 1.0
                     scaler.step(optimizer)
                     scaler.update()
-                    new_scale = (
-                        float(scaler.get_scale()) if use_amp and scaler.is_enabled() else old_scale
-                    )
+                    new_scale = float(scaler.get_scale()) if use_amp and scaler.is_enabled() else old_scale
                     optimizer.zero_grad(set_to_none=True)
-                    optimizer_step_ran = (
-                        (not use_amp) or (not scaler.is_enabled()) or new_scale >= old_scale
-                    )
+                    optimizer_step_ran = (not use_amp) or (not scaler.is_enabled()) or new_scale >= old_scale
                     if not optimizer_step_ran:
                         accum_idx = 0
                         continue
@@ -505,9 +459,7 @@ def run_mmdit_training_loop(
                             "sec_per_step": float(avg_sec_per_step_progress),
                             "s_per_step": float(avg_sec_per_step_progress),
                             "avg_sec_per_step": float(avg_sec_per_step_progress),
-                            "steps_per_sec": float(1.0 / avg_sec_per_step_progress)
-                            if avg_sec_per_step_progress > 0
-                            else 0.0,
+                            "steps_per_sec": float(1.0 / avg_sec_per_step_progress) if avg_sec_per_step_progress > 0 else 0.0,
                             "remaining_steps": int(remaining_steps_progress),
                         }
                     )
@@ -516,9 +468,7 @@ def run_mmdit_training_loop(
                         window_elapsed_sec = max(now - log_window_start, 1.0e-9)
                         window_steps = max(int(next_step) - int(log_window_step), 1)
                         sec_per_step = window_elapsed_sec / float(window_steps)
-                        avg_sec_per_step = elapsed_sec / float(
-                            max(int(next_step) - int(start_step), 1)
-                        )
+                        avg_sec_per_step = elapsed_sec / float(max(int(next_step) - int(start_step), 1))
                         remaining_steps = max(int(max_steps) - int(next_step), 0)
                         eta_sec = remaining_steps * sec_per_step
                         mean_loss = sum(recent_losses) / max(len(recent_losses), 1)
@@ -548,12 +498,7 @@ def run_mmdit_training_loop(
                             "remaining_steps": int(remaining_steps),
                         }
                         local_bins = {k: sum(v) / len(v) for k, v in recent_bins.items() if v}
-                        event.update(
-                            {
-                                k: dist.reduce_mean_float(float(v), device=device)
-                                for k, v in local_bins.items()
-                            }
-                        )
+                        event.update({k: dist.reduce_mean_float(float(v), device=device) for k, v in local_bins.items()})
                         event_bus.emit(event)
                         recent_losses.clear()
                         recent_bins.clear()
@@ -581,12 +526,7 @@ def run_mmdit_training_loop(
                                 "max_steps": max_steps,
                                 "val_loss": val_loss,
                             }
-                            event.update(
-                                {
-                                    k: dist.reduce_mean_float(float(v), device=device)
-                                    for k, v in val_bins.items()
-                                }
-                            )
+                            event.update({k: dist.reduce_mean_float(float(v), device=device) for k, v in val_bins.items()})
                             event_bus.emit(event)
 
                     if (
@@ -637,10 +577,6 @@ def run_mmdit_training_loop(
                         latest_path = checkpoint_dir / "latest.pt"
                         save_ckpt(str(step_path), ckpt)
                         save_ckpt(str(latest_path), ckpt)
-                        # Backward-compatible flat aliases for older scripts/UI.
-                        link_checkpoint_alias(step_path, out_dir / f"ckpt_{next_step:07d}.pt")
-                        link_checkpoint_alias(latest_path, out_dir / "ckpt_latest.pt")
-                        _prune_checkpoints(out_dir, int(cfg.ckpt_keep_last))
                         _prune_checkpoints(checkpoint_dir, int(cfg.ckpt_keep_last))
 
                     step = next_step
@@ -667,8 +603,6 @@ def run_mmdit_training_loop(
             latest_path = checkpoint_dir / "latest.pt"
             save_ckpt(str(final_path), ckpt)
             save_ckpt(str(latest_path), ckpt)
-            link_checkpoint_alias(final_path, out_dir / "ckpt_final.pt")
-            link_checkpoint_alias(latest_path, out_dir / "ckpt_latest.pt")
         dist.wait_for_everyone()
     finally:
         event_bus.close()
