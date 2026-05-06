@@ -232,6 +232,8 @@ class MMDiTFlowModel(nn.Module):
             names = [[control_type] * streams for _ in range(batch)]
         else:
             seq = list(control_type)
+            if len(seq) == batch == streams and batch > 1 and all(isinstance(x, str) for x in seq):
+                raise ValueError("control_type string list is ambiguous when batch size equals stream count; use a tensor or nested list.")
             if len(seq) == batch and all(isinstance(x, str) for x in seq):
                 names = [[str(x)] * streams for x in seq]
             elif len(seq) == streams and all(isinstance(x, str) for x in seq):
@@ -251,7 +253,7 @@ class MMDiTFlowModel(nn.Module):
         return [task] * batch_size if isinstance(task, str) else [str(v) for v in task]
 
     def _row_stream_mask(self, names: list[str], present_for: set[str], *, tokens: int, device: torch.device) -> torch.Tensor:
-        rows = torch.tensor([name in present_for for name in names], device=device, dtype=torch.bool).view(-1, 1)
+        rows = torch.tensor([name == "mixed" or name in present_for for name in names], device=device, dtype=torch.bool).view(-1, 1)
         return rows.expand(len(names), int(tokens))
 
     def _condition_tokens(
@@ -322,6 +324,8 @@ class MMDiTFlowModel(nn.Module):
                 device=x.device,
                 dtype=x.dtype,
             ).view(x.shape[0], 1, 1)
+            control_present = torch.tensor([name == "mixed" or name == "control" for name in task_names], device=x.device, dtype=torch.bool).view(-1, 1)
+            control_present = control_present & (control_gate.reshape(x.shape[0], 1) != 0)
             for idx in range(controls.shape[1]):
                 type_token = self.type_control
                 if self.cfg.control_type_embed:
@@ -335,7 +339,7 @@ class MMDiTFlowModel(nn.Module):
                 )
                 control_tokens = control_gate * (control_base + type_token)
                 control_tokens = self.control_adapter(control_tokens)
-                streams.append((control_tokens, self._row_stream_mask(task_names, {"control"}, tokens=control_tokens.shape[1], device=x.device), cond_grid, self.cfg.control_patch_size))
+                streams.append((control_tokens, control_present.expand(x.shape[0], control_tokens.shape[1]), cond_grid, self.cfg.control_patch_size))
         if self.cfg.hierarchical_tokens_enabled:
             coarse_tokens, coarse_grid = self._patch_image_like_base(
                 self.coarse_patch_embed,

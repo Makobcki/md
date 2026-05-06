@@ -6,6 +6,7 @@ torch = pytest.importorskip("torch")
 
 from model.text.conditioning import TextConditioning
 import train.loop_mmdit_full as loop
+import train.loop_mmdit as minimal_loop
 
 
 def _text(batch: int = 2) -> TextConditioning:
@@ -84,3 +85,46 @@ def test_grad_diagnostics_reports_nan_and_inf_without_crashing() -> None:
     assert stats["has_nan_grad"] is True
     assert stats["has_inf_grad"] is True
     assert stats["grad_norm_total"] >= 0.0
+
+
+def test_minimal_loop_preserves_conditioning_fields_on_device_move(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Model(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.p = torch.nn.Parameter(torch.zeros(()))
+
+    class _Objective:
+        pass
+
+    captured = {}
+
+    def fake_training_step_mmdit(*, model, objective, batch, **kwargs):
+        del objective, kwargs
+        captured["batch"] = batch
+        return model.p * 0.0 + 1.0
+
+    monkeypatch.setattr(minimal_loop, "training_step_mmdit", fake_training_step_mmdit)
+    model = _Model()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    batch = minimal_loop.TrainBatch(
+        x0=torch.zeros(1, 4, 2, 2),
+        text=TextConditioning(torch.zeros(1, 1, 3), torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 3)),
+        control_type=torch.tensor([[2]]),
+        strength=torch.tensor([0.5]),
+        control_strength=torch.tensor([0.0]),
+    )
+
+    minimal_loop.run_minimal_mmdit_loop(
+        model=model,  # type: ignore[arg-type]
+        dataloader=[batch],
+        optimizer=optimizer,
+        objective=_Objective(),  # type: ignore[arg-type]
+        device=torch.device("cpu"),
+        max_steps=1,
+        amp=False,
+    )
+
+    moved = captured["batch"]
+    assert moved.control_type is not None and torch.equal(moved.control_type, torch.tensor([[2]]))
+    assert moved.strength is not None and torch.equal(moved.strength, torch.tensor([0.5]))
+    assert moved.control_strength is not None and torch.equal(moved.control_strength, torch.tensor([0.0]))

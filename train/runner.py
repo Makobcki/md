@@ -1161,7 +1161,7 @@ def _run_mmdit_rf(cfg: TrainConfig, *, device: torch.device, perf_active: dict, 
     resume_path = ""
     if str(cfg.resume_ckpt).strip():
         resume_path = resolve_resume_path(str(cfg.resume_ckpt), out_dir)
-        ck = _load_resume_checkpoint(resume_path)
+        ck = _load_resume_checkpoint(resume_path, allow_unsafe=bool(cfg.allow_unsafe_checkpoint_load))
         validate_mmdit_checkpoint_compatibility(ck, cfg_dict)
         model_state = normalize_state_dict_for_model(ck["model"], model, name="model")
         model.load_state_dict(model_state, strict=True)
@@ -1299,8 +1299,8 @@ def _resolve_latent_shard_index_path(cfg: TrainConfig) -> Path:
     return _resolve_latent_cache_dir(cfg) / index_path
 
 
-def _load_resume_checkpoint(path: str) -> dict:
-    return load_ckpt(path, torch.device("cpu"))
+def _load_resume_checkpoint(path: str, *, allow_unsafe: bool = False) -> dict:
+    return load_ckpt(path, torch.device("cpu"), allow_unsafe=allow_unsafe)
 
 
 def dry_run(cfg: TrainConfig) -> None:

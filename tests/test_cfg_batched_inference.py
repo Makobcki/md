@@ -5,7 +5,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from model.text.conditioning import TextConditioning
-from samplers.cfg import cfg_predict
+from samplers.cfg import cfg_predict, concat_text_conditioning
 
 
 class _CountingModel(torch.nn.Module):
@@ -57,3 +57,18 @@ def test_cfg_scale_one_uses_cond_only() -> None:
     out = cfg_predict(model, x, t, _text(3.0), _text(-10.0), scale=1.0)
     assert model.calls == 1
     assert torch.allclose(out, torch.full_like(x, 3.0))
+
+
+def test_concat_text_conditioning_preserves_partial_token_types() -> None:
+    uncond = _text(0.0, batch=1)
+    cond = TextConditioning(
+        tokens=torch.ones(1, 3, 4),
+        mask=torch.ones(1, 3, dtype=torch.bool),
+        pooled=torch.ones(1, 4),
+        token_types=torch.tensor([[0, 1, 1]], dtype=torch.long),
+    )
+
+    out = concat_text_conditioning([uncond, cond])
+
+    assert out.token_types is not None
+    assert torch.equal(out.token_types, torch.tensor([[0, 0, 0], [0, 1, 1]], dtype=torch.long))

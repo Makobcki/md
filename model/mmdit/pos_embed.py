@@ -12,7 +12,7 @@ def get_2d_sincos_pos_embed(
     dtype: torch.dtype,
 ) -> torch.Tensor:
     if dim % 4 != 0:
-        return torch.zeros((height * width, dim), device=device, dtype=dtype)
+        raise ValueError("sincos_2d positional embedding requires hidden_dim divisible by 4; set hidden_dim to a multiple of 4 or use pos_embed=rope_2d/none.")
     y = torch.arange(height, device=device, dtype=torch.float32)
     x = torch.arange(width, device=device, dtype=torch.float32)
     yy, xx = torch.meshgrid(y, x, indexing="ij")

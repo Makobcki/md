@@ -64,6 +64,8 @@ def test_base_profile_exists_and_train_yaml_is_alias_compatible() -> None:
         ({"depth": 3, "double_stream_blocks": 1, "single_stream_blocks": 1}, "must equal depth"),
         ({"dataset_tasks": {"txt2img": 1.0, "bad_task": 0.1}}, "unsupported task"),
         ({"dataset_tasks": {"txt2img": -1.0}}, "weights must be non-negative"),
+        ({"source_patch_size": 3}, "source_patch_size"),
+        ({"hidden_dim": 30, "num_heads": 5, "pos_embed": "sincos_2d"}, "sincos_2d requires hidden_dim divisible by 4"),
         ({"sampling_sampler": "bad_sampler"}, "sampling_sampler must be one of"),
         ({"amp_dtype": "fp8"}, "amp_dtype must be"),
         ({"latent_dtype": "fp32"}, "latent_dtype must be"),

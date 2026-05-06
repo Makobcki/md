@@ -20,14 +20,14 @@ class TextConditioning:
     token_types: torch.Tensor | None = None
 
     def to(self, *args, **kwargs) -> "TextConditioning":
-        dtype = kwargs.get("dtype", None)
-        device = kwargs.get("device", None)
+        tokens = self.tokens.to(*args, **kwargs)
+        pooled = self.pooled.to(*args, **kwargs)
         return TextConditioning(
-            tokens=self.tokens.to(*args, **kwargs),
-            mask=self.mask.to(device=device) if dtype is not None else self.mask.to(*args, **kwargs),
-            pooled=self.pooled.to(*args, **kwargs),
-            is_uncond=self.is_uncond.to(device=device) if self.is_uncond is not None else None,
-            token_types=self.token_types.to(device=device) if self.token_types is not None else None,
+            tokens=tokens,
+            mask=self.mask.to(device=tokens.device),
+            pooled=pooled,
+            is_uncond=self.is_uncond.to(device=tokens.device) if self.is_uncond is not None else None,
+            token_types=self.token_types.to(device=tokens.device) if self.token_types is not None else None,
         )
 
     def replace_where(self, drop: torch.Tensor, empty: "TextConditioning") -> "TextConditioning":

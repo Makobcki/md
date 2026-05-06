@@ -77,3 +77,40 @@ def test_mmdit_rejects_invalid_conditioning_shapes() -> None:
 
     with pytest.raises(ValueError, match="Unsupported MMDiT task"):
         model(x, torch.rand(1), text, task="unsupported")
+
+
+def test_control_strength_zero_masks_control_stream() -> None:
+    model = _tiny_model()
+    x = torch.randn(2, 4, 8, 8)
+    controls = torch.randn(2, 1, 4, 8, 8)
+    _, img_mask, _, _, _ = model._condition_tokens(
+        x,
+        source_latent=None,
+        mask=None,
+        control_latents=controls,
+        control_strength=torch.tensor([0.0, 1.0]),
+        task=["control", "control"],
+    )
+    control_tokens = (x.shape[-2] // model.cfg.control_patch_size) * (x.shape[-1] // model.cfg.control_patch_size)
+    assert not img_mask[0, :control_tokens].any()
+    assert img_mask[1, :control_tokens].all()
+
+
+def test_mixed_task_activates_supplied_conditioning_streams() -> None:
+    model = _tiny_model()
+    x = torch.randn(1, 4, 8, 8)
+    _, img_mask, _, _, _ = model._condition_tokens(
+        x,
+        source_latent=torch.randn_like(x),
+        mask=torch.ones(1, 1, 8, 8),
+        control_latents=torch.randn(1, 4, 8, 8),
+        control_strength=1.0,
+        task="mixed",
+    )
+    assert img_mask.all()
+
+
+def test_control_type_string_list_is_rejected_when_batch_equals_streams() -> None:
+    model = _tiny_model()
+    with pytest.raises(ValueError, match="ambiguous"):
+        model._control_type_ids(["image", "canny"], batch=2, streams=2, device=torch.device("cpu"))

@@ -8,6 +8,11 @@ latent_patch_size: 2
 objective: rectified_flow
 prediction_type: flow_velocity
 
+checkpoint:
+  # Set true only for trusted legacy .pt files that cannot be loaded with
+  # torch.load(..., weights_only=True).
+  allow_unsafe_load: false
+
 # Dataset root used by smoke/tiny/dev MMDiT profiles.
 data_root: ./data/dataset
 image_dir: images

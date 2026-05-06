@@ -69,3 +69,21 @@ def test_invalid_text_token_types_shape_is_rejected() -> None:
     )
     with pytest.raises(ValueError, match="token_types shape"):
         model(torch.randn(1, 4, 8, 8), torch.rand(1), text)
+
+
+def test_text_conditioning_to_dtype_keeps_masks_integer_types() -> None:
+    text = TextConditioning(
+        tokens=torch.randn(1, 2, 4),
+        mask=torch.ones(1, 2, dtype=torch.bool),
+        pooled=torch.randn(1, 4),
+        is_uncond=torch.ones(1, dtype=torch.bool),
+        token_types=torch.tensor([[0, 1]], dtype=torch.long),
+    )
+
+    out = text.to(torch.float16)
+
+    assert out.tokens.dtype == torch.float16
+    assert out.pooled.dtype == torch.float16
+    assert out.mask.dtype == torch.bool
+    assert out.is_uncond is not None and out.is_uncond.dtype == torch.bool
+    assert out.token_types is not None and out.token_types.dtype == torch.long
