@@ -11,7 +11,6 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
 
     YAML is kept as a compatibility layer; new project configs should use KDL.
     """
-
     file_path = Path(path)
     data = yaml.safe_load(file_path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):

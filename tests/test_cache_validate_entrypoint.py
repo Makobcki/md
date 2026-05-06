@@ -13,6 +13,7 @@ def test_validate_cache_help_opens(capsys) -> None:
 
 
 def test_pyproject_exposes_cache_validate_entrypoint() -> None:
-    text = open("pyproject.toml", encoding="utf-8").read()
+    with open("pyproject.toml", encoding="utf-8") as file:
+        text = file.read()
     assert 'md-cache-validate = "scripts.validate_cache:main"' in text
     assert 'md-eval = "train.eval_cli:main"' in text

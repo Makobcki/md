@@ -4,14 +4,15 @@ import json
 import queue
 import threading
 import traceback
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional, Protocol
+from types import TracebackType
+from typing import Protocol
 
 
 class EventSink(Protocol):
-    def emit(self, event: dict) -> None:
-        ...
+    def emit(self, event: dict) -> None: ...
 
 
 def _format_number(value: object) -> str:
@@ -100,7 +101,7 @@ class StdoutJsonSink:
 class JsonlFileSink:
     # Пишет события в .jsonl файл.
     path: Path
-    event_types: Optional[Iterable[str]] = None
+    event_types: Iterable[str] | None = None
 
     def emit(self, event: dict) -> None:
         if self.event_types is not None and event.get("type") not in set(self.event_types):
@@ -146,10 +147,15 @@ class AsyncEventBus:
         self._queue.put(None)
         self._thread.join(timeout=timeout)
 
-    def __enter__(self) -> "AsyncEventBus":
+    def __enter__(self) -> AsyncEventBus:
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     @property

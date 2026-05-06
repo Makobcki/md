@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 from torch import nn
 
@@ -34,7 +32,9 @@ class FeedForward(nn.Module):
 
 
 def _offset_rope_sections(
-    sections: tuple[tuple[int, int, int, int], ...] | tuple[tuple[int, int, int, int, int, int], ...] | None,
+    sections: tuple[tuple[int, int, int, int], ...]
+    | tuple[tuple[int, int, int, int, int, int], ...]
+    | None,
     offset: int,
 ) -> tuple[tuple[int, ...], ...] | None:
     """Move image-local RoPE sections into a joint [text, image] sequence.
@@ -90,17 +90,23 @@ class MMDiTDoubleBlock(nn.Module):
         img: torch.Tensor,
         txt: torch.Tensor,
         cond: torch.Tensor,
-        txt_mask: Optional[torch.Tensor],
-        img_mask: Optional[torch.Tensor] = None,
-        rope_grid_hw: Optional[tuple[int, int]] = None,
+        txt_mask: torch.Tensor | None,
+        img_mask: torch.Tensor | None = None,
+        rope_grid_hw: tuple[int, int] | None = None,
         use_rope: bool = False,
-        rope_base_grid_hw: Optional[tuple[int, int]] = None,
+        rope_base_grid_hw: tuple[int, int] | None = None,
         rope_scaling: str = "none",
         rope_theta: float = 10000.0,
-        rope_sections: tuple[tuple[int, int, int, int], ...] | tuple[tuple[int, int, int, int, int, int], ...] | None = None,
+        rope_sections: tuple[tuple[int, int, int, int], ...]
+        | tuple[tuple[int, int, int, int, int, int], ...]
+        | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        img_shift, img_scale, img_gate_attn, img_mlp_shift, img_mlp_scale, img_gate_mlp = self.img_adaln(cond)
-        txt_shift, txt_scale, txt_gate_attn, txt_mlp_shift, txt_mlp_scale, txt_gate_mlp = self.txt_adaln(cond)
+        img_shift, img_scale, img_gate_attn, img_mlp_shift, img_mlp_scale, img_gate_mlp = (
+            self.img_adaln(cond)
+        )
+        txt_shift, txt_scale, txt_gate_attn, txt_mlp_shift, txt_mlp_scale, txt_gate_mlp = (
+            self.txt_adaln(cond)
+        )
 
         img_norm = modulate(self.img_norm1(img), img_shift, img_scale)
         txt_norm = modulate(self.txt_norm1(txt), txt_shift, txt_scale)
@@ -123,7 +129,9 @@ class MMDiTDoubleBlock(nn.Module):
                 else torch.ones(img.shape[:2], device=img.device, dtype=torch.bool)
             )
             joint_mask = torch.cat([txt_mask_v, img_mask_v], dim=1)
-        joint_rope_sections = _offset_rope_sections(rope_sections, txt.shape[1]) if use_rope else None
+        joint_rope_sections = (
+            _offset_rope_sections(rope_sections, txt.shape[1]) if use_rope else None
+        )
         out = self.attn(
             q,
             k,
@@ -141,8 +149,12 @@ class MMDiTDoubleBlock(nn.Module):
 
         txt = txt + txt_gate_attn.unsqueeze(1) * self.txt_out(out_txt)
         img = img + img_gate_attn.unsqueeze(1) * self.img_out(out_img)
-        txt = txt + txt_gate_mlp.unsqueeze(1) * self.txt_mlp(modulate(self.txt_norm2(txt), txt_mlp_shift, txt_mlp_scale))
-        img = img + img_gate_mlp.unsqueeze(1) * self.img_mlp(modulate(self.img_norm2(img), img_mlp_shift, img_mlp_scale))
+        txt = txt + txt_gate_mlp.unsqueeze(1) * self.txt_mlp(
+            modulate(self.txt_norm2(txt), txt_mlp_shift, txt_mlp_scale)
+        )
+        img = img + img_gate_mlp.unsqueeze(1) * self.img_mlp(
+            modulate(self.img_norm2(img), img_mlp_shift, img_mlp_scale)
+        )
         return img, txt
 
 
@@ -172,14 +184,16 @@ class MMDiTSingleBlock(nn.Module):
         img: torch.Tensor,
         txt: torch.Tensor,
         cond: torch.Tensor,
-        txt_mask: Optional[torch.Tensor],
-        img_mask: Optional[torch.Tensor] = None,
-        rope_grid_hw: Optional[tuple[int, int]] = None,
+        txt_mask: torch.Tensor | None,
+        img_mask: torch.Tensor | None = None,
+        rope_grid_hw: tuple[int, int] | None = None,
         use_rope: bool = False,
-        rope_base_grid_hw: Optional[tuple[int, int]] = None,
+        rope_base_grid_hw: tuple[int, int] | None = None,
         rope_scaling: str = "none",
         rope_theta: float = 10000.0,
-        rope_sections: tuple[tuple[int, int, int, int], ...] | tuple[tuple[int, int, int, int, int, int], ...] | None = None,
+        rope_sections: tuple[tuple[int, int, int, int], ...]
+        | tuple[tuple[int, int, int, int, int, int], ...]
+        | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         x = torch.cat([txt, img], dim=1)
         shift, scale, gate_attn, mlp_shift, mlp_scale, gate_mlp = self.adaln(cond)
@@ -198,7 +212,9 @@ class MMDiTSingleBlock(nn.Module):
                 else torch.ones(img.shape[:2], device=img.device, dtype=torch.bool)
             )
             joint_mask = torch.cat([txt_mask_v, img_mask_v], dim=1)
-        joint_rope_sections = _offset_rope_sections(rope_sections, txt.shape[1]) if use_rope else None
+        joint_rope_sections = (
+            _offset_rope_sections(rope_sections, txt.shape[1]) if use_rope else None
+        )
         x = x + gate_attn.unsqueeze(1) * self.out(
             self.attn(
                 q,
@@ -216,7 +232,6 @@ class MMDiTSingleBlock(nn.Module):
         )
         x = x + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(x), mlp_shift, mlp_scale))
         return x[:, txt.shape[1] :], x[:, : txt.shape[1]]
-
 
 
 class ImageOnlyBlock(nn.Module):
@@ -245,14 +260,16 @@ class ImageOnlyBlock(nn.Module):
         img: torch.Tensor,
         txt: torch.Tensor,
         cond: torch.Tensor,
-        txt_mask: Optional[torch.Tensor],
-        img_mask: Optional[torch.Tensor] = None,
-        rope_grid_hw: Optional[tuple[int, int]] = None,
+        txt_mask: torch.Tensor | None,
+        img_mask: torch.Tensor | None = None,
+        rope_grid_hw: tuple[int, int] | None = None,
         use_rope: bool = False,
-        rope_base_grid_hw: Optional[tuple[int, int]] = None,
+        rope_base_grid_hw: tuple[int, int] | None = None,
         rope_scaling: str = "none",
         rope_theta: float = 10000.0,
-        rope_sections: tuple[tuple[int, int, int, int], ...] | tuple[tuple[int, int, int, int, int, int], ...] | None = None,
+        rope_sections: tuple[tuple[int, int, int, int], ...]
+        | tuple[tuple[int, int, int, int, int, int], ...]
+        | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         shift, scale, gate_attn, mlp_shift, mlp_scale, gate_mlp = self.adaln(cond)
         x_norm = modulate(self.norm1(img), shift, scale)
@@ -272,5 +289,7 @@ class ImageOnlyBlock(nn.Module):
                 rope_sections=rope_sections,
             )
         )
-        img = img + gate_mlp.unsqueeze(1) * self.mlp(modulate(self.norm2(img), mlp_shift, mlp_scale))
+        img = img + gate_mlp.unsqueeze(1) * self.mlp(
+            modulate(self.norm2(img), mlp_shift, mlp_scale)
+        )
         return img, txt

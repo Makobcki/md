@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
 
 @dataclass(frozen=True)
 class VAEConfig:
-    pretrained: Optional[str] = None
+    pretrained: str | None = None
     freeze: bool = True
     scaling_factor: float = 0.18215
 
@@ -17,7 +16,7 @@ class VAEWrapper:
     def __init__(
         self,
         *,
-        pretrained: Optional[str],
+        pretrained: str | None,
         freeze: bool,
         scaling_factor: float,
         device: torch.device,
@@ -28,8 +27,12 @@ class VAEWrapper:
         try:
             from diffusers import AutoencoderKL
         except Exception as exc:
-            raise RuntimeError("diffusers is required for VAEWrapper. Please install diffusers.") from exc
-        self.cfg = VAEConfig(pretrained=pretrained, freeze=bool(freeze), scaling_factor=float(scaling_factor))
+            raise RuntimeError(
+                "diffusers is required for VAEWrapper. Please install diffusers."
+            ) from exc
+        self.cfg = VAEConfig(
+            pretrained=pretrained, freeze=bool(freeze), scaling_factor=float(scaling_factor)
+        )
         self.device = device
         self.dtype = dtype
         self.vae = AutoencoderKL.from_pretrained(pretrained).to(device=device, dtype=dtype)

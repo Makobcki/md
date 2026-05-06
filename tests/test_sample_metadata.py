@@ -48,7 +48,9 @@ def test_sample_metadata_helpers_write_reproducible_json(tmp_path: Path) -> None
         latent_w=64,
         checkpoint_step=123,
         checkpoint_metadata={},
-        text_encoder=Namespace(metadata=lambda: {"backend": "fake", "encoders": [], "text_dim": 32, "pooled_dim": 32}),
+        text_encoder=Namespace(
+            metadata=lambda: {"backend": "fake", "encoders": [], "text_dim": 32, "pooled_dim": 32}
+        ),
     )
     metadata = _sample_metadata(args, built, sampler="flow_heun", seed=42)
     written = _write_sample_metadata(out, metadata)
@@ -73,4 +75,9 @@ def test_sample_metadata_helpers_write_reproducible_json(tmp_path: Path) -> None
     assert payload["model_config"]["depth"] == 1
     assert payload["model_config"]["num_heads"] == 4
     assert payload["vae_config"]["pretrained"] == "./vae_sd_mse"
-    assert payload["text_encoder_config"] == {"backend": "fake", "encoders": [], "text_dim": 32, "pooled_dim": 32}
+    assert payload["text_encoder_config"] == {
+        "backend": "fake",
+        "encoders": [],
+        "text_dim": 32,
+        "pooled_dim": 32,
+    }

@@ -1,7 +1,3 @@
-from .misc import EMA, unwrap_model
-from .runmeta import build_run_metadata
-from .seed import seed_everything
-
 from diffusion.io.ckpt import (
     CKPT_FORMAT_VERSION,
     load_ckpt,
@@ -13,6 +9,10 @@ from diffusion.io.ckpt import (
     save_ckpt,
     strip_state_dict_prefixes,
 )
+
+from .misc import EMA, unwrap_model
+from .runmeta import build_run_metadata
+from .seed import seed_everything
 
 __all__ = [
     "EMA",

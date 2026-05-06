@@ -6,7 +6,22 @@ from dataclasses import replace
 
 from config.loader import load_sample_config, parse_cli_overrides
 
-from .api import SampleOptions, run_sample
+from .api import (
+    SampleOptions,
+    _metadata_sidecar_path,
+    _sample_metadata,
+    _write_sample_metadata,
+    run_sample,
+)
+
+__all__ = [
+    "SampleOptions",
+    "_metadata_sidecar_path",
+    "_sample_metadata",
+    "_write_sample_metadata",
+    "main",
+    "run_sample",
+]
 
 
 def _positive_int(value: str) -> int:
@@ -79,8 +94,17 @@ def _apply_cli_args(options: SampleOptions, args: argparse.Namespace) -> SampleO
 def _main_impl() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="", help="Config path. Defaults to configs/sample.kdl.")
-    ap.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE", help="Override config value, e.g. --set prompt.text='a landscape'.")
-    ap.add_argument("--print-config", action="store_true", help="Print resolved sample options and exit.")
+    ap.add_argument(
+        "--set",
+        dest="set_values",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override config value, e.g. --set prompt.text='a landscape'.",
+    )
+    ap.add_argument(
+        "--print-config", action="store_true", help="Print resolved sample options and exit."
+    )
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--out", default=None)
     ap.add_argument("--n", type=_positive_int, default=None)
@@ -88,7 +112,12 @@ def _main_impl() -> None:
     ap.add_argument("--prompt", default=None)
     ap.add_argument("--neg_prompt", "--negative-prompt", dest="neg_prompt", default=None)
     ap.add_argument("--cfg", type=float, default=None)
-    ap.add_argument("--shift", type=_positive_float, default=None, help="Positive inference timestep shift override. Defaults to checkpoint/config sampling shift.")
+    ap.add_argument(
+        "--shift",
+        type=_positive_float,
+        default=None,
+        help="Positive inference timestep shift override. Defaults to checkpoint/config sampling shift.",
+    )
     ap.add_argument("--sampler", default=None, choices=("flow_euler", "flow_heun"))
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--device", default=None)
@@ -98,11 +127,28 @@ def _main_impl() -> None:
     ap.add_argument("--strength", type=_bounded_strength, default=None)
     ap.add_argument("--mask", default=None)
     ap.add_argument("--control-image", dest="control_image", default=None)
-    ap.add_argument("--control-strength", dest="control_strength", type=_nonnegative_float, default=None)
-    ap.add_argument("--control-type", dest="control_type", default=None, choices=("none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"))
+    ap.add_argument(
+        "--control-strength", dest="control_strength", type=_nonnegative_float, default=None
+    )
+    ap.add_argument(
+        "--control-type",
+        dest="control_type",
+        default=None,
+        choices=("none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"),
+    )
     ap.add_argument("--task", default=None, choices=("txt2img", "img2img", "inpaint", "control"))
-    ap.add_argument("--latent-only", dest="latent_only", action="store_true", help="Write final latent tensor instead of decoding through VAE.")
-    ap.add_argument("--fake-vae", dest="fake_vae", action="store_true", help="Use deterministic fake VAE decoder for smoke tests.")
+    ap.add_argument(
+        "--latent-only",
+        dest="latent_only",
+        action="store_true",
+        help="Write final latent tensor instead of decoding through VAE.",
+    )
+    ap.add_argument(
+        "--fake-vae",
+        dest="fake_vae",
+        action="store_true",
+        help="Use deterministic fake VAE decoder for smoke tests.",
+    )
     ap.add_argument("--use-ema", dest="use_ema", action="store_true", default=None)
     ap.add_argument("--no-ema", dest="use_ema", action="store_false")
     args = ap.parse_args()
@@ -112,6 +158,8 @@ def _main_impl() -> None:
         overrides=parse_cli_overrides(args.set_values),
     )
     options = _apply_cli_args(config.options, args)
+    if args.shift is None and not args.config and not args.set_values:
+        options = replace(options, shift=None)
     if args.print_config:
         print(json.dumps(options.__dict__, indent=2, ensure_ascii=False), flush=True)
         return

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """I/O helpers.
 
 This module intentionally avoids importing checkpoint helpers eagerly because
@@ -7,6 +5,8 @@ This module intentionally avoids importing checkpoint helpers eagerly because
 JSONL event helpers without paying the torch import cost or triggering torch
 import failures in minimal environments.
 """
+
+from __future__ import annotations
 
 from .events import EventBus, JsonlFileSink, StdoutJsonSink, format_event_line
 
@@ -31,7 +31,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> object:
     if name in _CKPT_EXPORTS:
         from . import ckpt as _ckpt
 

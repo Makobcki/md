@@ -59,7 +59,15 @@ def test_mmdit_uses_separate_text_projection_and_type_embeddings() -> None:
 
 
 def test_invalid_text_token_types_shape_is_rejected() -> None:
-    cfg = MMDiTConfig(hidden_dim=32, depth=1, num_heads=4, double_stream_blocks=1, single_stream_blocks=0, text_dim=16, pooled_dim=16)
+    cfg = MMDiTConfig(
+        hidden_dim=32,
+        depth=1,
+        num_heads=4,
+        double_stream_blocks=1,
+        single_stream_blocks=0,
+        text_dim=16,
+        pooled_dim=16,
+    )
     model = MMDiTFlowModel(cfg)
     text = TextConditioning(
         tokens=torch.randn(1, 4, 16),

@@ -6,11 +6,13 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from config.train import TrainConfig
 import train.runner as runner
+from config.train import TrainConfig
 
 
-def test_train_auto_prepares_missing_caches(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_train_auto_prepares_missing_caches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     cfg = TrainConfig(
         data_root=str(tmp_path),
         text_cache_dir=".cache/text",
@@ -40,7 +42,9 @@ def test_train_auto_prepares_missing_caches(monkeypatch: pytest.MonkeyPatch, tmp
             self.index_path = _MissingPath(ready)
             self.metadata_path = _MissingPath(ready)
             self.entries = {"abc123": object()} if ready else {}
-            self.metadata = {"text_dim": cfg.text_dim, "pooled_dim": cfg.pooled_dim} if ready else {}
+            self.metadata = (
+                {"text_dim": cfg.text_dim, "pooled_dim": cfg.pooled_dim} if ready else {}
+            )
 
     def fake_prepare_text_cache(**kwargs) -> None:
         assert kwargs["cfg"] is cfg
@@ -54,19 +58,25 @@ def test_train_auto_prepares_missing_caches(monkeypatch: pytest.MonkeyPatch, tmp
             return "missing", "missing sharded latent index"
         return "ready", ""
 
-    def fake_prepare_latent_cache_for_config(_cfg: TrainConfig, *, overwrite: bool | None = None) -> None:
+    def fake_prepare_latent_cache_for_config(
+        _cfg: TrainConfig, *, overwrite: bool | None = None
+    ) -> None:
         assert _cfg is cfg
         assert overwrite is False
         calls.append("latent")
 
-    import scripts.prepare_text_cache as prepare_text_module
     import scripts.prepare_latents as prepare_latents_module
+    import scripts.prepare_text_cache as prepare_text_module
 
     monkeypatch.setattr(runner, "TextCache", _FakeTextCache)
     monkeypatch.setattr(runner, "_validate_text_cache_for_mmdit", lambda *args, **kwargs: None)
     monkeypatch.setattr(prepare_text_module, "prepare_text_cache", fake_prepare_text_cache)
     monkeypatch.setattr(runner, "_latent_cache_state", fake_latent_cache_state)
-    monkeypatch.setattr(prepare_latents_module, "prepare_latent_cache_for_config", fake_prepare_latent_cache_for_config)
+    monkeypatch.setattr(
+        prepare_latents_module,
+        "prepare_latent_cache_for_config",
+        fake_prepare_latent_cache_for_config,
+    )
 
     runner._ensure_mmdit_caches_ready(cfg, entries, torch.device("cpu"))
 

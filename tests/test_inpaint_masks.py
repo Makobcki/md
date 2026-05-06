@@ -11,7 +11,9 @@ def _area(mask: torch.Tensor) -> float:
     return float(mask.float().mean().item())
 
 
-@pytest.mark.parametrize("mode", ["rectangle", "brush", "center_rectangle", "small", "large", "random_blocks"])
+@pytest.mark.parametrize(
+    "mode", ["rectangle", "brush", "center_rectangle", "small", "large", "random_blocks"]
+)
 def test_inpaint_mask_modes_shape_area_and_binary(mode: str) -> None:
     cfg = InpaintMaskConfig(mask_min_area=0.10, mask_max_area=0.40, mask_modes={mode: 1.0})
     mask = generate_inpaint_mask((4, 32, 32), config=cfg, seed=123, dtype=torch.float32)
@@ -31,7 +33,9 @@ def test_full_inpaint_mask_requires_and_respects_full_area() -> None:
 
 
 def test_inpaint_mask_seed_is_deterministic() -> None:
-    cfg = InpaintMaskConfig(mask_min_area=0.05, mask_max_area=0.25, mask_modes={"random_blocks": 1.0})
+    cfg = InpaintMaskConfig(
+        mask_min_area=0.05, mask_max_area=0.25, mask_modes={"random_blocks": 1.0}
+    )
     a = generate_inpaint_mask((4, 24, 24), config=cfg, seed=42)
     b = generate_inpaint_mask((4, 24, 24), config=cfg, seed=42)
     c = generate_inpaint_mask((4, 24, 24), config=cfg, seed=43)

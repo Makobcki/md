@@ -5,7 +5,9 @@ import pytest
 torch = pytest.importorskip("torch")
 
 
-def test_joint_attention_sdpa_mask_uses_true_for_valid_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_joint_attention_sdpa_mask_uses_true_for_valid_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import model.mmdit.attention as attention_module
     from model.mmdit.attention import JointAttention
 

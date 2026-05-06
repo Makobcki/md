@@ -93,7 +93,13 @@ def test_train_config_accepts_nested_dataset_text_fields() -> None:
     cfg = TrainConfig.from_dict(
         {
             "dataset": {"text_field": "prompt", "text_fields": ["prompt", "caption", "text"]},
-            "model": {"hidden_dim": 16, "depth": 1, "num_heads": 4, "double_stream_blocks": 1, "single_stream_blocks": 0},
+            "model": {
+                "hidden_dim": 16,
+                "depth": 1,
+                "num_heads": 4,
+                "double_stream_blocks": 1,
+                "single_stream_blocks": 0,
+            },
             "text": {"text_dim": 8, "pooled_dim": 8},
         }
     )

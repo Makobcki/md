@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import torch
 
@@ -13,14 +14,13 @@ from sample.build import build_all
 from samplers import sample_flow_euler, sample_flow_heun
 from train.eval import load_eval_prompt_bank, save_image_grid
 
-
 DEFAULT_CFG_SWEEP: tuple[float, ...] = (1.0, 2.5, 4.5, 7.0)
 DEFAULT_STEP_SWEEP: tuple[int, ...] = (8, 16, 28, 40)
 DEFAULT_SAMPLER_SWEEP: tuple[str, ...] = ("flow_euler", "flow_heun")
 DEFAULT_SHIFT_SWEEP: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0)
 
 
-def _select_sampler(name: str):
+def _select_sampler(name: str) -> Callable[..., torch.Tensor]:
     if name == "flow_euler":
         return sample_flow_euler
     if name == "flow_heun":
@@ -118,7 +118,9 @@ def run_fixed_seed_eval_grids(
         raise RuntimeError("cfg must be non-negative")
     prompt_bank = load_eval_prompt_bank(prompt_sets, root=prompt_root, count_per_set=count_per_set)
     device_obj = torch.device(device if device == "cpu" or torch.cuda.is_available() else "cpu")
-    built = build_all(str(ckpt), device_obj, latent_only=latent_only, fake_vae=fake_vae, use_ema=use_ema)
+    built = build_all(
+        str(ckpt), device_obj, latent_only=latent_only, fake_vae=fake_vae, use_ema=use_ema
+    )
     if built.vae is None and not latent_only:
         raise RuntimeError("Eval image grids require a VAE, --fake-vae, or --latent-only.")
 
@@ -144,7 +146,9 @@ def run_fixed_seed_eval_grids(
     sampler_sweep = list(sampler_values) if sampler_values is not None else [str(sampler)]
     base_shift = float(shift if shift is not None else built.cfg.get("sampling_shift", 1.0))
     shift_sweep = list(shift_values) if shift_values is not None else [base_shift]
-    is_sweep = len(cfg_sweep) > 1 or len(step_sweep) > 1 or len(sampler_sweep) > 1 or len(shift_sweep) > 1
+    is_sweep = (
+        len(cfg_sweep) > 1 or len(step_sweep) > 1 or len(sampler_sweep) > 1 or len(shift_sweep) > 1
+    )
 
     latent_shape = (1, int(built.image_channels), int(latent_h), int(latent_w))
     uncond = _empty_conditioning(built)
@@ -184,14 +188,16 @@ def run_fixed_seed_eval_grids(
                             decoded: list[torch.Tensor] = []
                             latent_outputs: list[torch.Tensor] = []
                             seed_records: list[int] = []
-                            for prompt_idx, prompt in enumerate(prompts):
+                            for prompt in prompts:
                                 cond = _conditioning_for_prompt(built, prompt)
-                                for sample_idx in range(int(n_per_prompt)):
+                                for _sample_idx in range(int(n_per_prompt)):
                                     sample_seed = int(seed) + len(seed_records)
                                     seed_records.append(sample_seed)
                                     gen = torch.Generator(device=device_obj)
                                     gen.manual_seed(sample_seed)
-                                    noise = torch.randn(latent_shape, device=device_obj, generator=gen)
+                                    noise = torch.randn(
+                                        latent_shape, device=device_obj, generator=gen
+                                    )
                                     z = sampler_fn(
                                         model=built.model,
                                         shape=latent_shape,
@@ -213,7 +219,11 @@ def run_fixed_seed_eval_grids(
                                 torch.save(torch.cat(latent_outputs, dim=0), grid_path)
                             else:
                                 grid_path = variant_dir / f"{set_name}_grid.png"
-                                save_image_grid(torch.cat(decoded, dim=0), grid_path, nrow=max(1, int(n_per_prompt)))
+                                save_image_grid(
+                                    torch.cat(decoded, dim=0),
+                                    grid_path,
+                                    nrow=max(1, int(n_per_prompt)),
+                                )
 
                             record = {
                                 "prompt_set": str(set_name),
@@ -245,12 +255,25 @@ def run_fixed_seed_eval_grids(
 
                         variant_metadata = {
                             "version": 1,
-                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "created_at": datetime.now(UTC).isoformat(),
                             "checkpoint_path": str(ckpt),
                             "checkpoint_step": ckpt_step,
-                            "architecture": str(getattr(built, "checkpoint_metadata", {}).get("architecture", built.cfg.get("architecture", "mmdit_rf"))),
-                            "objective": str(getattr(built, "checkpoint_metadata", {}).get("objective", built.cfg.get("objective", "rectified_flow"))),
-                            "prediction_type": str(getattr(built, "checkpoint_metadata", {}).get("prediction_type", built.cfg.get("prediction_type", "flow_velocity"))),
+                            "architecture": str(
+                                getattr(built, "checkpoint_metadata", {}).get(
+                                    "architecture", built.cfg.get("architecture", "mmdit_rf")
+                                )
+                            ),
+                            "objective": str(
+                                getattr(built, "checkpoint_metadata", {}).get(
+                                    "objective", built.cfg.get("objective", "rectified_flow")
+                                )
+                            ),
+                            "prediction_type": str(
+                                getattr(built, "checkpoint_metadata", {}).get(
+                                    "prediction_type",
+                                    built.cfg.get("prediction_type", "flow_velocity"),
+                                )
+                            ),
                             "use_ema": bool(use_ema),
                             "prompt_root": str(prompt_root),
                             "sampler": str(sampler_name),
@@ -261,7 +284,11 @@ def run_fixed_seed_eval_grids(
                             "shift": effective_shift,
                             "image_size": [eval_h, eval_w],
                             "resolution": [eval_h, eval_w],
-                            "latent_shape": [int(built.image_channels), int(latent_h), int(latent_w)],
+                            "latent_shape": [
+                                int(built.image_channels),
+                                int(latent_h),
+                                int(latent_w),
+                            ],
                             "outputs": variant_records,
                         }
                         _write_json(variant_dir / "metadata.json", variant_metadata)
@@ -269,12 +296,18 @@ def run_fixed_seed_eval_grids(
     finally:
         built.model.train(was_training)
 
-    base_meta = {"sampler": str(sampler), "steps": int(steps), "cfg": float(cfg), "seed": int(seed), "shift": base_shift}
+    base_meta = {
+        "sampler": str(sampler),
+        "steps": int(steps),
+        "cfg": float(cfg),
+        "seed": int(seed),
+        "shift": base_shift,
+    }
     if resolution is not None:
         base_meta["resolution"] = [eval_h, eval_w]
     parent_metadata = {
         "version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "checkpoint_path": str(ckpt),
         "checkpoint_step": ckpt_step,
         "use_ema": bool(use_ema),

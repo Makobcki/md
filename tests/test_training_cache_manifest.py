@@ -24,7 +24,9 @@ def _make_dataset(root: Path, *, n: int = 3) -> None:
         md5 = f"sample{idx}"
         Image.new("RGB", (512, 512), color=(idx, idx, idx)).save(root / "images" / f"{md5}.png")
         rows.append({"md5": md5, "file_name": f"images/{md5}.png", "caption": f"caption {idx}"})
-    (root / "metadata.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    (root / "metadata.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+    )
 
 
 def _cfg(root: Path) -> TrainConfig:
@@ -88,7 +90,9 @@ def test_prepare_text_cache_writes_sharded_manifest_and_empty_prompt(tmp_path: P
     assert cache.load_empty().tokens.shape == (1, 3, 6)
 
 
-def test_prepare_training_cache_writes_unified_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_prepare_training_cache_writes_unified_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _make_dataset(tmp_path, n=2)
     cfg_path = tmp_path / "train.yaml"
     cfg_data = _cfg(tmp_path).to_dict()

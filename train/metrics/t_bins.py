@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Mapping
-
 import torch
 
 
@@ -31,7 +29,6 @@ def loss_by_t_bins(
     Empty bins are omitted so callers can safely merge the returned mapping into
     event dictionaries without serializing NaN/None values.
     """
-
     if bins <= 0:
         raise ValueError("bins must be positive.")
     losses = per_sample_loss.detach().float().reshape(-1)

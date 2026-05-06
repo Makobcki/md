@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Optional, Sequence
+from typing import Any, Literal
 
 import torch
 
@@ -19,18 +20,22 @@ class TextConditioning:
     # Existing caches and tests may omit this; the model then uses a generic text type embedding.
     token_types: torch.Tensor | None = None
 
-    def to(self, *args, **kwargs) -> "TextConditioning":
+    def to(self, *args: Any, **kwargs: Any) -> TextConditioning:
         tokens = self.tokens.to(*args, **kwargs)
         pooled = self.pooled.to(*args, **kwargs)
         return TextConditioning(
             tokens=tokens,
             mask=self.mask.to(device=tokens.device),
             pooled=pooled,
-            is_uncond=self.is_uncond.to(device=tokens.device) if self.is_uncond is not None else None,
-            token_types=self.token_types.to(device=tokens.device) if self.token_types is not None else None,
+            is_uncond=self.is_uncond.to(device=tokens.device)
+            if self.is_uncond is not None
+            else None,
+            token_types=self.token_types.to(device=tokens.device)
+            if self.token_types is not None
+            else None,
         )
 
-    def replace_where(self, drop: torch.Tensor, empty: "TextConditioning") -> "TextConditioning":
+    def replace_where(self, drop: torch.Tensor, empty: TextConditioning) -> TextConditioning:
         drop_tokens = drop.view(-1, 1, 1).to(device=self.tokens.device, dtype=torch.bool)
         drop_mask = drop.view(-1, 1).to(device=self.mask.device, dtype=torch.bool)
         drop_pooled = drop.view(-1, 1).to(device=self.pooled.device, dtype=torch.bool)
@@ -47,7 +52,9 @@ class TextConditioning:
                 empty_types = empty.token_types.to(device=self.tokens.device, dtype=torch.long)
                 if empty_types.shape[:1] == (1,) and self_types.shape[:1] != (1,):
                     empty_types = empty_types.expand_as(self_types)
-            drop_types = drop.view(-1, *([1] * (self_types.dim() - 1))).to(device=self.tokens.device, dtype=torch.bool)
+            drop_types = drop.view(-1, *([1] * (self_types.dim() - 1))).to(
+                device=self.tokens.device, dtype=torch.bool
+            )
             token_types = torch.where(drop_types, empty_types.to(self_types), self_types)
         return TextConditioning(
             tokens=torch.where(drop_tokens, empty.tokens.to(self.tokens), self.tokens),
@@ -61,23 +68,23 @@ class TextConditioning:
 @dataclass(frozen=True)
 class ConditionBatch:
     text: TextConditioning
-    source_latent: Optional[torch.Tensor] = None
-    mask: Optional[torch.Tensor] = None
-    control_latents: Optional[torch.Tensor] = None
-    control_type: Optional[torch.Tensor] = None
+    source_latent: torch.Tensor | None = None
+    mask: torch.Tensor | None = None
+    control_latents: torch.Tensor | None = None
+    control_type: torch.Tensor | None = None
     task: TaskName | str = "txt2img"
-    strength: Optional[torch.Tensor] = None
+    strength: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
 class TrainBatch:
     x0: torch.Tensor
     text: TextConditioning
-    source_latent: Optional[torch.Tensor] = None
-    mask: Optional[torch.Tensor] = None
-    control_latents: Optional[torch.Tensor] = None
-    control_type: Optional[torch.Tensor] = None
+    source_latent: torch.Tensor | None = None
+    mask: torch.Tensor | None = None
+    control_latents: torch.Tensor | None = None
+    control_type: torch.Tensor | None = None
     task: str | list[str] = "txt2img"
-    strength: Optional[torch.Tensor] = None
-    control_strength: Optional[torch.Tensor] = None
+    strength: torch.Tensor | None = None
+    control_strength: torch.Tensor | None = None
     metadata: dict | None = None

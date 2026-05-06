@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 DEFAULT_CONFIG_BY_TARGET: dict[str, str] = {
     "train": "configs/train.kdl",
     "sample": "configs/sample.kdl",
@@ -21,7 +20,6 @@ CACHE_TARGETS = {
 
 def project_root(start: str | Path | None = None) -> Path:
     """Find the project root by walking up to ``pyproject.toml``."""
-
     current = Path.cwd() if start is None else Path(start).resolve()
     if current.is_file():
         current = current.parent
@@ -33,7 +31,6 @@ def project_root(start: str | Path | None = None) -> Path:
 
 def default_config_path(target: str, *, root: str | Path | None = None) -> Path:
     """Return the default KDL config path for a target."""
-
     normalized = CACHE_TARGETS.get(target, target)
     try:
         relative = DEFAULT_CONFIG_BY_TARGET[normalized]

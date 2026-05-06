@@ -5,7 +5,7 @@ from config.formats.kdl_loader import loads_kdl
 
 def test_kdl_parses_config_uses_and_nested_values() -> None:
     data = loads_kdl(
-        '''
+        """
         config target="train" version=2 {
           use "presets/model/mmdit_576.kdl"
           model {
@@ -17,7 +17,7 @@ def test_kdl_parses_config_uses_and_nested_values() -> None:
             }
           }
         }
-        ''',
+        """,
         source="<test>",
     )
 

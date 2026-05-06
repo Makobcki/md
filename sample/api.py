@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import math
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
 
 class SampleValidationError(ValueError, RuntimeError):
@@ -59,8 +60,19 @@ class SampleOptions:
             raise SampleValidationError("width must be >= 1")
         if self.height is not None and int(self.height) < 1:
             raise SampleValidationError("height must be >= 1")
-        if self.control_type not in {"none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"}:
-            raise SampleValidationError("control_type must be one of: none, latent_identity, image, canny, depth, pose, lineart, normal")
+        if self.control_type not in {
+            "none",
+            "latent_identity",
+            "image",
+            "canny",
+            "depth",
+            "pose",
+            "lineart",
+            "normal",
+        }:
+            raise SampleValidationError(
+                "control_type must be one of: none, latent_identity, image, canny, depth, pose, lineart, normal"
+            )
         inputs = {
             "init_image": bool(self.init_image),
             "mask": bool(self.mask),
@@ -95,16 +107,25 @@ class SampleOptions:
                 f"task={self.task} does not allow {', '.join(flag_names.get(name, name) for name in extra)}"
             )
         if self.latent_only and (self.init_image or self.control_image):
-            raise SampleValidationError("init/control images require a VAE or fake_vae; they are not available in latent_only mode")
+            raise SampleValidationError(
+                "init/control images require a VAE or fake_vae; they are not available in latent_only mode"
+            )
         out_suffix = Path(self.out).suffix.lower() if self.out else ""
         if self.latent_only and out_suffix and out_suffix not in {".pt", ".pth"}:
             raise SampleValidationError("latent_only outputs must use .pt or .pth extension")
-        if not self.latent_only and out_suffix and out_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
-            raise SampleValidationError("image outputs must use .png, .jpg, .jpeg or .webp extension")
+        if (
+            not self.latent_only
+            and out_suffix
+            and out_suffix not in {".png", ".jpg", ".jpeg", ".webp"}
+        ):
+            raise SampleValidationError(
+                "image outputs must use .png, .jpg, .jpeg or .webp extension"
+            )
 
 
-def _save_image_grid(x, path: str | Path, nrow: int) -> None:
+def _save_image_grid(x: Any, path: str | Path, nrow: int) -> None:
     import torch
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     x = x.detach().cpu().float().clamp(0.0, 1.0)
@@ -116,8 +137,8 @@ def _save_image_grid(x, path: str | Path, nrow: int) -> None:
     except Exception:
         pass
 
-    from PIL import Image
     import numpy as np
+    from PIL import Image
 
     b, c, h, w = x.shape
     if c == 1:
@@ -166,20 +187,64 @@ def _model_config_for_metadata(cfg: dict[str, Any], built: Any) -> dict[str, obj
         "qk_norm": bool(cfg.get("qk_norm", model_section.get("qk_norm", True))),
         "rms_norm": bool(cfg.get("rms_norm", model_section.get("rms_norm", True))),
         "swiglu": bool(cfg.get("swiglu", model_section.get("swiglu", True))),
-        "double_stream_blocks": int(cfg.get("double_stream_blocks", model_section.get("double_stream_blocks", 16))),
-        "single_stream_blocks": int(cfg.get("single_stream_blocks", model_section.get("single_stream_blocks", 8))),
+        "double_stream_blocks": int(
+            cfg.get("double_stream_blocks", model_section.get("double_stream_blocks", 16))
+        ),
+        "single_stream_blocks": int(
+            cfg.get("single_stream_blocks", model_section.get("single_stream_blocks", 8))
+        ),
         "pos_embed": str(cfg.get("pos_embed", model_section.get("pos_embed", "rope_2d"))),
-        "rope_scaling": str(cfg.get("rope_scaling", model_section.get("rope_scaling", _cfg_section(model_section, "rope").get("scaling", "none")))),
-        "rope_base_grid_hw": list(cfg.get("rope_base_grid_hw", model_section.get("rope_base_grid_hw", _cfg_section(model_section, "rope").get("base_grid", [32, 32])))),
-        "rope_theta": float(cfg.get("rope_theta", model_section.get("rope_theta", _cfg_section(model_section, "rope").get("theta", 10000.0)))),
-        "hierarchical_tokens_enabled": bool(cfg.get("hierarchical_tokens_enabled", model_section.get("hierarchical_tokens_enabled", _cfg_section(model_section, "hierarchical").get("enabled", False)))),
-        "coarse_patch_size": int(cfg.get("coarse_patch_size", model_section.get("coarse_patch_size", _cfg_section(model_section, "hierarchical").get("coarse_patch_size", 4)))),
+        "rope_scaling": str(
+            cfg.get(
+                "rope_scaling",
+                model_section.get(
+                    "rope_scaling", _cfg_section(model_section, "rope").get("scaling", "none")
+                ),
+            )
+        ),
+        "rope_base_grid_hw": list(
+            cfg.get(
+                "rope_base_grid_hw",
+                model_section.get(
+                    "rope_base_grid_hw",
+                    _cfg_section(model_section, "rope").get("base_grid", [32, 32]),
+                ),
+            )
+        ),
+        "rope_theta": float(
+            cfg.get(
+                "rope_theta",
+                model_section.get(
+                    "rope_theta", _cfg_section(model_section, "rope").get("theta", 10000.0)
+                ),
+            )
+        ),
+        "hierarchical_tokens_enabled": bool(
+            cfg.get(
+                "hierarchical_tokens_enabled",
+                model_section.get(
+                    "hierarchical_tokens_enabled",
+                    _cfg_section(model_section, "hierarchical").get("enabled", False),
+                ),
+            )
+        ),
+        "coarse_patch_size": int(
+            cfg.get(
+                "coarse_patch_size",
+                model_section.get(
+                    "coarse_patch_size",
+                    _cfg_section(model_section, "hierarchical").get("coarse_patch_size", 4),
+                ),
+            )
+        ),
         "text_dim": int(cfg.get("text_dim", _cfg_section(cfg, "text").get("text_dim", 1024))),
         "pooled_dim": int(cfg.get("pooled_dim", _cfg_section(cfg, "text").get("pooled_dim", 1024))),
     }
 
 
-def _vae_config_for_metadata(cfg: dict[str, Any], built: Any, *, latent_only: bool, fake_vae: bool) -> dict[str, object]:
+def _vae_config_for_metadata(
+    cfg: dict[str, Any], built: Any, *, latent_only: bool, fake_vae: bool
+) -> dict[str, object]:
     meta = getattr(built, "checkpoint_metadata", {}) or {}
     if isinstance(meta, dict) and isinstance(meta.get("vae_config"), dict):
         out = dict(meta["vae_config"])
@@ -187,7 +252,9 @@ def _vae_config_for_metadata(cfg: dict[str, Any], built: Any, *, latent_only: bo
         vae = _cfg_section(cfg, "vae")
         out = {
             "pretrained": str(cfg.get("vae_pretrained", vae.get("pretrained", ""))),
-            "scaling_factor": float(cfg.get("vae_scaling_factor", vae.get("scaling_factor", 0.18215))),
+            "scaling_factor": float(
+                cfg.get("vae_scaling_factor", vae.get("scaling_factor", 0.18215))
+            ),
         }
     if latent_only:
         out["runtime_backend"] = "latent_only"
@@ -218,7 +285,7 @@ def _get_opt(args: Any, name: str, default: Any = None) -> Any:
 
 def _sample_metadata(
     args: Any,
-    built,
+    built: Any,
     *,
     sampler: str,
     seed: int,
@@ -226,13 +293,21 @@ def _sample_metadata(
     fake_vae: bool | None = None,
 ) -> dict[str, object]:
     cfg = getattr(built, "cfg", {}) or {}
-    latent_h = int(getattr(built, "latent_h", None) or int(cfg.get("image_size", 512)) // int(cfg.get("latent_downsample_factor", 8)))
-    latent_w = int(getattr(built, "latent_w", None) or int(cfg.get("image_size", 512)) // int(cfg.get("latent_downsample_factor", 8)))
+    latent_h = int(
+        getattr(built, "latent_h", None)
+        or int(cfg.get("image_size", 512)) // int(cfg.get("latent_downsample_factor", 8))
+    )
+    latent_w = int(
+        getattr(built, "latent_w", None)
+        or int(cfg.get("image_size", 512)) // int(cfg.get("latent_downsample_factor", 8))
+    )
     latent_channels = int(getattr(built, "image_channels", cfg.get("latent_channels", 4)))
     h = int(getattr(built, "h", cfg.get("image_size", 512)))
     w = int(getattr(built, "w", cfg.get("image_size", 512)))
     meta = getattr(built, "checkpoint_metadata", {}) or {}
-    checkpoint_step = int(getattr(built, "checkpoint_step", meta.get("step", 0) if isinstance(meta, dict) else 0) or 0)
+    checkpoint_step = int(
+        getattr(built, "checkpoint_step", meta.get("step", 0) if isinstance(meta, dict) else 0) or 0
+    )
     latent_only = bool(_get_opt(args, "latent_only", False) if latent_only is None else latent_only)
     fake_vae = bool(_get_opt(args, "fake_vae", False) if fake_vae is None else fake_vae)
     negative_prompt = str(_get_opt(args, "neg_prompt", ""))
@@ -248,12 +323,22 @@ def _sample_metadata(
         "checkpoint_path": str(_get_opt(args, "ckpt", "")),
         "checkpoint_step": checkpoint_step,
         "ckpt": str(_get_opt(args, "ckpt", "")),
-        "architecture": str(meta.get("architecture", cfg.get("architecture", "mmdit_rf"))) if isinstance(meta, dict) else "mmdit_rf",
-        "objective": str(meta.get("objective", cfg.get("objective", "rectified_flow"))) if isinstance(meta, dict) else "rectified_flow",
-        "prediction_type": str(meta.get("prediction_type", cfg.get("prediction_type", "flow_velocity"))) if isinstance(meta, dict) else "flow_velocity",
+        "architecture": str(meta.get("architecture", cfg.get("architecture", "mmdit_rf")))
+        if isinstance(meta, dict)
+        else "mmdit_rf",
+        "objective": str(meta.get("objective", cfg.get("objective", "rectified_flow")))
+        if isinstance(meta, dict)
+        else "rectified_flow",
+        "prediction_type": str(
+            meta.get("prediction_type", cfg.get("prediction_type", "flow_velocity"))
+        )
+        if isinstance(meta, dict)
+        else "flow_velocity",
         "prompt": str(_get_opt(args, "prompt", "")),
         "negative_prompt": negative_prompt,
-        "negative_prompt_source": str(getattr(built, "empty_text_source", "encoder")) if not negative_prompt else "encoder",
+        "negative_prompt_source": str(getattr(built, "empty_text_source", "encoder"))
+        if not negative_prompt
+        else "encoder",
         "sampler": str(sampler),
         "steps": int(_get_opt(args, "steps", 0)),
         "cfg": float(_get_opt(args, "cfg", 0.0)),
@@ -272,16 +357,18 @@ def _sample_metadata(
         "control_image": str(_get_opt(args, "control_image", "")),
         "control_strength": float(_get_opt(args, "control_strength", 1.0)),
         "control_type": str(_get_opt(args, "control_type", "image")),
-        "control_preprocessing": str(_get_opt(args, "control_type", "image")) if str(_get_opt(args, "control_image", "")) else "none",
+        "control_preprocessing": str(_get_opt(args, "control_type", "image"))
+        if str(_get_opt(args, "control_image", ""))
+        else "none",
         "latent_only": latent_only,
         "use_ema": bool(_get_opt(args, "use_ema", True)),
     }
 
 
-def _load_latent_mask(path: str, *, latent_h: int, latent_w: int, device):
-    from PIL import Image
+def _load_latent_mask(path: str, *, latent_h: int, latent_w: int, device: Any) -> Any:
     import numpy as np
     import torch
+    from PIL import Image
 
     with Image.open(path) as im:
         im = im.convert("L").resize((latent_w, latent_h))
@@ -289,18 +376,27 @@ def _load_latent_mask(path: str, *, latent_h: int, latent_w: int, device):
     return torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
 
 
-def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, object]], None] | None = None, quiet: bool = False) -> dict[str, object]:
+def run_sample(
+    options: SampleOptions,
+    event_callback: Callable[[dict[str, object]], None] | None = None,
+    quiet: bool = False,
+) -> dict[str, object]:
     options.validate()
-    import torch
     import numpy as np
+    import torch
     from PIL import Image
+
     from diffusion.events import EventBus, StdoutJsonSink
     from diffusion.perf import PerfConfig, configure_performance
     from samplers import sample_flow_euler, sample_flow_heun
+
     from .build import build_all
 
     requested_device = "cuda" if options.device == "auto" else options.device
-    device = torch.device(requested_device if requested_device == "cpu" or torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        requested_device if requested_device == "cpu" or torch.cuda.is_available() else "cpu"
+    )
+
     class _CallbackSink:
         def __init__(self, callback: Callable[[dict[str, object]], None]) -> None:
             self.callback = callback
@@ -312,9 +408,19 @@ def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, objec
     if event_callback is not None:
         sinks.append(_CallbackSink(event_callback))
     event_bus = EventBus(sinks)
-    base_seed = random.SystemRandom().randint(0, 2**31 - 1) if options.seed is None else int(options.seed)
+    base_seed = (
+        random.SystemRandom().randint(0, 2**31 - 1) if options.seed is None else int(options.seed)
+    )
     seeds = [base_seed + i for i in range(options.n)]
-    event_bus.emit({"type": "status", "status": "start", "seed": base_seed, "n": options.n, "task": options.task})
+    event_bus.emit(
+        {
+            "type": "status",
+            "status": "start",
+            "seed": base_seed,
+            "n": options.n,
+            "task": options.task,
+        }
+    )
 
     built = build_all(
         options.ckpt,
@@ -359,17 +465,24 @@ def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, objec
                 im = im.resize((built.w, built.h), Image.Resampling.LANCZOS)
             arr = np.asarray(im, dtype=np.float32) / 255.0
         return torch.from_numpy(arr).permute(2, 0, 1).contiguous() * 2.0 - 1.0
+
     if options.init_image:
         if built.vae is None:
-            raise RuntimeError("--init-image requires a VAE or --fake-vae; it is not available in --latent-only mode.")
+            raise RuntimeError(
+                "--init-image requires a VAE or --fake-vae; it is not available in --latent-only mode."
+            )
         img = _load_sample_image_tensor(options.init_image).unsqueeze(0).to(device)
         source_latent = built.vae.encode(img)
         start_t = float(options.strength)
     if options.mask:
-        mask_latent = _load_latent_mask(options.mask, latent_h=built.latent_h, latent_w=built.latent_w, device=device)
+        mask_latent = _load_latent_mask(
+            options.mask, latent_h=built.latent_h, latent_w=built.latent_w, device=device
+        )
     if options.control_image:
         if built.vae is None:
-            raise RuntimeError("--control-image requires a VAE or --fake-vae; it is not available in --latent-only mode.")
+            raise RuntimeError(
+                "--control-image requires a VAE or --fake-vae; it is not available in --latent-only mode."
+            )
         from control.preprocess import image_control_preprocess
 
         control_img = _load_sample_image_tensor(options.control_image).unsqueeze(0).to(device)
@@ -404,7 +517,9 @@ def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, objec
             "uncond": uncond,
             "steps": int(options.steps),
             "cfg_scale": float(options.cfg),
-            "shift": float(options.shift if options.shift is not None else built.cfg.get("sampling_shift", 1.0)),
+            "shift": float(
+                options.shift if options.shift is not None else built.cfg.get("sampling_shift", 1.0)
+            ),
             "noise": noise,
             "generator": gen,
             "progress_cb": _progress_cb,
@@ -414,7 +529,9 @@ def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, objec
             "control_latents": control_latents,
             "control_type": str(options.control_type),
             "strength": float(options.strength) if options.task in {"img2img", "inpaint"} else 1.0,
-            "control_strength": float(options.control_strength) if control_latents is not None else 0.0,
+            "control_strength": float(options.control_strength)
+            if control_latents is not None
+            else 0.0,
             "task": str(options.task),
         }
         z = sample_flow_euler(**kwargs) if sampler == "flow_euler" else sample_flow_heun(**kwargs)
@@ -427,10 +544,22 @@ def run_sample(options: SampleOptions, event_callback: Callable[[dict[str, objec
     else:
         x = torch.cat(outputs, dim=0)
         _save_image_grid(x, out, nrow=max(1, int(math.sqrt(options.n))))
-    metadata = _sample_metadata(options, built, sampler=sampler, seed=base_seed, latent_only=options.latent_only, fake_vae=options.fake_vae)
+    metadata = _sample_metadata(
+        options,
+        built,
+        sampler=sampler,
+        seed=base_seed,
+        latent_only=options.latent_only,
+        fake_vae=options.fake_vae,
+    )
     sidecar = _write_sample_metadata(out, metadata)
     event_bus.emit({"type": "status", "status": "done", "path": str(out), "metadata": str(sidecar)})
     if not quiet:
         print(f"[OK] saved {out}")
         print(f"[OK] saved metadata {sidecar}")
-    return {"path": str(out), "metadata_path": str(sidecar), "metadata": metadata, "seed": base_seed}
+    return {
+        "path": str(out),
+        "metadata_path": str(sidecar),
+        "metadata": metadata,
+        "seed": base_seed,
+    }

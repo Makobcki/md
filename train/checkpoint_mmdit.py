@@ -5,8 +5,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import torch
-
 from diffusion.io.ckpt import _torch_load
 
 _REQUIRED_METADATA_FIELDS = (
@@ -56,6 +54,7 @@ _MODEL_COMPAT_FIELDS = (
     "control_adapter_ratio",
     "hierarchical_tokens_enabled",
     "coarse_patch_size",
+    "x0_aux_weight",
 )
 
 _TOP_LEVEL_COMPAT_FIELDS = (
@@ -208,11 +207,17 @@ def _ck_value(ckpt: dict, key: str) -> Any:
     if key in _TOP_LEVEL_COMPAT_FIELDS:
         return meta.get(key, ckpt.get(key, ckpt.get("cfg", {}).get(key)))
     if key == "vae_scaling_factor":
-        return meta.get("vae_config", {}).get("scaling_factor", ckpt.get("vae", {}).get("scaling_factor"))
+        return meta.get("vae_config", {}).get(
+            "scaling_factor", ckpt.get("vae", {}).get("scaling_factor")
+        )
     if key == "text_dim":
-        return meta.get("text_config", {}).get("text_dim", ckpt.get("text_dim", ckpt.get("cfg", {}).get("text_dim")))
+        return meta.get("text_config", {}).get(
+            "text_dim", ckpt.get("text_dim", ckpt.get("cfg", {}).get("text_dim"))
+        )
     if key == "pooled_dim":
-        return meta.get("text_config", {}).get("pooled_dim", ckpt.get("pooled_dim", ckpt.get("cfg", {}).get("pooled_dim")))
+        return meta.get("text_config", {}).get(
+            "pooled_dim", ckpt.get("pooled_dim", ckpt.get("cfg", {}).get("pooled_dim"))
+        )
     return meta.get("model_config", {}).get(key, ckpt.get(key, ckpt.get("cfg", {}).get(key)))
 
 
@@ -228,7 +233,9 @@ def _cfg_value(cfg: dict, key: str) -> Any:
     text = cfg.get("text", {}) if isinstance(cfg.get("text", {}), dict) else {}
     control = cfg.get("control", {}) if isinstance(cfg.get("control", {}), dict) else {}
     rope = model.get("rope", {}) if isinstance(model.get("rope", {}), dict) else {}
-    hierarchical = model.get("hierarchical", {}) if isinstance(model.get("hierarchical", {}), dict) else {}
+    hierarchical = (
+        model.get("hierarchical", {}) if isinstance(model.get("hierarchical", {}), dict) else {}
+    )
     resampler = text.get("resampler", {}) if isinstance(text.get("resampler", {}), dict) else {}
     loss = cfg.get("loss", {}) if isinstance(cfg.get("loss", {}), dict) else {}
 
@@ -252,22 +259,26 @@ def _cfg_value(cfg: dict, key: str) -> Any:
     return cfg.get(key, model.get(key))
 
 
-
 def _normalize_compat_value(key: str, value: Any) -> Any:
     if key == "rope_base_grid_hw" and value is not None:
         seq = list(value)
         if len(seq) != 2:
             return value
         return (int(seq[0]), int(seq[1]))
-    if key in {
-        "rope_theta",
-        "text_resampler_mlp_ratio",
-        "mlp_ratio",
-        "control_adapter_ratio",
-        "vae_scaling_factor",
-    } and value is not None:
+    if (
+        key
+        in {
+            "rope_theta",
+            "text_resampler_mlp_ratio",
+            "mlp_ratio",
+            "control_adapter_ratio",
+            "vae_scaling_factor",
+        }
+        and value is not None
+    ):
         return float(value)
     return value
+
 
 def _raise_mismatch(key: str, ck_value: Any, cfg_value: Any) -> None:
     raise RuntimeError(
@@ -278,7 +289,13 @@ def _raise_mismatch(key: str, ck_value: Any, cfg_value: Any) -> None:
 
 
 def validate_mmdit_checkpoint_compatibility(ckpt: dict, cfg: dict) -> None:
-    for key in (*_TOP_LEVEL_COMPAT_FIELDS, *_MODEL_COMPAT_FIELDS, "text_dim", "pooled_dim", "vae_scaling_factor"):
+    for key in (
+        *_TOP_LEVEL_COMPAT_FIELDS,
+        *_MODEL_COMPAT_FIELDS,
+        "text_dim",
+        "pooled_dim",
+        "vae_scaling_factor",
+    ):
         ck_value = _ck_value(ckpt, key)
         cfg_value = _cfg_value(cfg, key)
         ck_cmp = _normalize_compat_value(key, ck_value)
@@ -292,10 +309,22 @@ def validate_mmdit_checkpoint_compatibility(ckpt: dict, cfg: dict) -> None:
         ckpt.get("text_encoders", ckpt.get("cfg", {}).get("text", {}).get("encoders", [])),
     )
     cfg_text = _config_text_encoders(cfg)
-    if cfg_text and ck_text and _normalize_text_encoders(list(ck_text)) != _normalize_text_encoders(list(cfg_text)):
-        _raise_mismatch("text_encoders differ", _normalize_text_encoders(list(ck_text)), _normalize_text_encoders(list(cfg_text)))
+    if (
+        cfg_text
+        and ck_text
+        and _normalize_text_encoders(list(ck_text)) != _normalize_text_encoders(list(cfg_text))
+    ):
+        _raise_mismatch(
+            "text_encoders differ",
+            _normalize_text_encoders(list(ck_text)),
+            _normalize_text_encoders(list(cfg_text)),
+        )
 
     ck_text_max = ck_meta.get("text_config", {}).get("max_length_total")
     cfg_text_max = sum(int(item.get("max_length", 0)) for item in cfg_text) if cfg_text else None
-    if cfg_text_max is not None and ck_text_max not in {None, 0} and int(ck_text_max) != int(cfg_text_max):
+    if (
+        cfg_text_max is not None
+        and ck_text_max not in {None, 0}
+        and int(ck_text_max) != int(cfg_text_max)
+    ):
         _raise_mismatch("text max lengths", ck_text_max, cfg_text_max)

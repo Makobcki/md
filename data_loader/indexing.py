@@ -4,22 +4,20 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
 
 from .types import DataConfig
 
-
 _ALLOWED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 _GENDER_TAG_RE = re.compile(r"^\d+(?:boy|boys|girl|girls)$")
 _INDEX_SCHEMA_VERSION = 5
 
 
-def _read_json(path: Path) -> Optional[dict]:
+def _read_json(path: Path) -> dict | None:
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
@@ -42,7 +40,12 @@ def _metadata_containers(meta: dict) -> list[dict]:
     return containers
 
 
-def resolve_text_fields(*, caption_field: str, text_field: str = "", text_fields: list[str] | tuple[str, ...] | None = None) -> list[str]:
+def resolve_text_fields(
+    *,
+    caption_field: str,
+    text_field: str = "",
+    text_fields: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
     """Return ordered metadata fields used as training text.
 
     ``caption_field`` is kept for backward compatibility. New configs should use
@@ -140,16 +143,20 @@ def _metadata_md5(meta: dict) -> str:
         value = _first_str(container, ("md5", "sha1", "hash", "id", "image_id"))
         if value:
             return Path(value).stem
-        file_value = _first_str(container, ("file_name", "filename", "image", "img", "path", "image_path"))
+        file_value = _first_str(
+            container, ("file_name", "filename", "image", "img", "path", "image_path")
+        )
         if file_value:
             return Path(file_value).stem
     return ""
 
 
-def _metadata_image_path(root: Path, img_dir: Path, meta: dict, md5: str) -> Optional[Path]:
+def _metadata_image_path(root: Path, img_dir: Path, meta: dict, md5: str) -> Path | None:
     candidates: list[Path] = []
     for container in _metadata_containers(meta):
-        file_value = _first_str(container, ("file_name", "filename", "image", "img", "path", "image_path"))
+        file_value = _first_str(
+            container, ("file_name", "filename", "image", "img", "path", "image_path")
+        )
         if not file_value:
             continue
         raw = Path(file_value)
@@ -159,7 +166,9 @@ def _metadata_image_path(root: Path, img_dir: Path, meta: dict, md5: str) -> Opt
             candidates.append(root / raw)
             candidates.append(img_dir / raw.name)
     if md5:
-        candidates.extend(sorted(p for p in img_dir.glob(f"{md5}.*") if p.suffix.lower() in _ALLOWED_EXTS))
+        candidates.extend(
+            sorted(p for p in img_dir.glob(f"{md5}.*") if p.suffix.lower() in _ALLOWED_EXTS)
+        )
     seen: set[Path] = set()
     for candidate in candidates:
         if candidate in seen:
@@ -182,7 +191,7 @@ def _load_failed_list(path: Path) -> set[str]:
     return {line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
 
 
-def _read_tags_file(path: Path) -> Optional[tuple[list[str], list[str]]]:
+def _read_tags_file(path: Path) -> tuple[list[str], list[str]] | None:
     try:
         text = path.read_text(encoding="utf-8")
     except Exception:
@@ -251,28 +260,28 @@ def _cache_metadata(cfg: DataConfig) -> dict:
 def _cached_entry_paths_exist(entries: list[dict], *, max_checks: int = 16) -> bool:
     if not entries:
         return True
-    checked = 0
-    for entry in entries:
+    for checked, entry in enumerate(entries, start=1):
         img = entry.get("img")
         if not isinstance(img, str) or not img:
             return False
         if not Path(img).exists():
             return False
-        checked += 1
         if checked >= max_checks:
             return True
     return True
 
 
-def _load_index_cache(cache_path: Path, expected_meta: Optional[dict] = None) -> Optional[Tuple[List[dict], List[dict]]]:
+def _load_index_cache(
+    cache_path: Path, expected_meta: dict | None = None
+) -> tuple[list[dict], list[dict]] | None:
     if not cache_path.exists():
         return None
-    train_entries: List[dict] = []
-    val_entries: List[dict] = []
+    train_entries: list[dict] = []
+    val_entries: list[dict] = []
     saw_meta = False
     saw_done = False
     try:
-        with open(cache_path, "r", encoding="utf-8") as f:
+        with open(cache_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -305,16 +314,27 @@ def _write_index_cache_atomic(cache_path: Path, rows: list[dict], *, metadata: d
     tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps({"type": "meta", "schema_version": _INDEX_SCHEMA_VERSION, "config": metadata}, ensure_ascii=False) + "\n")
+        f.write(
+            json.dumps(
+                {"type": "meta", "schema_version": _INDEX_SCHEMA_VERSION, "config": metadata},
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        f.write(json.dumps({"type": "done", "schema_version": _INDEX_SCHEMA_VERSION}, ensure_ascii=False) + "\n")
+        f.write(
+            json.dumps(
+                {"type": "done", "schema_version": _INDEX_SCHEMA_VERSION}, ensure_ascii=False
+            )
+            + "\n"
+        )
     tmp_path.replace(cache_path)
 
 
-def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
-    """
-    Возвращает (train_entries, val_entries).
+def build_or_load_index(cfg: DataConfig) -> tuple[list[dict], list[dict]]:
+    """Return train and validation index entries.
+
     entry: {"md5":..., "img":..., "text":..., "text_source":..., "caption":..., "tags_primary":..., "tags_gender":...}
     """
     root = Path(cfg.root)
@@ -402,10 +422,7 @@ def build_or_load_index(cfg: DataConfig) -> Tuple[List[dict], List[dict]]:
     meta_files = sorted(meta_dir.glob("*.json")) if meta_dir.exists() else []
     metadata_rows = _read_metadata_jsonl(root / "metadata.jsonl") if not meta_files else []
 
-    if meta_files:
-        metadata_iter = (_read_json(mp) for mp in meta_files)
-    else:
-        metadata_iter = iter(metadata_rows)
+    metadata_iter = (_read_json(mp) for mp in meta_files) if meta_files else iter(metadata_rows)
 
     for meta in metadata_iter:
         if not meta:

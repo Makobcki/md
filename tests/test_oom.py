@@ -8,7 +8,6 @@ from diffusion.utils.oom import (
     parse_torch_oom_message,
 )
 
-
 OOM_MESSAGE = (
     "CUDA out of memory. Tried to allocate 12.00 MiB. "
     "GPU 0 has a total capacity of 7.52 GiB of which 15.94 MiB is free. "

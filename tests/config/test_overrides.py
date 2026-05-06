@@ -12,7 +12,7 @@ def test_parse_set_overrides_types() -> None:
             "sampling.guidance_scale=4.5",
             "webui.auto_open=false",
             "model.checkpoint=null",
-            "data.text_fields=[\"caption\", \"tags\"]",
+            'data.text_fields=["caption", "tags"]',
             "prompt.text=a cinematic landscape",
         ]
     )

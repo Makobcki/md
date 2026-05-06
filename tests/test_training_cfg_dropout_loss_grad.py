@@ -4,9 +4,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from model.text.conditioning import TextConditioning
-import train.loop_mmdit_full as loop
 import train.loop_mmdit as minimal_loop
+import train.loop_mmdit_full as loop
+from model.text.conditioning import TextConditioning
 
 
 def _text(batch: int = 2) -> TextConditioning:
@@ -27,13 +27,17 @@ def _empty(batch: int = 2) -> TextConditioning:
     )
 
 
-def test_cfg_dropout_replaces_dropped_samples_with_empty_conditioning(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cfg_dropout_replaces_dropped_samples_with_empty_conditioning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     text = _text()
     empty = _empty()
-    masks = iter([
-        torch.tensor([0.2, 0.8]),  # drop first only for drop_prob=0.5
-        torch.tensor([0.8, 0.2]),  # drop second only
-    ])
+    masks = iter(
+        [
+            torch.tensor([0.2, 0.8]),  # drop first only for drop_prob=0.5
+            torch.tensor([0.8, 0.2]),  # drop second only
+        ]
+    )
 
     def fake_rand(n: int, *, device=None):
         return next(masks).to(device=device)
@@ -65,7 +69,9 @@ def test_inpaint_weighted_mse_keeps_txt2img_loss_unchanged_and_weights_mask_regi
 
     full = loop._per_sample_flow_mse(pred, target, None)
     weighted = loop._per_sample_flow_mse(pred, target, mask, mask_weight=1.0, unmask_weight=0.1)
-    all_equal_weight = loop._per_sample_flow_mse(pred, target, mask, mask_weight=1.0, unmask_weight=1.0)
+    all_equal_weight = loop._per_sample_flow_mse(
+        pred, target, mask, mask_weight=1.0, unmask_weight=1.0
+    )
 
     assert torch.allclose(full, torch.tensor([21.0]))
     expected = torch.tensor([(1.0 + 0.9 + 2.5 + 4.9) / 1.3])
@@ -87,7 +93,9 @@ def test_grad_diagnostics_reports_nan_and_inf_without_crashing() -> None:
     assert stats["grad_norm_total"] >= 0.0
 
 
-def test_minimal_loop_preserves_conditioning_fields_on_device_move(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_minimal_loop_preserves_conditioning_fields_on_device_move(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _Model(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -108,7 +116,9 @@ def test_minimal_loop_preserves_conditioning_fields_on_device_move(monkeypatch: 
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
     batch = minimal_loop.TrainBatch(
         x0=torch.zeros(1, 4, 2, 2),
-        text=TextConditioning(torch.zeros(1, 1, 3), torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 3)),
+        text=TextConditioning(
+            torch.zeros(1, 1, 3), torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 3)
+        ),
         control_type=torch.tensor([[2]]),
         strength=torch.tensor([0.5]),
         control_strength=torch.tensor([0.0]),
@@ -127,4 +137,6 @@ def test_minimal_loop_preserves_conditioning_fields_on_device_move(monkeypatch: 
     moved = captured["batch"]
     assert moved.control_type is not None and torch.equal(moved.control_type, torch.tensor([[2]]))
     assert moved.strength is not None and torch.equal(moved.strength, torch.tensor([0.5]))
-    assert moved.control_strength is not None and torch.equal(moved.control_strength, torch.tensor([0.0]))
+    assert moved.control_strength is not None and torch.equal(
+        moved.control_strength, torch.tensor([0.0])
+    )

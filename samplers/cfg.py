@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
 from model.text.conditioning import TextConditioning
@@ -12,7 +14,9 @@ def concat_text_conditioning(items: list[TextConditioning]) -> TextConditioning:
         normalized = []
         for item in items:
             if item.token_types is None:
-                normalized.append(torch.zeros(item.tokens.shape[:2], device=item.tokens.device, dtype=torch.long))
+                normalized.append(
+                    torch.zeros(item.tokens.shape[:2], device=item.tokens.device, dtype=torch.long)
+                )
             else:
                 normalized.append(item.token_types.to(device=item.tokens.device, dtype=torch.long))
         token_types = torch.cat(normalized, dim=0)
@@ -31,13 +35,13 @@ def concat_text_conditioning(items: list[TextConditioning]) -> TextConditioning:
 
 @torch.no_grad()
 def cfg_predict(
-    model,
+    model: Any,
     x: torch.Tensor,
     t: torch.Tensor,
     cond: TextConditioning,
     uncond: TextConditioning | None = None,
     scale: float = 1.0,
-    **model_kwargs,
+    **model_kwargs: Any,
 ) -> torch.Tensor:
     if uncond is None or scale == 1.0:
         return model(x, t, cond, **model_kwargs)
@@ -54,7 +58,6 @@ def cfg_predict(
             kwargs_in[key] = value
     pred_uncond, pred_cond = model(x_in, t_in, text_in, **kwargs_in).chunk(2, dim=0)
     return pred_uncond + float(scale) * (pred_cond - pred_uncond)
-
 
 
 def preserve_inpaint_region(
@@ -80,7 +83,11 @@ def preserve_inpaint_region(
     src = source_latent.to(device=x.device, dtype=x.dtype)
     if reference_noise is not None and t is not None:
         eps = reference_noise.to(device=x.device, dtype=x.dtype)
-        tt = t.to(device=x.device, dtype=x.dtype) if torch.is_tensor(t) else torch.tensor(float(t), device=x.device, dtype=x.dtype)
+        tt = (
+            t.to(device=x.device, dtype=x.dtype)
+            if torch.is_tensor(t)
+            else torch.tensor(float(t), device=x.device, dtype=x.dtype)
+        )
         if tt.dim() == 0:
             tt = tt.view(1)
         tt = tt.reshape(-1, *([1] * (x.dim() - 1)))
@@ -90,6 +97,8 @@ def preserve_inpaint_region(
             return x
         return x * m + src * (1.0 - m)
     tasks = list(task)
-    keep = torch.tensor([name == "inpaint" for name in tasks], device=x.device, dtype=torch.bool).view(-1, 1, 1, 1)
+    keep = torch.tensor(
+        [name == "inpaint" for name in tasks], device=x.device, dtype=torch.bool
+    ).view(-1, 1, 1, 1)
     blended = x * m + src * (1.0 - m)
     return torch.where(keep, blended, x)

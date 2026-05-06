@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import random
 import json
+import random
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
-
-import torch
-from diffusion.io.ckpt import _torch_load
-from torch.utils.data import Dataset
+from typing import Any
 
 import numpy as np
+import torch
 from PIL import Image
+from torch.utils.data import Dataset
+
+from diffusion.io.ckpt import _torch_load
 
 from .types import LatentCacheMetadata, LatentShardLocation
 
@@ -59,7 +59,7 @@ def load_latent_shard_index(path: Path) -> dict[str, LatentShardLocation]:
     return index
 
 
-def _parse_latent_payload(payload: Any) -> Tuple[torch.Tensor, Optional[LatentCacheMetadata]]:
+def _parse_latent_payload(payload: Any) -> tuple[torch.Tensor, LatentCacheMetadata | None]:
     if isinstance(payload, torch.Tensor):
         return payload, None
     if isinstance(payload, dict):
@@ -79,8 +79,8 @@ def _parse_latent_payload(payload: Any) -> Tuple[torch.Tensor, Optional[LatentCa
 
 def _validate_latent_meta(
     *,
-    expected: Optional[LatentCacheMetadata],
-    actual: Optional[LatentCacheMetadata],
+    expected: LatentCacheMetadata | None,
+    actual: LatentCacheMetadata | None,
     strict: bool,
     cache_path: Path,
 ) -> None:
@@ -124,29 +124,29 @@ def _validate_latent_meta(
 class ImageTextDataset(Dataset):
     def __init__(
         self,
-        entries: List[dict],
-        tokenizer: Optional[Any],
+        entries: list[dict],
+        tokenizer: Any | None,
         cond_drop_prob: float,
         token_drop_prob: float = 0.0,
         tag_drop_prob: float = 0.0,
         caption_drop_prob: float = 0.0,
         seed: int = 42,
-        cache_dir: Optional[str] = None,
-        token_cache_key: Optional[str] = None,
-        latent_cache_dir: Optional[str] = None,
+        cache_dir: str | None = None,
+        token_cache_key: str | None = None,
+        latent_cache_dir: str | None = None,
         latent_cache_sharded: bool = False,
-        latent_cache_index_path: Optional[str] = None,
-        latent_dtype: Optional[torch.dtype] = None,
+        latent_cache_index_path: str | None = None,
+        latent_dtype: torch.dtype | None = None,
         return_latents: bool = False,
         latent_cache_strict: bool = True,
         latent_cache_fallback: bool = False,
-        latent_expected_meta: Optional[LatentCacheMetadata] = None,
-        latent_expected_meta_by_md5: Optional[dict[str, LatentCacheMetadata]] = None,
+        latent_expected_meta: LatentCacheMetadata | None = None,
+        latent_expected_meta_by_md5: dict[str, LatentCacheMetadata] | None = None,
         include_is_latent: bool = False,
-        latent_missing_log_path: Optional[Path] = None,
+        latent_missing_log_path: Path | None = None,
         latent_shard_cache_size: int = 2,
         expected_image_size: int = 512,
-    ):
+    ) -> None:
         self.entries = entries
         self.tokenizer = tokenizer
         self.cond_drop_prob = float(cond_drop_prob)
@@ -156,7 +156,9 @@ class ImageTextDataset(Dataset):
         self.seed = int(seed)
         self.latent_cache_dir = str(latent_cache_dir) if latent_cache_dir else None
         self.latent_cache_sharded = bool(latent_cache_sharded)
-        self.latent_cache_index_path = str(latent_cache_index_path) if latent_cache_index_path else None
+        self.latent_cache_index_path = (
+            str(latent_cache_index_path) if latent_cache_index_path else None
+        )
         self.latent_dtype = latent_dtype
         self.return_latents = bool(return_latents)
         self.latent_cache_strict = bool(latent_cache_strict)
@@ -170,18 +172,18 @@ class ImageTextDataset(Dataset):
         self.latent_cache_total = len(entries)
         self.latent_cache_hits = 0
         self.latent_cache_missing = 0
-        self._token_cache_path: Optional[Path] = None
-        self._token_cache_ids: Optional[torch.LongTensor] = None
-        self._token_cache_mask: Optional[torch.BoolTensor] = None
-        self._token_cache_md5: Optional[list[str]] = None
-        self._empty_ids: Optional[torch.LongTensor] = None
-        self._empty_mask: Optional[torch.BoolTensor] = None
+        self._token_cache_path: Path | None = None
+        self._token_cache_ids: torch.LongTensor | None = None
+        self._token_cache_mask: torch.BoolTensor | None = None
+        self._token_cache_md5: list[str] | None = None
+        self._empty_ids: torch.LongTensor | None = None
+        self._empty_mask: torch.BoolTensor | None = None
         self._shard_index: dict[str, LatentShardLocation] | None = None
-        self._entry_shard_locations: Optional[list[Optional[LatentShardLocation]]] = None
-        self._shard_to_entry_indices: Optional[dict[Path, list[int]]] = None
-        self._shard_tensor_cache: "OrderedDict[Path, torch.Tensor]" = OrderedDict()
-        self.current_shard_id: Optional[str] = None
-        self.current_shard_tensor: Optional[torch.Tensor] = None
+        self._entry_shard_locations: list[LatentShardLocation | None] | None = None
+        self._shard_to_entry_indices: dict[Path, list[int]] | None = None
+        self._shard_tensor_cache: OrderedDict[Path, torch.Tensor] = OrderedDict()
+        self.current_shard_id: str | None = None
+        self.current_shard_tensor: torch.Tensor | None = None
 
         if self.latent_shard_cache_size <= 0:
             raise ValueError("latent_shard_cache_size must be positive.")
@@ -215,7 +217,7 @@ class ImageTextDataset(Dataset):
                     index_path = latent_shard_index_path(self.latent_cache_dir, "index.jsonl")
                 self._shard_index = load_latent_shard_index(index_path)
             filtered = []
-            shard_locations: list[Optional[LatentShardLocation]] = []
+            shard_locations: list[LatentShardLocation | None] = []
             for entry in self.entries:
                 md5 = entry.get("md5", "")
                 if not md5:
@@ -244,7 +246,9 @@ class ImageTextDataset(Dataset):
             if self.latent_cache_sharded:
                 if self.latent_cache_strict:
                     kept_locations = [
-                        loc for entry, loc in zip(self.entries, shard_locations) if loc is not None
+                        loc
+                        for entry, loc in zip(self.entries, shard_locations, strict=True)
+                        if loc is not None
                     ]
                     self.entries = filtered
                     self._entry_shard_locations = kept_locations
@@ -263,7 +267,9 @@ class ImageTextDataset(Dataset):
         return len(self.entries)
 
     def _load_image(self, path: str) -> torch.Tensor:
-        return load_image_tensor(path, expected_size=(self.expected_image_size, self.expected_image_size))
+        return load_image_tensor(
+            path, expected_size=(self.expected_image_size, self.expected_image_size)
+        )
 
     def _load_latent(self, md5: str) -> torch.Tensor:
         if not self.latent_cache_dir:
@@ -408,7 +414,9 @@ class ImageTextDataset(Dataset):
                     and mask is not None
                     and len(md5_list) == len(self.entries)
                     and len(text_hash) == len(self.entries)
-                    and all(md5 == e.get("md5") for md5, e in zip(md5_list, self.entries))
+                    and all(
+                        md5 == e.get("md5") for md5, e in zip(md5_list, self.entries, strict=True)
+                    )
                     and text_hash == expected_text_hash
                 ):
                     self._token_cache_md5 = md5_list
@@ -446,7 +454,7 @@ class ImageTextDataset(Dataset):
         self._token_cache_ids = ids_tensor
         self._token_cache_mask = mask_tensor
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> tuple[Any, ...]:
         e = self.entries[idx]
         md5 = e.get("md5", "")
         is_latent = False
@@ -509,7 +517,7 @@ class ImageTextDataset(Dataset):
         ids: torch.LongTensor,
         mask: torch.BoolTensor,
         rng: random.Random,
-    ) -> Tuple[torch.LongTensor, torch.BoolTensor]:
+    ) -> tuple[torch.LongTensor, torch.BoolTensor]:
         if self.token_drop_prob <= 0:
             return ids, mask
         ids = ids.clone()
@@ -531,7 +539,7 @@ class ImageTextDataset(Dataset):
             return None
         return self.latent_cache_hits / max(self.latent_cache_total, 1)
 
-    def shard_to_entry_indices(self) -> Optional[dict[Path, list[int]]]:
+    def shard_to_entry_indices(self) -> dict[Path, list[int]] | None:
         if not self.latent_cache_sharded:
             return None
         if self._shard_to_entry_indices is None:

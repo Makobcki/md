@@ -23,7 +23,9 @@ def test_bucket_validation_checks_latent_and_patch_divisibility() -> None:
     with pytest.raises(ValueError, match="latent_downsample_factor"):
         validate_buckets([AspectRatioBucket(513, 512)])
     with pytest.raises(ValueError, match="latent_patch_size"):
-        validate_buckets([AspectRatioBucket(520, 520)], latent_downsample_factor=8, latent_patch_size=4)
+        validate_buckets(
+            [AspectRatioBucket(520, 520)], latent_downsample_factor=8, latent_patch_size=4
+        )
 
 
 def test_parse_and_assign_bucket() -> None:
@@ -33,7 +35,9 @@ def test_parse_and_assign_bucket() -> None:
 
 
 def test_bucket_batch_sampler_keeps_same_bucket_per_batch() -> None:
-    buckets = validate_buckets([AspectRatioBucket(512, 512), AspectRatioBucket(640, 384), AspectRatioBucket(384, 640)])
+    buckets = validate_buckets(
+        [AspectRatioBucket(512, 512), AspectRatioBucket(640, 384), AspectRatioBucket(384, 640)]
+    )
     entries = [
         {"width": 512, "height": 512},
         {"width": 500, "height": 500},
@@ -43,7 +47,9 @@ def test_bucket_batch_sampler_keeps_same_bucket_per_batch() -> None:
         {"width": 768, "height": 1280},
     ]
     groups = group_entries_by_bucket(entries, buckets)
-    sampler = AspectBucketBatchSampler(entries, buckets, batch_size=2, shuffle=False, drop_last=False)
+    sampler = AspectBucketBatchSampler(
+        entries, buckets, batch_size=2, shuffle=False, drop_last=False
+    )
 
     assert all(len(batch) <= 2 for batch in sampler)
     for batch in sampler:

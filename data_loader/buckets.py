@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Sequence
 
 
 @dataclass(frozen=True)
@@ -20,10 +20,7 @@ class AspectRatioBucket:
 
 
 def _normalize_patch_sizes(value: int | Sequence[int]) -> tuple[int, ...]:
-    if isinstance(value, int):
-        sizes = (int(value),)
-    else:
-        sizes = tuple(int(v) for v in value)
+    sizes = (int(value),) if isinstance(value, int) else tuple(int(v) for v in value)
     if not sizes or any(v <= 0 for v in sizes):
         raise ValueError("latent_patch_size must contain positive integer value(s)")
     return tuple(dict.fromkeys(sizes))
@@ -43,7 +40,10 @@ def validate_buckets(
     for bucket in buckets:
         if bucket.width <= 0 or bucket.height <= 0:
             raise ValueError("bucket width/height must be positive")
-        if bucket.width % latent_downsample_factor != 0 or bucket.height % latent_downsample_factor != 0:
+        if (
+            bucket.width % latent_downsample_factor != 0
+            or bucket.height % latent_downsample_factor != 0
+        ):
             raise ValueError("bucket dimensions must be divisible by latent_downsample_factor")
         latent_w = bucket.width // latent_downsample_factor
         latent_h = bucket.height // latent_downsample_factor
@@ -65,7 +65,6 @@ def parse_buckets(items: Iterable[Sequence[int] | dict | str]) -> list[AspectRat
     buckets: list[AspectRatioBucket] = []
     for item in items:
         if isinstance(item, str):
-            sep = "x" if "x" in item else "×"
             left, right = item.lower().replace("×", "x").split("x", 1)
             buckets.append(AspectRatioBucket(width=int(left), height=int(right)))
         elif isinstance(item, dict):
@@ -76,14 +75,20 @@ def parse_buckets(items: Iterable[Sequence[int] | dict | str]) -> list[AspectRat
     return buckets
 
 
-def assign_bucket(width: int, height: int, buckets: Sequence[AspectRatioBucket]) -> AspectRatioBucket:
+def assign_bucket(
+    width: int, height: int, buckets: Sequence[AspectRatioBucket]
+) -> AspectRatioBucket:
     if width <= 0 or height <= 0:
         raise ValueError("sample width/height must be positive")
     aspect = float(width) / float(height)
-    return min(buckets, key=lambda b: (abs(b.aspect - aspect), abs(b.width * b.height - width * height)))
+    return min(
+        buckets, key=lambda b: (abs(b.aspect - aspect), abs(b.width * b.height - width * height))
+    )
 
 
-def group_entries_by_bucket(entries: Sequence[dict], buckets: Sequence[AspectRatioBucket]) -> dict[tuple[int, int], list[int]]:
+def group_entries_by_bucket(
+    entries: Sequence[dict], buckets: Sequence[AspectRatioBucket]
+) -> dict[tuple[int, int], list[int]]:
     groups: dict[tuple[int, int], list[int]] = {(b.width, b.height): [] for b in buckets}
     for idx, entry in enumerate(entries):
         width = int(entry.get("width", entry.get("image_width", 0)) or 0)

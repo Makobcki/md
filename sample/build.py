@@ -2,18 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any
 
 import torch
 
 from config.train import TrainConfig
 from diffusion.utils import EMA, load_ckpt
 from diffusion.vae import VAEWrapper
-from model.mmdit import MMDiTConfig, MMDiTFlowModel
 from model.registry import build_model
-from model.text.pretrained import FrozenTextEncoderBundle
-from model.text.conditioning import TextConditioning
 from model.text.cache import TextCache
+from model.text.conditioning import TextConditioning
+from model.text.pretrained import FrozenTextEncoderBundle
 from train.checkpoint_mmdit import validate_mmdit_checkpoint_compatibility
 
 
@@ -56,8 +55,8 @@ class FakeVAE(torch.nn.Module):
 
 @dataclass(frozen=True)
 class Built:
-    ckpt: Dict[str, Any]
-    cfg: Dict[str, Any]
+    ckpt: dict[str, Any]
+    cfg: dict[str, Any]
     model: torch.nn.Module
     text_encoder: FrozenTextEncoderBundle
     empty_text: TextConditioning | None
@@ -73,22 +72,27 @@ class Built:
     checkpoint_metadata: dict[str, Any]
 
 
-def _metadata_from_ckpt(ck: Dict[str, Any]) -> dict[str, Any]:
+def _metadata_from_ckpt(ck: dict[str, Any]) -> dict[str, Any]:
     meta = ck.get("metadata")
     return meta if isinstance(meta, dict) else {}
 
 
-def load_checkpoint_and_cfg(ckpt_path: str, device: torch.device) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def load_checkpoint_and_cfg(
+    ckpt_path: str, device: torch.device
+) -> tuple[dict[str, Any], dict[str, Any]]:
     # Always stage checkpoints on CPU first to avoid a VRAM spike before the
     # model object has been built and moved to the final target device.
     ck = load_ckpt(ckpt_path, torch.device("cpu"))
     cfg = TrainConfig.from_dict(ck["cfg"]).to_dict()
+    raw_cfg = ck.get("cfg", {})
+    if isinstance(raw_cfg, dict) and "sampling_shift" in raw_cfg:
+        cfg["sampling_shift"] = raw_cfg["sampling_shift"]
     validate_mmdit_checkpoint_compatibility(ck, cfg)
     return ck, cfg
 
 
 def build_vae(
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
     device: torch.device,
     *,
     latent_h: int,
@@ -100,7 +104,11 @@ def build_vae(
     backend = str(vae_section.get("backend", cfg.get("vae_backend", ""))).lower()
     if latent_only:
         return None
-    if fake_vae or backend == "fake" or str(cfg.get("vae_pretrained", vae_section.get("pretrained", ""))).lower() == "fake":
+    if (
+        fake_vae
+        or backend == "fake"
+        or str(cfg.get("vae_pretrained", vae_section.get("pretrained", ""))).lower() == "fake"
+    ):
         return FakeVAE(
             latent_channels=int(cfg.get("latent_channels", 4)),
             latent_h=int(latent_h),
@@ -109,47 +117,65 @@ def build_vae(
 
     vae_pretrained = str(cfg.get("vae_pretrained", vae_section.get("pretrained", "")))
     if not vae_pretrained:
-        raise RuntimeError("MMDiT RF image sampling requires vae_pretrained, --fake-vae, or --latent-only.")
+        raise RuntimeError(
+            "MMDiT RF image sampling requires vae_pretrained, --fake-vae, or --latent-only."
+        )
 
     amp_dtype = str(cfg.get("amp_dtype", "")).lower()
-    dtype = torch.float32 if device.type == "cpu" else (torch.bfloat16 if amp_dtype == "bf16" else torch.float16)
+    dtype = (
+        torch.float32
+        if device.type == "cpu"
+        else (torch.bfloat16 if amp_dtype == "bf16" else torch.float16)
+    )
     return VAEWrapper(
         pretrained=vae_pretrained,
         freeze=True,
-        scaling_factor=float(cfg.get("vae_scaling_factor", vae_section.get("scaling_factor", 0.18215))),
+        scaling_factor=float(
+            cfg.get("vae_scaling_factor", vae_section.get("scaling_factor", 0.18215))
+        ),
         device=device,
         dtype=dtype,
     )
 
 
-def _nested_model_int(cfg: Dict[str, Any], key: str, default: int) -> int:
+def _nested_model_int(cfg: dict[str, Any], key: str, default: int) -> int:
     model = cfg.get("model", {}) if isinstance(cfg.get("model", {}), dict) else {}
     if key in cfg:
         return int(cfg[key])
     if key in model:
         return int(model[key])
-    conditioning = model.get("conditioning_tokens", {}) if isinstance(model.get("conditioning_tokens", {}), dict) else {}
+    conditioning = (
+        model.get("conditioning_tokens", {})
+        if isinstance(model.get("conditioning_tokens", {}), dict)
+        else {}
+    )
     if key in conditioning:
         return int(conditioning[key])
-    hierarchical = model.get("hierarchical", {}) if isinstance(model.get("hierarchical", {}), dict) else {}
+    hierarchical = (
+        model.get("hierarchical", {}) if isinstance(model.get("hierarchical", {}), dict) else {}
+    )
     if key == "coarse_patch_size" and "coarse_patch_size" in hierarchical:
         return int(hierarchical["coarse_patch_size"])
     return int(default)
 
 
-def _nested_model_bool(cfg: Dict[str, Any], key: str, default: bool = False) -> bool:
+def _nested_model_bool(cfg: dict[str, Any], key: str, default: bool = False) -> bool:
     model = cfg.get("model", {}) if isinstance(cfg.get("model", {}), dict) else {}
     if key in cfg:
         return bool(cfg[key])
     if key in model:
         return bool(model[key])
-    hierarchical = model.get("hierarchical", {}) if isinstance(model.get("hierarchical", {}), dict) else {}
+    hierarchical = (
+        model.get("hierarchical", {}) if isinstance(model.get("hierarchical", {}), dict) else {}
+    )
     if key == "hierarchical_tokens_enabled" and "enabled" in hierarchical:
         return bool(hierarchical["enabled"])
     return bool(default)
 
 
-def resolve_shapes(cfg: Dict[str, Any], *, width: int | None = None, height: int | None = None) -> Tuple[int, int, int, int]:
+def resolve_shapes(
+    cfg: dict[str, Any], *, width: int | None = None, height: int | None = None
+) -> tuple[int, int, int, int]:
     h = int(height if height is not None else cfg.get("height", cfg.get("image_size", 512)))
     w = int(width if width is not None else cfg.get("width", cfg.get("image_size", 512)))
     downsample = int(cfg.get("latent_downsample_factor", 8))
@@ -176,12 +202,16 @@ def resolve_shapes(cfg: Dict[str, Any], *, width: int | None = None, height: int
     return h, w, latent_h, latent_w
 
 
-def _load_empty_text_from_cache(cfg: Dict[str, Any], device: torch.device, dtype: torch.dtype) -> tuple[TextConditioning | None, str]:
+def _load_empty_text_from_cache(
+    cfg: dict[str, Any], device: torch.device, dtype: torch.dtype
+) -> tuple[TextConditioning | None, str]:
     root = cfg.get("data_root")
     cache_dir = cfg.get("text_cache_dir", ".cache/text")
     if not root or not bool(cfg.get("text_cache", True)):
         return None, "encoder"
-    cache = TextCache(Path(str(root)) / str(cache_dir), shard_cache_size=int(cfg.get("text_shard_cache_size", 2)))
+    cache = TextCache(
+        Path(str(root)) / str(cache_dir), shard_cache_size=int(cfg.get("text_shard_cache_size", 2))
+    )
     if not cache.empty_prompt_path.exists():
         return None, "encoder"
     empty = cache.load_empty().to(device=device, dtype=dtype)
@@ -215,7 +245,11 @@ def build_all(
     model.eval()
 
     h, w, latent_h, latent_w = resolve_shapes(cfg, width=width, height=height)
-    text_dtype = torch.float32 if device.type == "cpu" else (torch.bfloat16 if str(cfg.get("amp_dtype", "bf16")) == "bf16" else torch.float16)
+    text_dtype = (
+        torch.float32
+        if device.type == "cpu"
+        else (torch.bfloat16 if str(cfg.get("amp_dtype", "bf16")) == "bf16" else torch.float16)
+    )
     text_encoder = FrozenTextEncoderBundle.from_config(
         cfg,
         device=device,
@@ -235,7 +269,14 @@ def build_all(
         w=w,
         latent_h=latent_h,
         latent_w=latent_w,
-        vae=build_vae(cfg, device, latent_h=latent_h, latent_w=latent_w, latent_only=latent_only, fake_vae=fake_vae),
+        vae=build_vae(
+            cfg,
+            device,
+            latent_h=latent_h,
+            latent_w=latent_w,
+            latent_only=latent_only,
+            fake_vae=fake_vae,
+        ),
         checkpoint_step=int(ck.get("step", _metadata_from_ckpt(ck).get("step", 0)) or 0),
         checkpoint_metadata=_metadata_from_ckpt(ck),
     )

@@ -37,7 +37,9 @@ def patchify(x: torch.Tensor, patch_size: int) -> torch.Tensor:
     return x.reshape(b, (h // p) * (w // p), c * p * p)
 
 
-def unpatchify(tokens: torch.Tensor, *, channels: int, height: int, width: int, patch_size: int) -> torch.Tensor:
+def unpatchify(
+    tokens: torch.Tensor, *, channels: int, height: int, width: int, patch_size: int
+) -> torch.Tensor:
     b, n, d = tokens.shape
     p = int(patch_size)
     gh = height // p
@@ -52,4 +54,3 @@ def unpatchify(tokens: torch.Tensor, *, channels: int, height: int, width: int, 
     x = tokens.reshape(b, gh, gw, channels, p, p)
     x = x.permute(0, 3, 1, 4, 2, 5).contiguous()
     return x.reshape(b, channels, height, width)
-

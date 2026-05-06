@@ -6,9 +6,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+import train.runner as runner
 from config.train import TrainConfig
 from scripts.prepare_latents import _resolve_prepare_options, _sharded_cache_mismatch_reason
-import train.runner as runner
 from train.runner import (
     _ensure_latent_cache_ready_for_mmdit,
     _load_resume_checkpoint,
@@ -66,14 +66,16 @@ def test_latent_shard_index_path_honors_configured_name(tmp_path) -> None:
 
 
 def test_prepare_latents_options_honor_config_extra() -> None:
-    cfg = TrainConfig.from_dict({
-        "mode": "latent",
-        "latent_dtype": "bf16",
-        "latent_cache_sharded": False,
-        "latent_prepare_batch_size": 7,
-        "latent_prepare_num_workers": 0,
-        "latent_prepare_decode_backend": "pil",
-    })
+    cfg = TrainConfig.from_dict(
+        {
+            "mode": "latent",
+            "latent_dtype": "bf16",
+            "latent_cache_sharded": False,
+            "latent_prepare_batch_size": 7,
+            "latent_prepare_num_workers": 0,
+            "latent_prepare_decode_backend": "pil",
+        }
+    )
 
     args = argparse.Namespace(batch_size=16, latent_dtype="fp16")
     options = _resolve_prepare_options(cfg, args, set())
@@ -87,11 +89,13 @@ def test_prepare_latents_options_honor_config_extra() -> None:
 
 
 def test_prepare_latents_cli_overrides_config_extra() -> None:
-    cfg = TrainConfig.from_dict({
-        "mode": "latent",
-        "latent_dtype": "bf16",
-        "latent_prepare_batch_size": 7,
-    })
+    cfg = TrainConfig.from_dict(
+        {
+            "mode": "latent",
+            "latent_dtype": "bf16",
+            "latent_prepare_batch_size": 7,
+        }
+    )
 
     args = argparse.Namespace(batch_size=16, latent_dtype="fp16")
     options = _resolve_prepare_options(cfg, args, {"batch_size", "latent_dtype"})
@@ -137,11 +141,13 @@ def test_sharded_cache_metadata_mismatch_reports_dtype(tmp_path) -> None:
 
 
 def test_prepare_latents_uses_dataset_limit_as_default_limit() -> None:
-    cfg = TrainConfig.from_dict({
-        "mode": "latent",
-        "latent_dtype": "bf16",
-        "dataset_limit": 32,
-    })
+    cfg = TrainConfig.from_dict(
+        {
+            "mode": "latent",
+            "latent_dtype": "bf16",
+            "dataset_limit": 32,
+        }
+    )
 
     args = argparse.Namespace(batch_size=16, latent_dtype="fp16")
     options = _resolve_prepare_options(cfg, args, set())
@@ -150,11 +156,13 @@ def test_prepare_latents_uses_dataset_limit_as_default_limit() -> None:
 
 
 def test_prepare_latents_cli_limit_overrides_dataset_limit() -> None:
-    cfg = TrainConfig.from_dict({
-        "mode": "latent",
-        "latent_dtype": "bf16",
-        "dataset_limit": 32,
-    })
+    cfg = TrainConfig.from_dict(
+        {
+            "mode": "latent",
+            "latent_dtype": "bf16",
+            "dataset_limit": 32,
+        }
+    )
 
     args = argparse.Namespace(limit=8)
     options = _resolve_prepare_options(cfg, args, {"limit"})

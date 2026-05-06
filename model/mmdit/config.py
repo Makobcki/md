@@ -69,10 +69,16 @@ class MMDiTConfig:
         if self.pos_embed not in {"rope_2d", "sincos_2d", "none"}:
             raise ValueError("pos_embed must be one of: rope_2d, sincos_2d, none.")
         if self.pos_embed == "sincos_2d" and int(self.hidden_dim) % 4 != 0:
-            raise ValueError("sincos_2d requires hidden_dim divisible by 4; set hidden_dim to a multiple of 4 or use pos_embed=rope_2d/none.")
+            raise ValueError(
+                "sincos_2d requires hidden_dim divisible by 4; set hidden_dim to a multiple of 4 or use pos_embed=rope_2d/none."
+            )
         if self.rope_scaling not in {"none", "linear", "ntk"}:
             raise ValueError("rope_scaling must be one of: none, linear, ntk.")
-        if len(self.rope_base_grid_hw) != 2 or self.rope_base_grid_hw[0] <= 0 or self.rope_base_grid_hw[1] <= 0:
+        if (
+            len(self.rope_base_grid_hw) != 2
+            or self.rope_base_grid_hw[0] <= 0
+            or self.rope_base_grid_hw[1] <= 0
+        ):
             raise ValueError("rope_base_grid_hw must contain two positive integers.")
         if self.rope_theta <= 0:
             raise ValueError("rope_theta must be positive.")
@@ -82,7 +88,11 @@ class MMDiTConfig:
             raise ValueError("attention_schedule must be full or hybrid.")
         if self.early_joint_blocks < 0 or self.late_joint_blocks < 0:
             raise ValueError("joint block counts must be non-negative.")
-        for name, value in {"source_patch_size": self.source_patch_size, "mask_patch_size": self.mask_patch_size, "control_patch_size": self.control_patch_size}.items():
+        for name, value in {
+            "source_patch_size": self.source_patch_size,
+            "mask_patch_size": self.mask_patch_size,
+            "control_patch_size": self.control_patch_size,
+        }.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive.")
         if self.control_adapter_ratio <= 0:
@@ -91,11 +101,13 @@ class MMDiTConfig:
             raise ValueError("coarse_patch_size must be positive.")
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "MMDiTConfig":
+    def from_dict(cls, data: dict[str, Any]) -> MMDiTConfig:
         model = data.get("model", data)
         text = data.get("text", {})
         rope_cfg = model.get("rope", {}) if isinstance(model.get("rope", {}), dict) else {}
-        raw_base_grid = rope_cfg.get("base_grid", model.get("rope_base_grid_hw", data.get("rope_base_grid_hw", (32, 32))))
+        raw_base_grid = rope_cfg.get(
+            "base_grid", model.get("rope_base_grid_hw", data.get("rope_base_grid_hw", (32, 32)))
+        )
         if isinstance(raw_base_grid, int):
             base_grid = (int(raw_base_grid), int(raw_base_grid))
         else:
@@ -126,24 +138,126 @@ class MMDiTConfig:
             "text_dim": int(text.get("text_dim", data.get("text_dim", 1024))),
             "pooled_dim": int(text.get("pooled_dim", data.get("pooled_dim", 1024))),
             "zero_init_final": bool(model.get("zero_init_final", True)),
-            "text_resampler_enabled": bool(text.get("resampler", {}).get("enabled", data.get("text_resampler_enabled", model.get("text_resampler_enabled", False)))) if isinstance(text.get("resampler", {}), dict) else bool(data.get("text_resampler_enabled", model.get("text_resampler_enabled", False))),
-            "text_resampler_num_tokens": int(text.get("resampler", {}).get("num_tokens", data.get("text_resampler_num_tokens", model.get("text_resampler_num_tokens", 128)))) if isinstance(text.get("resampler", {}), dict) else int(data.get("text_resampler_num_tokens", model.get("text_resampler_num_tokens", 128))),
-            "text_resampler_depth": int(text.get("resampler", {}).get("depth", data.get("text_resampler_depth", model.get("text_resampler_depth", 2)))) if isinstance(text.get("resampler", {}), dict) else int(data.get("text_resampler_depth", model.get("text_resampler_depth", 2))),
-            "text_resampler_mlp_ratio": float(text.get("resampler", {}).get("mlp_ratio", data.get("text_resampler_mlp_ratio", model.get("text_resampler_mlp_ratio", 4.0)))) if isinstance(text.get("resampler", {}), dict) else float(data.get("text_resampler_mlp_ratio", model.get("text_resampler_mlp_ratio", 4.0))),
+            "text_resampler_enabled": bool(
+                text.get("resampler", {}).get(
+                    "enabled",
+                    data.get("text_resampler_enabled", model.get("text_resampler_enabled", False)),
+                )
+            )
+            if isinstance(text.get("resampler", {}), dict)
+            else bool(
+                data.get("text_resampler_enabled", model.get("text_resampler_enabled", False))
+            ),
+            "text_resampler_num_tokens": int(
+                text.get("resampler", {}).get(
+                    "num_tokens",
+                    data.get(
+                        "text_resampler_num_tokens", model.get("text_resampler_num_tokens", 128)
+                    ),
+                )
+            )
+            if isinstance(text.get("resampler", {}), dict)
+            else int(
+                data.get("text_resampler_num_tokens", model.get("text_resampler_num_tokens", 128))
+            ),
+            "text_resampler_depth": int(
+                text.get("resampler", {}).get(
+                    "depth", data.get("text_resampler_depth", model.get("text_resampler_depth", 2))
+                )
+            )
+            if isinstance(text.get("resampler", {}), dict)
+            else int(data.get("text_resampler_depth", model.get("text_resampler_depth", 2))),
+            "text_resampler_mlp_ratio": float(
+                text.get("resampler", {}).get(
+                    "mlp_ratio",
+                    data.get(
+                        "text_resampler_mlp_ratio", model.get("text_resampler_mlp_ratio", 4.0)
+                    ),
+                )
+            )
+            if isinstance(text.get("resampler", {}), dict)
+            else float(
+                data.get("text_resampler_mlp_ratio", model.get("text_resampler_mlp_ratio", 4.0))
+            ),
             "attention_schedule": str(model.get("attention_schedule", "full")),
             "early_joint_blocks": int(model.get("early_joint_blocks", 0)),
             "late_joint_blocks": int(model.get("late_joint_blocks", 0)),
-            "source_patch_size": int(model.get("source_patch_size", model.get("conditioning_tokens", {}).get("source_patch_size", model.get("patch_size", 2))) if isinstance(model.get("conditioning_tokens", {}), dict) else model.get("source_patch_size", model.get("patch_size", 2))),
-            "mask_patch_size": int(model.get("mask_patch_size", model.get("conditioning_tokens", {}).get("mask_patch_size", model.get("patch_size", 2))) if isinstance(model.get("conditioning_tokens", {}), dict) else model.get("mask_patch_size", model.get("patch_size", 2))),
-            "control_patch_size": int(model.get("control_patch_size", model.get("conditioning_tokens", {}).get("control_patch_size", model.get("patch_size", 2))) if isinstance(model.get("conditioning_tokens", {}), dict) else model.get("control_patch_size", model.get("patch_size", 2))),
-            "mask_as_source_channel": bool(model.get("mask_as_source_channel", model.get("conditioning_tokens", {}).get("mask_as_source_channel", False))) if isinstance(model.get("conditioning_tokens", {}), dict) else bool(model.get("mask_as_source_channel", False)),
+            "source_patch_size": int(
+                model.get(
+                    "source_patch_size",
+                    model.get("conditioning_tokens", {}).get(
+                        "source_patch_size", model.get("patch_size", 2)
+                    ),
+                )
+                if isinstance(model.get("conditioning_tokens", {}), dict)
+                else model.get("source_patch_size", model.get("patch_size", 2))
+            ),
+            "mask_patch_size": int(
+                model.get(
+                    "mask_patch_size",
+                    model.get("conditioning_tokens", {}).get(
+                        "mask_patch_size", model.get("patch_size", 2)
+                    ),
+                )
+                if isinstance(model.get("conditioning_tokens", {}), dict)
+                else model.get("mask_patch_size", model.get("patch_size", 2))
+            ),
+            "control_patch_size": int(
+                model.get(
+                    "control_patch_size",
+                    model.get("conditioning_tokens", {}).get(
+                        "control_patch_size", model.get("patch_size", 2)
+                    ),
+                )
+                if isinstance(model.get("conditioning_tokens", {}), dict)
+                else model.get("control_patch_size", model.get("patch_size", 2))
+            ),
+            "mask_as_source_channel": bool(
+                model.get(
+                    "mask_as_source_channel",
+                    model.get("conditioning_tokens", {}).get("mask_as_source_channel", False),
+                )
+            )
+            if isinstance(model.get("conditioning_tokens", {}), dict)
+            else bool(model.get("mask_as_source_channel", False)),
             "conditioning_rope": bool(model.get("conditioning_rope", True)),
             "strength_embed": bool(model.get("strength_embed", data.get("strength_embed", False))),
-            "control_type_embed": bool(model.get("control_type_embed", model.get("control", {}).get("type_embed", False))) if isinstance(model.get("control", {}), dict) else bool(model.get("control_type_embed", False)),
-            "control_adapter": bool(model.get("control_adapter", model.get("control", {}).get("adapter", False))) if isinstance(model.get("control", {}), dict) else bool(model.get("control_adapter", False)),
-            "control_adapter_ratio": float(model.get("control_adapter_ratio", model.get("control", {}).get("adapter_ratio", 0.25))) if isinstance(model.get("control", {}), dict) else float(model.get("control_adapter_ratio", 0.25)),
-            "hierarchical_tokens_enabled": bool(model.get("hierarchical_tokens_enabled", model.get("hierarchical", {}).get("enabled", False))) if isinstance(model.get("hierarchical", {}), dict) else bool(model.get("hierarchical_tokens_enabled", False)),
-            "coarse_patch_size": int(model.get("coarse_patch_size", model.get("hierarchical", {}).get("coarse_patch_size", 4))) if isinstance(model.get("hierarchical", {}), dict) else int(model.get("coarse_patch_size", 4)),
-            "x0_aux_weight": float(data.get("x0_aux_weight", data.get("loss", {}).get("x0_aux_weight", 0.0))) if isinstance(data.get("loss", {}), dict) else float(data.get("x0_aux_weight", 0.0)),
+            "control_type_embed": bool(
+                model.get("control_type_embed", model.get("control", {}).get("type_embed", False))
+            )
+            if isinstance(model.get("control", {}), dict)
+            else bool(model.get("control_type_embed", False)),
+            "control_adapter": bool(
+                model.get("control_adapter", model.get("control", {}).get("adapter", False))
+            )
+            if isinstance(model.get("control", {}), dict)
+            else bool(model.get("control_adapter", False)),
+            "control_adapter_ratio": float(
+                model.get(
+                    "control_adapter_ratio", model.get("control", {}).get("adapter_ratio", 0.25)
+                )
+            )
+            if isinstance(model.get("control", {}), dict)
+            else float(model.get("control_adapter_ratio", 0.25)),
+            "hierarchical_tokens_enabled": bool(
+                model.get(
+                    "hierarchical_tokens_enabled",
+                    model.get("hierarchical", {}).get("enabled", False),
+                )
+            )
+            if isinstance(model.get("hierarchical", {}), dict)
+            else bool(model.get("hierarchical_tokens_enabled", False)),
+            "coarse_patch_size": int(
+                model.get(
+                    "coarse_patch_size", model.get("hierarchical", {}).get("coarse_patch_size", 4)
+                )
+            )
+            if isinstance(model.get("hierarchical", {}), dict)
+            else int(model.get("coarse_patch_size", 4)),
+            "x0_aux_weight": float(
+                data.get("x0_aux_weight", data.get("loss", {}).get("x0_aux_weight", 0.0))
+            )
+            if isinstance(data.get("loss", {}), dict)
+            else float(data.get("x0_aux_weight", 0.0)),
         }
         return cls(**kwargs)

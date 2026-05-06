@@ -26,6 +26,7 @@ def test_prepare_train_run_structure_creates_reproducible_layout(tmp_path: Path)
     assert paths.train_log_path.exists()
     assert json.loads(paths.cache_manifest_path.read_text(encoding="utf-8"))["version"] == 1
 
+
 import torch
 
 from config.train import TrainConfig

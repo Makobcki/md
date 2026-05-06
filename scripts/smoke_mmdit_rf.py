@@ -76,9 +76,13 @@ def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: 
 
     meta = cache.metadata
     if int(meta.get("text_dim", -1)) != int(cfg.text_dim):
-        raise RuntimeError(f"text cache text_dim mismatch: {meta.get('text_dim')} != {cfg.text_dim}")
+        raise RuntimeError(
+            f"text cache text_dim mismatch: {meta.get('text_dim')} != {cfg.text_dim}"
+        )
     if int(meta.get("pooled_dim", -1)) != int(cfg.pooled_dim):
-        raise RuntimeError(f"text cache pooled_dim mismatch: {meta.get('pooled_dim')} != {cfg.pooled_dim}")
+        raise RuntimeError(
+            f"text cache pooled_dim mismatch: {meta.get('pooled_dim')} != {cfg.pooled_dim}"
+        )
 
     expected_encoders = cfg.extra.get("text", {}).get("encoders", [])
     actual_encoders = meta.get("encoders", [])
@@ -100,12 +104,20 @@ def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: 
             for item in actual_encoders
         ]
         if expected != actual:
-            raise RuntimeError(f"text cache encoder metadata mismatch: cache={actual!r}, config={expected!r}")
+            raise RuntimeError(
+                f"text cache encoder metadata mismatch: cache={actual!r}, config={expected!r}"
+            )
 
-    missing = [str(entry.get("md5", "")) for entry in entries if str(entry.get("md5", "")) not in cache.entries]
+    missing = [
+        str(entry.get("md5", ""))
+        for entry in entries
+        if str(entry.get("md5", "")) not in cache.entries
+    ]
     if missing:
         examples = ", ".join(missing[:10])
-        raise RuntimeError(f"text cache missing {len(missing)} md5 keys used by dataset. Examples: {examples}")
+        raise RuntimeError(
+            f"text cache missing {len(missing)} md5 keys used by dataset. Examples: {examples}"
+        )
 
     text_hash_mismatches = []
     for entry in entries:
@@ -115,13 +127,17 @@ def _validate_text_cache_for_mmdit(cache: TextCache, cfg: TrainConfig, entries: 
             text_hash_mismatches.append(key)
     if text_hash_mismatches:
         examples = ", ".join(text_hash_mismatches[:10])
-        raise RuntimeError(f"text cache prompt/text hash mismatch for {len(text_hash_mismatches)} md5 keys. Examples: {examples}")
+        raise RuntimeError(
+            f"text cache prompt/text hash mismatch for {len(text_hash_mismatches)} md5 keys. Examples: {examples}"
+        )
 
     expected_hash = meta.get("dataset_hash")
     if isinstance(expected_hash, str) and expected_hash:
         actual_hash = _mmdit_dataset_hash(entries)
         if actual_hash != expected_hash and len(cache.entries) <= len(entries):
-            raise RuntimeError(f"text cache dataset_hash mismatch: {expected_hash} != {actual_hash}")
+            raise RuntimeError(
+                f"text cache dataset_hash mismatch: {expected_hash} != {actual_hash}"
+            )
 
 
 def _batch_text(text: TextConditioning) -> TextConditioning:
@@ -129,7 +145,9 @@ def _batch_text(text: TextConditioning) -> TextConditioning:
         tokens=text.tokens.unsqueeze(0) if text.tokens.dim() == 2 else text.tokens,
         mask=text.mask.unsqueeze(0) if text.mask.dim() == 1 else text.mask,
         pooled=text.pooled.unsqueeze(0) if text.pooled.dim() == 1 else text.pooled,
-        is_uncond=text.is_uncond.view(1) if text.is_uncond is not None and text.is_uncond.dim() == 0 else text.is_uncond,
+        is_uncond=text.is_uncond.view(1)
+        if text.is_uncond is not None and text.is_uncond.dim() == 0
+        else text.is_uncond,
     )
 
 
@@ -158,7 +176,10 @@ def _load_first_batch(cfg: TrainConfig) -> tuple[torch.Tensor, TextConditioning,
     if not train_entries:
         raise RuntimeError("No train entries available for MMDiT smoke test.")
 
-    text_cache = TextCache(Path(cfg.data_root) / str(cfg.text_cache_dir), shard_cache_size=int(cfg.text_shard_cache_size))
+    text_cache = TextCache(
+        Path(cfg.data_root) / str(cfg.text_cache_dir),
+        shard_cache_size=int(cfg.text_shard_cache_size),
+    )
     _validate_text_cache_for_mmdit(text_cache, cfg, train_entries + val_entries)
 
     latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
@@ -219,7 +240,9 @@ def _synthetic_batch(cfg: TrainConfig) -> tuple[torch.Tensor, TextConditioning, 
     batch_size = 1
     text_cfg = cfg.extra.get("text", {}) if isinstance(cfg.extra.get("text", {}), dict) else {}
     encoders = text_cfg.get("encoders", []) if isinstance(text_cfg, dict) else []
-    total_text_len = sum(int(item.get("max_length", 0)) for item in encoders if isinstance(item, dict))
+    total_text_len = sum(
+        int(item.get("max_length", 0)) for item in encoders if isinstance(item, dict)
+    )
     text_len = max(1, min(total_text_len or 16, 16))
     x0 = torch.randn(batch_size, int(cfg.latent_channels), latent_side, latent_side, generator=gen)
     text = TextConditioning(
@@ -235,7 +258,11 @@ def _synthetic_batch(cfg: TrainConfig) -> tuple[torch.Tensor, TextConditioning, 
         "text_cache_entries": "synthetic",
         "latent_cache_entries": "synthetic",
         "first_md5": "synthetic",
-        "configured_latent_shape": (int(cfg.latent_channels), configured_latent_side, configured_latent_side),
+        "configured_latent_shape": (
+            int(cfg.latent_channels),
+            configured_latent_side,
+            configured_latent_side,
+        ),
     }
     return x0, text, diagnostics
 
@@ -274,7 +301,9 @@ def run(config_path: str, *, synthetic: bool = False) -> None:
     t = torch.rand(x0.shape[0])
     out = model(x0, t, text)
     if out.shape != x0.shape:
-        raise RuntimeError(f"MMDiT smoke forward shape mismatch: {tuple(out.shape)} != {tuple(x0.shape)}")
+        raise RuntimeError(
+            f"MMDiT smoke forward shape mismatch: {tuple(out.shape)} != {tuple(x0.shape)}"
+        )
 
     loss = training_step_mmdit(
         model=model,

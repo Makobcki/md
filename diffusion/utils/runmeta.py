@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict, Optional
-
 import os
+from pathlib import Path
+from typing import Any
 
 import torch
 
 
-def build_run_metadata(perf: Optional[Dict[str, bool]] = None) -> Dict[str, Any]:
+def build_run_metadata(perf: dict[str, bool] | None = None) -> dict[str, Any]:
     meta = {
         "torch_version": str(torch.__version__),
         "cuda_available": torch.cuda.is_available(),
@@ -22,9 +21,13 @@ def build_run_metadata(perf: Optional[Dict[str, bool]] = None) -> Dict[str, Any]
     try:
         import subprocess
 
-        meta["git_commit"] = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=str(Path.cwd()), stderr=subprocess.DEVNULL
-        ).decode("utf-8").strip()
+        meta["git_commit"] = (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=str(Path.cwd()), stderr=subprocess.DEVNULL
+            )
+            .decode("utf-8")
+            .strip()
+        )
     except Exception:
         meta["git_commit"] = None
     return _normalize_metadata(meta)

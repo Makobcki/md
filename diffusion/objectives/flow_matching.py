@@ -15,8 +15,7 @@ class TrainingTuple:
 
 
 class Objective(Protocol):
-    def sample_training_tuple(self, x0: torch.Tensor) -> TrainingTuple:
-        ...
+    def sample_training_tuple(self, x0: torch.Tensor) -> TrainingTuple: ...
 
 
 def apply_timestep_shift(t: torch.Tensor, shift: float) -> torch.Tensor:
@@ -31,7 +30,9 @@ def apply_timestep_shift(t: torch.Tensor, shift: float) -> torch.Tensor:
 def sample_timestep(
     batch_size: int,
     *,
-    mode: Literal["uniform", "logit_normal", "shifted_logit_normal", "cosmap", "cosmap_like"] = "logit_normal",
+    mode: Literal[
+        "uniform", "logit_normal", "shifted_logit_normal", "cosmap", "cosmap_like"
+    ] = "logit_normal",
     device: torch.device,
     logit_mean: float = 0.0,
     logit_std: float = 1.0,
@@ -58,7 +59,9 @@ class RectifiedFlowObjective:
     def __init__(
         self,
         *,
-        timestep_sampling: Literal["uniform", "logit_normal", "shifted_logit_normal", "cosmap", "cosmap_like"] = "logit_normal",
+        timestep_sampling: Literal[
+            "uniform", "logit_normal", "shifted_logit_normal", "cosmap", "cosmap_like"
+        ] = "logit_normal",
         logit_mean: float = 0.0,
         logit_std: float = 1.0,
         train_t_min: float = 0.0,
@@ -66,10 +69,18 @@ class RectifiedFlowObjective:
         loss_weighting: str = "none",
         timestep_shift: float = 1.0,
     ) -> None:
-        allowed_sampling = {"uniform", "logit_normal", "shifted_logit_normal", "cosmap", "cosmap_like"}
+        allowed_sampling = {
+            "uniform",
+            "logit_normal",
+            "shifted_logit_normal",
+            "cosmap",
+            "cosmap_like",
+        }
         if str(timestep_sampling) not in allowed_sampling:
             allowed = ", ".join(sorted(allowed_sampling))
-            raise ValueError(f"Unsupported timestep sampling mode: {timestep_sampling}. Allowed: {allowed}.")
+            raise ValueError(
+                f"Unsupported timestep sampling mode: {timestep_sampling}. Allowed: {allowed}."
+            )
         if float(logit_std) <= 0:
             raise ValueError("logit_std must be positive.")
         if not (0.0 <= float(train_t_min) <= 1.0 and 0.0 <= float(train_t_max) <= 1.0):
@@ -89,7 +100,7 @@ class RectifiedFlowObjective:
         self.timestep_shift = float(timestep_shift)
 
     @classmethod
-    def from_config(cls, cfg: dict) -> "RectifiedFlowObjective":
+    def from_config(cls, cfg: dict) -> RectifiedFlowObjective:
         flow = cfg.get("flow", cfg)
         return cls(
             timestep_sampling=str(flow.get("timestep_sampling", "logit_normal")),
@@ -139,4 +150,3 @@ def rectified_flow_loss(
         has_mask = m.sum(dim=[1, 2, 3]) > 0
         per = torch.where(has_mask, masked, per)
     return (per * weight.to(device=pred.device, dtype=per.dtype)).mean()
-

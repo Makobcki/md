@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from .mmdit import MMDiTConfig, MMDiTFlowModel
-
 
 ModelBuilder = Callable[[Any], object]
 
@@ -28,14 +28,12 @@ def _model_section(config: Any) -> dict[str, Any]:
 
 def model_family(config: Any) -> str:
     """Return semantic model family from a nested config."""
-
     model = _model_section(config)
     return str(model.get("family", "mmdit") or "mmdit")
 
 
 def build_mmdit(config: Any) -> MMDiTFlowModel:
     """Build an MMDiT rectified-flow model from dict/TrainConfig/MMDiTConfig."""
-
     if isinstance(config, MMDiTConfig):
         mmdit_config = config
     else:
@@ -58,7 +56,6 @@ MODEL_REGISTRY: dict[str, ModelBuilder] = {
 
 def build_model(config: Any) -> object:
     """Build a model using ``model.family`` semantics."""
-
     family = model_family(config)
     try:
         builder = MODEL_REGISTRY[family]

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 from fastapi import HTTPException
@@ -16,6 +16,7 @@ def app_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[obje
     monkeypatch.setenv("WEBUI_CONFIG_PATH", str(cfg_dst))
     monkeypatch.setenv("WEBUI_RUNS_DIR", str(tmp_path / "webui_runs"))
     import webui.backend.app as app_module
+
     importlib.reload(app_module)
     yield app_module
 
@@ -39,8 +40,7 @@ def test_update_config_validation(app_module: object) -> None:
 def test_eval_steps_must_be_positive(app_module: object) -> None:
     current = app_module.get_train_config()["content"]
     invalid = "\n".join(
-        "eval_steps: 0" if line.startswith("eval_steps:") else line
-        for line in current.splitlines()
+        "eval_steps: 0" if line.startswith("eval_steps:") else line for line in current.splitlines()
     )
 
     with pytest.raises(HTTPException) as exc:

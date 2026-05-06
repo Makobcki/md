@@ -10,19 +10,18 @@ import threading
 import time
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import torch
-from diffusion.io.ckpt import _torch_load
 import yaml
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from config.train import TrainConfig
 from data_loader import (
-    DataConfig,
     AspectBucketBatchSampler,
+    DataConfig,
     assign_bucket,
     build_or_load_index,
     latent_cache_path,
@@ -31,6 +30,7 @@ from data_loader import (
     validate_buckets,
 )
 from diffusion.events import EventBus, JsonlFileSink, StdoutJsonSink
+from diffusion.io.ckpt import _torch_load
 from diffusion.utils import build_run_metadata
 from diffusion.utils.oom import is_torch_oom_error, print_torch_oom
 from diffusion.vae import VAEWrapper
@@ -63,16 +63,16 @@ def _config_text_enabled(cfg: TrainConfig) -> bool:
     if isinstance(text_section, dict) and "enabled" in text_section:
         return bool(text_section["enabled"])
     if hasattr(cfg, "text_enabled"):
-        return bool(getattr(cfg, "text_enabled"))
+        return bool(cfg.text_enabled)
     if hasattr(cfg, "use_text_conditioning"):
-        return bool(getattr(cfg, "use_text_conditioning"))
+        return bool(cfg.use_text_conditioning)
     return True
 
 
 @dataclass(frozen=True)
 class _LatentPrepareOptions:
     overwrite: bool = False
-    limit: Optional[int] = None
+    limit: int | None = None
     batch_size: int = 16
     num_workers: int = 4
     prefetch_factor: int = 2
@@ -113,9 +113,7 @@ def _latent_prepare_config_values(cfg: TrainConfig) -> dict[str, Any]:
     section = cfg.extra.get("prepare_latents", cfg.extra.get("latent_prepare"))
     if section is not None:
         if not isinstance(section, dict):
-            raise RuntimeError(
-                "prepare_latents/latent_prepare config section must be a mapping."
-            )
+            raise RuntimeError("prepare_latents/latent_prepare config section must be a mapping.")
         values.update({str(k).replace("-", "_"): v for k, v in section.items()})
 
     prefix = "latent_prepare_"
@@ -125,9 +123,7 @@ def _latent_prepare_config_values(cfg: TrainConfig) -> dict[str, Any]:
 
     unknown = sorted(set(values) - valid)
     if unknown:
-        raise RuntimeError(
-            "Unknown latent_prepare config option(s): " + ", ".join(unknown)
-        )
+        raise RuntimeError("Unknown latent_prepare config option(s): " + ", ".join(unknown))
     return values
 
 
@@ -156,44 +152,64 @@ def _coerce_prepare_options(options: _LatentPrepareOptions) -> _LatentPrepareOpt
     if coerced.autocast_dtype not in {"fp16", "bf16"}:
         raise RuntimeError("latent_prepare_autocast_dtype must be 'fp16' or 'bf16'.")
     if coerced.decode_backend not in {"auto", "pil", "torchvision"}:
-        raise RuntimeError(
-            "latent_prepare_decode_backend must be one of: auto, pil, torchvision."
-        )
+        raise RuntimeError("latent_prepare_decode_backend must be one of: auto, pil, torchvision.")
     return coerced
 
 
-def prepare_latent_cache_for_config(
-    cfg: TrainConfig, *, overwrite: bool | None = None
-) -> None:
+def prepare_latent_cache_for_config(cfg: TrainConfig, *, overwrite: bool | None = None) -> None:
     """Callable API used by training auto-cache preparation."""
     with tempfile.TemporaryDirectory(prefix="md-latent-config-") as tmp_dir:
         config_path = Path(tmp_dir) / "train.yaml"
-        config_path.write_text(
-            yaml.safe_dump(cfg.to_dict(), sort_keys=False), encoding="utf-8"
-        )
+        config_path.write_text(yaml.safe_dump(cfg.to_dict(), sort_keys=False), encoding="utf-8")
         argv = ["--config", str(config_path)]
         if overwrite is not None:
             argv.append("--overwrite" if overwrite else "--no-overwrite")
         _main_impl(argv)
 
 
-def _latent_meta_mismatch_reason(
-    expected: dict[str, Any], actual: dict[str, Any]
-) -> str | None:
+def _latent_meta_mismatch_reason(expected: dict[str, Any], actual: dict[str, Any]) -> str | None:
     comparisons: list[tuple[str, Any, Any]] = [
-        ("vae_pretrained", str(expected.get("vae_pretrained", "")), str(actual.get("vae_pretrained", ""))),
-        ("scaling_factor", float(expected.get("scaling_factor", 0.0)), float(actual.get("scaling_factor", 0.0))),
+        (
+            "vae_pretrained",
+            str(expected.get("vae_pretrained", "")),
+            str(actual.get("vae_pretrained", "")),
+        ),
+        (
+            "scaling_factor",
+            float(expected.get("scaling_factor", 0.0)),
+            float(actual.get("scaling_factor", 0.0)),
+        ),
         ("dtype", str(expected.get("dtype", "")), str(actual.get("dtype", ""))),
-        ("format_version", int(expected.get("format_version", 0)), int(actual.get("format_version", 0))),
+        (
+            "format_version",
+            int(expected.get("format_version", 0)),
+            int(actual.get("format_version", 0)),
+        ),
     ]
     if expected.get("latent_shape") is None:
-        comparisons.extend([
-            ("latent_shape", None, actual.get("latent_shape")),
-            ("latent_shapes", list(expected.get("latent_shapes", [])), list(actual.get("latent_shapes", []))),
-            ("bucket_shapes", list(expected.get("bucket_shapes", [])), list(actual.get("bucket_shapes", []))),
-        ])
+        comparisons.extend(
+            [
+                ("latent_shape", None, actual.get("latent_shape")),
+                (
+                    "latent_shapes",
+                    list(expected.get("latent_shapes", [])),
+                    list(actual.get("latent_shapes", [])),
+                ),
+                (
+                    "bucket_shapes",
+                    list(expected.get("bucket_shapes", [])),
+                    list(actual.get("bucket_shapes", [])),
+                ),
+            ]
+        )
     else:
-        comparisons.append(("latent_shape", list(expected.get("latent_shape", [])), list(actual.get("latent_shape", []))))
+        comparisons.append(
+            (
+                "latent_shape",
+                list(expected.get("latent_shape", [])),
+                list(actual.get("latent_shape", [])),
+            )
+        )
     for key, expected_value, actual_value in comparisons:
         if key == "scaling_factor":
             if abs(float(expected_value) - float(actual_value)) <= 1e-6:
@@ -225,7 +241,7 @@ def _sharded_cache_mismatch_reason(
                 return f"missing shard metadata in {shard_path}"
             mismatch = _latent_meta_mismatch_reason(expected_meta, actual_meta)
             if mismatch is not None:
-                return f"{shard_path.name}: {mismatch}"
+                return mismatch
     except Exception as exc:
         return f"cannot read latent shards: {exc}"
     return None
@@ -237,9 +253,7 @@ def _resolve_prepare_options(
     provided_dests: set[str],
 ) -> _LatentPrepareOptions:
     options = _LatentPrepareOptions(
-        limit=int(cfg.dataset_limit)
-        if int(getattr(cfg, "dataset_limit", 0)) > 0
-        else None,
+        limit=int(cfg.dataset_limit) if int(getattr(cfg, "dataset_limit", 0)) > 0 else None,
         latent_dtype=str(cfg.latent_dtype),
         autocast_dtype=str(cfg.latent_dtype),
         shard_size=4096 if bool(cfg.latent_cache_sharded) else 0,
@@ -249,9 +263,7 @@ def _resolve_prepare_options(
         options = replace(options, **config_values)
 
     cli_values = {
-        key: getattr(args, key)
-        for key in provided_dests
-        if key != "config" and hasattr(args, key)
+        key: getattr(args, key) for key in provided_dests if key != "config" and hasattr(args, key)
     }
     if cli_values:
         options = replace(options, **cli_values)
@@ -281,12 +293,8 @@ def _update_latent_stats(stats: dict, batch: torch.Tensor) -> None:
     batch_count = int(values.numel())
     batch_m2 = batch_var * batch_count
 
-    stats["min"] = (
-        batch_min if stats["min"] is None else float(min(stats["min"], batch_min))
-    )
-    stats["max"] = (
-        batch_max if stats["max"] is None else float(max(stats["max"], batch_max))
-    )
+    stats["min"] = batch_min if stats["min"] is None else float(min(stats["min"], batch_min))
+    stats["max"] = batch_max if stats["max"] is None else float(max(stats["max"], batch_max))
 
     count = int(stats["count"])
     mean = float(stats["mean"])
@@ -309,10 +317,7 @@ def _update_latent_stats(stats: dict, batch: torch.Tensor) -> None:
 
 def _finalize_latent_stats(stats: dict) -> dict:
     count = int(stats["count"])
-    if count <= 1:
-        std = 0.0
-    else:
-        std = float(np.sqrt(float(stats["m2"]) / (count - 1)))
+    std = 0.0 if count <= 1 else float(np.sqrt(float(stats["m2"]) / (count - 1)))
     return {
         "count": count,
         "mean": float(stats["mean"]),
@@ -327,9 +332,9 @@ class _LatentPrepDataset(Dataset):
         self,
         entries: list[dict],
         *,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         decode_backend: str = "auto",
-        buckets: Optional[list[Any]] = None,
+        buckets: list[Any] | None = None,
         image_size: int = 512,
     ) -> None:
         self.entries = entries[:limit] if limit is not None else entries
@@ -361,16 +366,31 @@ class _LatentPrepDataset(Dataset):
         try:
             x = _load_image_tensor(path, backend=self.decode_backend, target_size=target_size)
             elapsed_ms = (time.perf_counter() - start) * 1000.0
-            return {"md5": md5, "x": x, "error": None, "decode_ms": elapsed_ms, "target_size": target_size}
+            return {
+                "md5": md5,
+                "x": x,
+                "error": None,
+                "decode_ms": elapsed_ms,
+                "target_size": target_size,
+            }
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start) * 1000.0
-            return {"md5": md5, "x": None, "error": str(e), "decode_ms": elapsed_ms, "target_size": target_size}
+            return {
+                "md5": md5,
+                "x": None,
+                "error": str(e),
+                "decode_ms": elapsed_ms,
+                "target_size": target_size,
+            }
+
 
 def _collate_items(batch: list[dict]) -> list[dict]:
     return batch
 
 
-def _load_image_tensor(path: str, *, backend: str, target_size: tuple[int, int] | None = None) -> torch.Tensor:
+def _load_image_tensor(
+    path: str, *, backend: str, target_size: tuple[int, int] | None = None
+) -> torch.Tensor:
     if target_size is not None:
         return _load_image_tensor_pil(path, target_size=target_size)
     if backend == "pil":
@@ -398,13 +418,13 @@ def _load_image_tensor_pil(path: str, *, target_size: tuple[int, int]) -> torch.
     return x * 2.0 - 1.0
 
 
-def _load_image_tensor_torchvision(path: str, *, expected_size: tuple[int, int] = (512, 512)) -> torch.Tensor:
+def _load_image_tensor_torchvision(
+    path: str, *, expected_size: tuple[int, int] = (512, 512)
+) -> torch.Tensor:
     try:
         from torchvision.io import ImageReadMode, read_image
     except Exception as exc:
-        raise RuntimeError(
-            "torchvision is required for decode_backend=torchvision."
-        ) from exc
+        raise RuntimeError("torchvision is required for decode_backend=torchvision.") from exc
     x = read_image(path, mode=ImageReadMode.RGB)
     expected_hw = (int(expected_size[1]), int(expected_size[0]))
     if tuple(x.shape[-2:]) != expected_hw:
@@ -470,9 +490,7 @@ class _ShardWriter:
         self.current_count = 0
         self.shard_id = start_shard_id
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        self.tmp_index_path = self.index_path.with_suffix(
-            self.index_path.suffix + ".tmp"
-        )
+        self.tmp_index_path = self.index_path.with_suffix(self.index_path.suffix + ".tmp")
         if self.index_path.exists():
             self.tmp_index_path.write_text(
                 self.index_path.read_text(encoding="utf-8"), encoding="utf-8"
@@ -481,7 +499,7 @@ class _ShardWriter:
         else:
             self.index_fp = self.tmp_index_path.open("w", encoding="utf-8")
 
-    def add(self, md5: str, latent: torch.Tensor) -> Optional[tuple[Path, list[str]]]:
+    def add(self, md5: str, latent: torch.Tensor) -> tuple[Path, list[str]] | None:
         self.current_md5s.append(md5)
         self.current_latents.append(latent)
         self.current_count += 1
@@ -489,7 +507,7 @@ class _ShardWriter:
             return self.flush()
         return None
 
-    def flush(self) -> Optional[tuple[Path, list[str]]]:
+    def flush(self) -> tuple[Path, list[str]] | None:
         if self.current_count == 0:
             return None
         shard_name = f"shard_{self.shard_id:06d}.pt"
@@ -520,7 +538,7 @@ class _ShardWriter:
         self.tmp_index_path.replace(self.index_path)
 
 
-def _main_impl(argv: Optional[list[str]] = None) -> None:
+def _main_impl(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="", help="Config path. Defaults to configs/cache.kdl.")
     ap.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
@@ -537,16 +555,16 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
     ap.add_argument("--writer-threads", type=int, default=1)
     ap.add_argument("--shard-size", type=int, default=4096)
     ap.add_argument("--stats-every-sec", type=float, default=5.0)
-    ap.add_argument(
-        "--decode-backend", default="auto", choices=("auto", "pil", "torchvision")
-    )
+    ap.add_argument("--decode-backend", default="auto", choices=("auto", "pil", "torchvision"))
     argv = argv if argv is not None else sys.argv[1:]
     provided_dests = _provided_cli_dests(ap, argv)
     args = ap.parse_args(argv)
 
     from config.loader import load_cache_train_config, parse_cli_overrides
 
-    cfg = load_cache_train_config(args.config or None, overrides=parse_cli_overrides(args.set_values))
+    cfg = load_cache_train_config(
+        args.config or None, overrides=parse_cli_overrides(args.set_values)
+    )
     options = _resolve_prepare_options(cfg, args, provided_dests)
     if cfg.mode != "latent":
         raise RuntimeError("prepare_latents requires mode=latent in config.")
@@ -559,9 +577,7 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
     shard_dir = cache_dir / "shards"
     failed_path = root / "failed_latents.txt"
     run_dir = os.environ.get("WEBUI_RUN_DIR")
-    metrics_dir = (
-        Path(run_dir) / "metrics" if run_dir else Path(cfg.out_dir) / "metrics"
-    )
+    metrics_dir = Path(run_dir) / "metrics" if run_dir else Path(cfg.out_dir) / "metrics"
     metrics_path = metrics_dir / "latent_prepare.jsonl"
     sinks = [JsonlFileSink(metrics_path), StdoutJsonSink()]
     event_bus = EventBus(sinks)
@@ -601,7 +617,12 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
 
     buckets = None
     if bool(cfg.aspect_buckets_enabled):
-        patch_sizes = [int(cfg.latent_patch_size), int(cfg.source_patch_size), int(cfg.mask_patch_size), int(cfg.control_patch_size)]
+        patch_sizes = [
+            int(cfg.latent_patch_size),
+            int(cfg.source_patch_size),
+            int(cfg.mask_patch_size),
+            int(cfg.control_patch_size),
+        ]
         if bool(cfg.hierarchical_tokens_enabled):
             patch_sizes.append(int(cfg.coarse_patch_size))
         buckets = validate_buckets(
@@ -689,11 +710,13 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
     }
 
     if buckets is None:
-        latent_shapes = [[
-            int(cfg.latent_channels),
-            int(cfg.image_size) // int(cfg.latent_downsample_factor),
-            int(cfg.image_size) // int(cfg.latent_downsample_factor),
-        ]]
+        latent_shapes = [
+            [
+                int(cfg.latent_channels),
+                int(cfg.image_size) // int(cfg.latent_downsample_factor),
+                int(cfg.image_size) // int(cfg.latent_downsample_factor),
+            ]
+        ]
         latent_shape = latent_shapes[0]
         bucket_shapes = []
     else:
@@ -722,9 +745,17 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
     }
 
     manifest_path = cache_dir / "manifest.json"
-    manifest_path.write_text(json.dumps({"version": 1, "status": "preparing", "meta_common": meta_common}, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(
+            {"version": 1, "status": "preparing", "meta_common": meta_common},
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
-    shard_writer: Optional[_ShardWriter] = None
+    shard_writer: _ShardWriter | None = None
     existing_md5s: set[str] = set()
     if options.shard_size > 0:
         shard_dir.mkdir(parents=True, exist_ok=True)
@@ -779,18 +810,14 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
             start_shard_id=start_shard_id,
         )
 
-    task_queue: queue.Queue[Optional[_SaveTask]] = queue.Queue(
-        maxsize=int(options.queue_size)
-    )
+    task_queue: queue.Queue[_SaveTask | None] = queue.Queue(maxsize=int(options.queue_size))
     queue_wait_ms = {"value": 0.0}
 
     error_examples: list[dict[str, str]] = []
 
     def _record_error(md5: str, stage: str, message: object) -> None:
         if len(error_examples) < 5:
-            error_examples.append(
-                {"md5": str(md5), "stage": str(stage), "error": str(message)}
-            )
+            error_examples.append({"md5": str(md5), "stage": str(stage), "error": str(message)})
 
     def _enqueue_task(task: _SaveTask) -> None:
         start_wait = time.perf_counter()
@@ -896,7 +923,7 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
         if not batch_items:
             continue
 
-        md5s, paths, xs, expected_shapes = zip(*batch_items)
+        md5s, paths, xs, expected_shapes = zip(*batch_items, strict=True)
         h2d_start = time.perf_counter()
         x = torch.stack(xs, dim=0).to(device=device, dtype=dtype, non_blocking=True)
         h2d_ms = (time.perf_counter() - h2d_start) * 1000.0
@@ -932,7 +959,14 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
                             ).squeeze(0)
                     _update_latent_stats(stats, z_single.unsqueeze(0))
                     z_cpu = z_single.to(dtype=dtype, device="cpu")
-                    _enqueue_task(_SaveTask(md5=md5, out_path=Path(path), latent=z_cpu, expected_shape=expected_shape))
+                    _enqueue_task(
+                        _SaveTask(
+                            md5=md5,
+                            out_path=Path(path),
+                            latent=z_cpu,
+                            expected_shape=expected_shape,
+                        )
+                    )
                 except Exception as inner:
                     errors += 1
                     _record_error(str(md5), "encode", inner)
@@ -944,8 +978,12 @@ def _main_impl(argv: Optional[list[str]] = None) -> None:
         z_cpu = z_batch.to(device="cpu", dtype=dtype)
         cpu_copy_ms = (time.perf_counter() - cpu_copy_start) * 1000.0
 
-        for md5, out_path, z, expected_shape in zip(md5s, paths, z_cpu, expected_shapes):
-            _enqueue_task(_SaveTask(md5=md5, out_path=Path(out_path), latent=z, expected_shape=expected_shape))
+        for md5, out_path, z, expected_shape in zip(
+            md5s, paths, z_cpu, expected_shapes, strict=True
+        ):
+            _enqueue_task(
+                _SaveTask(md5=md5, out_path=Path(out_path), latent=z, expected_shape=expected_shape)
+            )
 
         batch_total_ms = (time.perf_counter() - batch_start) * 1000.0
         timing["decode_ms"] += decode_ms
@@ -1059,7 +1097,7 @@ def _save_latent_cpu(
     cfg: TrainConfig,
     dtype: torch.dtype,
     dtype_name: str,
-    code_version: Optional[str],
+    code_version: str | None,
     expected_shape: tuple[int, int, int] | None = None,
 ) -> None:
     _validate_latent_tensor(z, cfg, expected_shape=expected_shape)
@@ -1083,15 +1121,15 @@ def _save_latent_cpu(
     tmp_path.replace(out_path)
 
 
-def _validate_latent_tensor(z: torch.Tensor, cfg: TrainConfig, *, expected_shape: tuple[int, int, int] | None = None) -> None:
+def _validate_latent_tensor(
+    z: torch.Tensor, cfg: TrainConfig, *, expected_shape: tuple[int, int, int] | None = None
+) -> None:
     if z.dim() != 3:
         raise RuntimeError(f"latent must be 3D, got {tuple(z.shape)}")
     if not torch.isfinite(z).all():
         raise RuntimeError("latent has NaN/Inf values")
     if z.shape[0] != int(cfg.latent_channels):
-        raise RuntimeError(
-            f"latent_channels mismatch: {z.shape[0]} != {cfg.latent_channels}"
-        )
+        raise RuntimeError(f"latent_channels mismatch: {z.shape[0]} != {cfg.latent_channels}")
     if expected_shape is not None:
         expected = tuple(int(v) for v in expected_shape)
         if tuple(z.shape) != expected:
@@ -1104,12 +1142,10 @@ def _validate_latent_tensor(z: torch.Tensor, cfg: TrainConfig, *, expected_shape
     h = int(cfg.image_size) // int(cfg.latent_downsample_factor)
     w = int(cfg.image_size) // int(cfg.latent_downsample_factor)
     if z.shape[-2:] != (h, w):
-        raise RuntimeError(
-            f"latent spatial mismatch: {tuple(z.shape[-2:])} != {(h, w)}"
-        )
+        raise RuntimeError(f"latent spatial mismatch: {tuple(z.shape[-2:])} != {(h, w)}")
 
 
-def main(argv: Optional[list[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     try:
         _main_impl(argv)
     except Exception as exc:

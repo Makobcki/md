@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 
 def _literal(node: ast.AST) -> Any:
@@ -11,9 +11,9 @@ def _literal(node: ast.AST) -> Any:
     return None
 
 
-def parse_argparse_args(sample_path: Path) -> List[Dict[str, Any]]:
+def parse_argparse_args(sample_path: Path) -> list[dict[str, Any]]:
     tree = ast.parse(sample_path.read_text(encoding="utf-8"))
-    args: List[Dict[str, Any]] = []
+    args: list[dict[str, Any]] = []
 
     class Visitor(ast.NodeVisitor):
         def visit_Call(self, node: ast.Call) -> Any:
@@ -27,9 +27,11 @@ def parse_argparse_args(sample_path: Path) -> List[Dict[str, Any]]:
                 if not flags:
                     return
 
-                spec: Dict[str, Any] = {
+                spec: dict[str, Any] = {
                     "flags": flags,
-                    "name": next((f.lstrip("-") for f in flags if f.startswith("--")), flags[0].lstrip("-")),
+                    "name": next(
+                        (f.lstrip("-") for f in flags if f.startswith("--")), flags[0].lstrip("-")
+                    ),
                     "type": "str",
                     "default": None,
                     "required": False,
@@ -47,9 +49,8 @@ def parse_argparse_args(sample_path: Path) -> List[Dict[str, Any]]:
                         spec["required"] = bool(_literal(kw.value))
                     elif kw.arg == "help":
                         spec["help"] = _literal(kw.value) or ""
-                    elif kw.arg == "choices":
-                        if isinstance(kw.value, (ast.List, ast.Tuple)):
-                            spec["choices"] = [_literal(el) for el in kw.value.elts]
+                    elif kw.arg == "choices" and isinstance(kw.value, (ast.List, ast.Tuple)):
+                        spec["choices"] = [_literal(el) for el in kw.value.elts]
 
                 args.append(spec)
             self.generic_visit(node)

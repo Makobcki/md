@@ -54,15 +54,27 @@ def _tiny_cfg(data_root: str | None = None) -> dict:
 def _write_tiny_checkpoint(path: Path, *, data_root: str | None = None) -> None:
     cfg = _tiny_cfg(data_root)
     model = MMDiTFlowModel(MMDiTConfig.from_dict(cfg))
-    ckpt = build_mmdit_checkpoint(model=model, ema=None, optimizer=None, scheduler=None, step=7, cfg_dict=cfg)
+    ckpt = build_mmdit_checkpoint(
+        model=model, ema=None, optimizer=None, scheduler=None, step=7, cfg_dict=cfg
+    )
     save_ckpt(str(path), ckpt)
 
 
-def _run_sample(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, sampler: str, latent_only: bool, neg_prompt: str = "") -> tuple[Path, dict]:
+def _run_sample(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    sampler: str,
+    latent_only: bool,
+    neg_prompt: str = "",
+) -> tuple[Path, dict]:
     ckpt = tmp_path / "tiny.pt"
     if not ckpt.exists():
         _write_tiny_checkpoint(ckpt)
-    out = tmp_path / (f"sample_{sampler}_{'latent' if latent_only else 'image'}" + (".pt" if latent_only else ".png"))
+    out = tmp_path / (
+        f"sample_{sampler}_{'latent' if latent_only else 'image'}"
+        + (".pt" if latent_only else ".png")
+    )
     argv = [
         "sample.cli",
         "--ckpt",
@@ -102,7 +114,9 @@ def test_sample_cli_txt2img_smoke_with_fake_vae_creates_image_and_metadata(
     monkeypatch: pytest.MonkeyPatch,
     sampler: str,
 ) -> None:
-    out, meta = _run_sample(monkeypatch, tmp_path, sampler=sampler, latent_only=False, neg_prompt="bad quality")
+    out, meta = _run_sample(
+        monkeypatch, tmp_path, sampler=sampler, latent_only=False, neg_prompt="bad quality"
+    )
 
     assert out.exists()
     assert out.stat().st_size > 0
@@ -138,7 +152,6 @@ def test_sample_cli_latent_only_smoke_without_vae_creates_latent_and_metadata(
     assert meta["vae_config"]["runtime_backend"] == "latent_only"
     assert meta["negative_prompt"] == ""
     assert meta["negative_prompt_source"] == "encoder"
-
 
 
 def test_sample_cli_uses_empty_prompt_cache_for_empty_negative_prompt(
@@ -193,6 +206,7 @@ def test_sample_cli_uses_empty_prompt_cache_for_empty_negative_prompt(
     assert meta["negative_prompt"] == ""
     assert meta["negative_prompt_source"] == "text_cache/empty_prompt"
 
+
 def test_sample_cli_shift_override_is_used_in_sampler_and_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -232,4 +246,3 @@ def test_sample_cli_shift_override_is_used_in_sampler_and_metadata(
     assert meta_a["sampling_shift"] == 1.0
     assert meta_b["sampling_shift"] == 2.0
     assert torch.equal(torch.load(out_a, map_location="cpu"), torch.load(out_b, map_location="cpu"))
-

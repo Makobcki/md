@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import torch
 
 
 def collate_with_tokenizer(
-    batch,
+    batch: Sequence[Sequence[Any]],
     *,
-    latent_encoder: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-):
+    latent_encoder: Callable[[torch.Tensor], torch.Tensor] | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     if len(batch) == 0:
         raise RuntimeError("Empty batch.")
     item_len = len(batch[0])
@@ -26,7 +27,7 @@ def collate_with_tokenizer(
         imgs = torch.stack([b[0] for b in batch], dim=0)
         return imgs, None, None
 
-    latents: list[Optional[torch.Tensor]] = [None] * len(batch)
+    latents: list[torch.Tensor | None] = [None] * len(batch)
     to_encode: list[torch.Tensor] = []
     encode_indices: list[int] = []
 
@@ -45,7 +46,7 @@ def collate_with_tokenizer(
         if latent_encoder is None:
             raise RuntimeError("latent_encoder is required for fallback encoding.")
         encoded = latent_encoder(torch.stack(to_encode, dim=0))
-        for idx, z in zip(encode_indices, encoded):
+        for idx, z in zip(encode_indices, encoded, strict=True):
             latents[idx] = z
 
     if any(x is None for x in latents):

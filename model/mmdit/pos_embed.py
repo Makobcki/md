@@ -12,7 +12,9 @@ def get_2d_sincos_pos_embed(
     dtype: torch.dtype,
 ) -> torch.Tensor:
     if dim % 4 != 0:
-        raise ValueError("sincos_2d positional embedding requires hidden_dim divisible by 4; set hidden_dim to a multiple of 4 or use pos_embed=rope_2d/none.")
+        raise ValueError(
+            "sincos_2d positional embedding requires hidden_dim divisible by 4; set hidden_dim to a multiple of 4 or use pos_embed=rope_2d/none."
+        )
     y = torch.arange(height, device=device, dtype=torch.float32)
     x = torch.arange(width, device=device, dtype=torch.float32)
     yy, xx = torch.meshgrid(y, x, indexing="ij")
@@ -70,7 +72,9 @@ def _axis_rope_angles(
     if scaling == "linear" and scale > 1.0:
         idx = idx / scale
     theta_eff = _ntk_theta(theta, scale, dim) if scaling == "ntk" else float(theta)
-    inv_freq = 1.0 / (theta_eff ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / max(dim, 1)))
+    inv_freq = 1.0 / (
+        theta_eff ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / max(dim, 1))
+    )
     freqs = torch.einsum("n,d->nd", idx, inv_freq)
     return torch.repeat_interleave(freqs, 2, dim=-1)
 
@@ -98,8 +102,12 @@ def _build_2d_rope_angles(
     axis_dim = rope_dim // 2
     base_h = base_grid_hw[0] if base_grid_hw is not None else None
     base_w = base_grid_hw[1] if base_grid_hw is not None else None
-    y = _axis_rope_angles(h, axis_dim, device=device, base_length=base_h, scaling=scaling, theta=theta)
-    x = _axis_rope_angles(w, axis_dim, device=device, base_length=base_w, scaling=scaling, theta=theta)
+    y = _axis_rope_angles(
+        h, axis_dim, device=device, base_length=base_h, scaling=scaling, theta=theta
+    )
+    x = _axis_rope_angles(
+        w, axis_dim, device=device, base_length=base_w, scaling=scaling, theta=theta
+    )
     yy = y[:, None, :].expand(h, w, axis_dim)
     xx = x[None, :, :].expand(h, w, axis_dim)
     angles = torch.cat([yy, xx], dim=-1).reshape(h * w, rope_dim)
@@ -122,13 +130,15 @@ def apply_2d_rope(
     """Apply 2D rotary embedding to a slice of shaped q/k tensors.
 
     Args:
-        q, k: [B, heads, tokens, head_dim]
+        q: Query tensor shaped [B, heads, tokens, head_dim].
+        k: Key tensor shaped [B, heads, tokens, head_dim].
         grid_hw: latent patch grid for one image-like token stream
         start: token start offset in the joint sequence
         length: number of image-like tokens; can contain repeated grid chunks
         base_grid_hw: training/base grid used for RoPE extrapolation
         scaling: one of none/linear/ntk
         theta: rotary base frequency
+
     """
     if length <= 0:
         return q, k
@@ -169,7 +179,8 @@ def apply_2d_rope_sections(
     q: torch.Tensor,
     k: torch.Tensor,
     *,
-    sections: tuple[tuple[int, int, int, int], ...] | tuple[tuple[int, int, int, int, int, int], ...],
+    sections: tuple[tuple[int, int, int, int], ...]
+    | tuple[tuple[int, int, int, int, int, int], ...],
     base_grid_hw: tuple[int, int] | None = None,
     scaling: str = "none",
     theta: float = 10000.0,

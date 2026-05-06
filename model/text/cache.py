@@ -29,7 +29,7 @@ class TextCache:
         self.shard_cache_size = int(shard_cache_size)
         if self.shard_cache_size <= 0:
             raise ValueError("shard_cache_size must be positive.")
-        self._shard_cache: "OrderedDict[Path, dict[str, torch.Tensor]]" = OrderedDict()
+        self._shard_cache: OrderedDict[Path, dict[str, torch.Tensor]] = OrderedDict()
         self.entries: dict[str, TextCacheEntry] = {}
         self.metadata: dict[str, Any] = {}
         self.manifest: dict[str, Any] = {}
@@ -38,7 +38,9 @@ class TextCache:
         if self.manifest_path.exists():
             self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         if self.index_path.exists():
-            for line_no, line in enumerate(self.index_path.read_text(encoding="utf-8").splitlines(), start=1):
+            for line_no, line in enumerate(
+                self.index_path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
                 if not line.strip():
                     continue
                 obj = json.loads(line)
@@ -91,7 +93,9 @@ class TextCache:
             raise RuntimeError(f"Invalid torch-serialized text cache payload: {path}")
         for name, value in payload.items():
             if not isinstance(value, torch.Tensor):
-                raise RuntimeError(f"Invalid text cache tensor {name!r} in {path}: expected torch.Tensor.")
+                raise RuntimeError(
+                    f"Invalid text cache tensor {name!r} in {path}: expected torch.Tensor."
+                )
         return payload
 
     def _load_shard(self, shard: str) -> dict[str, torch.Tensor]:
@@ -107,7 +111,9 @@ class TextCache:
         return payload
 
     @staticmethod
-    def _validate_payload_shapes(payload: dict[str, torch.Tensor], *, path: Path | None = None) -> None:
+    def _validate_payload_shapes(
+        payload: dict[str, torch.Tensor], *, path: Path | None = None
+    ) -> None:
         where = f" in {path}" if path is not None else ""
         for name in ("tokens", "mask", "pooled"):
             if name not in payload:
@@ -116,21 +122,29 @@ class TextCache:
         mask = payload["mask"]
         pooled = payload["pooled"]
         if tokens.dim() != 3:
-            raise RuntimeError(f"Text cache tokens must be [B,N,D]{where}; got {tuple(tokens.shape)}")
+            raise RuntimeError(
+                f"Text cache tokens must be [B,N,D]{where}; got {tuple(tokens.shape)}"
+            )
         if mask.dim() != 2:
             raise RuntimeError(f"Text cache mask must be [B,N]{where}; got {tuple(mask.shape)}")
         if pooled.dim() != 2:
             raise RuntimeError(f"Text cache pooled must be [B,D]{where}; got {tuple(pooled.shape)}")
         if tokens.shape[:2] != mask.shape:
-            raise RuntimeError(f"Text cache token/mask shape mismatch{where}: {tuple(tokens.shape)} vs {tuple(mask.shape)}")
+            raise RuntimeError(
+                f"Text cache token/mask shape mismatch{where}: {tuple(tokens.shape)} vs {tuple(mask.shape)}"
+            )
         if tokens.shape[0] != pooled.shape[0]:
-            raise RuntimeError(f"Text cache token/pooled batch mismatch{where}: {tuple(tokens.shape)} vs {tuple(pooled.shape)}")
+            raise RuntimeError(
+                f"Text cache token/pooled batch mismatch{where}: {tuple(tokens.shape)} vs {tuple(pooled.shape)}"
+            )
         if "is_uncond" in payload and payload["is_uncond"].shape[0] != tokens.shape[0]:
             raise RuntimeError(f"Text cache is_uncond batch mismatch{where}.")
         if "token_types" in payload:
             token_types = payload["token_types"]
             if token_types.shape != mask.shape:
-                raise RuntimeError(f"Text cache token_types shape mismatch{where}: {tuple(token_types.shape)} vs {tuple(mask.shape)}")
+                raise RuntimeError(
+                    f"Text cache token_types shape mismatch{where}: {tuple(token_types.shape)} vs {tuple(mask.shape)}"
+                )
 
     def load(self, key: str) -> TextConditioning:
         if key not in self.entries:
@@ -163,8 +177,12 @@ class TextCache:
             tokens=payload["tokens"],
             mask=payload["mask"].to(torch.bool),
             pooled=payload["pooled"],
-            is_uncond=payload.get("is_uncond", torch.ones(payload["tokens"].shape[0], dtype=torch.uint8)).to(torch.bool),
-            token_types=payload.get("token_types", None).to(torch.long) if payload.get("token_types", None) is not None else None,
+            is_uncond=payload.get(
+                "is_uncond", torch.ones(payload["tokens"].shape[0], dtype=torch.uint8)
+            ).to(torch.bool),
+            token_types=payload.get("token_types", None).to(torch.long)
+            if payload.get("token_types", None) is not None
+            else None,
         )
 
     def validate_files_readable(self) -> None:
@@ -174,7 +192,9 @@ class TextCache:
             raise RuntimeError(f"Missing text cache metadata: {self.metadata_path}")
         if not self.empty_prompt_path.exists():
             raise RuntimeError(f"Missing empty prompt text cache: {self.empty_prompt_path}")
-        self._validate_payload_shapes(self._load_safetensors(self.empty_prompt_path), path=self.empty_prompt_path)
+        self._validate_payload_shapes(
+            self._load_safetensors(self.empty_prompt_path), path=self.empty_prompt_path
+        )
         for shard in sorted({entry.shard for entry in self.entries.values()}):
             path = self.root / "shards" / shard
             payload = self._load_safetensors(path)

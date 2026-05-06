@@ -5,8 +5,8 @@ import json
 import pytest
 
 torch = pytest.importorskip("torch")
-from model.text.cache import TextCache
 from config.train import TrainConfig
+from model.text.cache import TextCache
 from train.runner import _validate_text_cache_for_mmdit
 
 
@@ -35,7 +35,9 @@ def test_text_cache_loads_shard(tmp_path) -> None:
         str(root / "shards" / "text_00000.safetensors"),
     )
     _write_empty_prompt(root)
-    (root / "index.jsonl").write_text(json.dumps({"key": "abc", "shard": "text_00000.safetensors", "idx": 0}) + "\n")
+    (root / "index.jsonl").write_text(
+        json.dumps({"key": "abc", "shard": "text_00000.safetensors", "idx": 0}) + "\n"
+    )
     cache = TextCache(root)
     cond = cache.load("abc")
     assert cond.tokens.shape == (3, 4)
@@ -82,7 +84,9 @@ def test_text_cache_metadata_validation_catches_missing_key(tmp_path) -> None:
             }
         )
     )
-    (root / "index.jsonl").write_text(json.dumps({"key": "present", "shard": "text_00000.safetensors", "idx": 0}) + "\n")
+    (root / "index.jsonl").write_text(
+        json.dumps({"key": "present", "shard": "text_00000.safetensors", "idx": 0}) + "\n"
+    )
     cache = TextCache(root)
     cfg = TrainConfig.from_dict(
         {
@@ -120,12 +124,20 @@ def test_text_cache_validation_strict_false_warns_for_metadata_mismatch(tmp_path
         str(root / "shards" / "text_00000.safetensors"),
     )
     _write_empty_prompt(root)
-    (root / "metadata.json").write_text(json.dumps({"text_dim": 999, "pooled_dim": 4, "encoders": []}))
-    (root / "manifest.json").write_text(json.dumps({"num_samples": 1, "shards": [{"name": "text_00000.safetensors"}]}))
-    (root / "index.jsonl").write_text(json.dumps({"key": "present", "shard": "text_00000.safetensors", "idx": 0}) + "\n")
+    (root / "metadata.json").write_text(
+        json.dumps({"text_dim": 999, "pooled_dim": 4, "encoders": []})
+    )
+    (root / "manifest.json").write_text(
+        json.dumps({"num_samples": 1, "shards": [{"name": "text_00000.safetensors"}]})
+    )
+    (root / "index.jsonl").write_text(
+        json.dumps({"key": "present", "shard": "text_00000.safetensors", "idx": 0}) + "\n"
+    )
     cfg = TrainConfig.from_dict({"text_dim": 4, "pooled_dim": 4, "cache": {"strict": False}})
 
-    _validate_text_cache_for_mmdit(TextCache(root), cfg, [{"md5": "present", "caption": "x"}], strict=False)
+    _validate_text_cache_for_mmdit(
+        TextCache(root), cfg, [{"md5": "present", "caption": "x"}], strict=False
+    )
     assert "text cache text_dim mismatch" in capsys.readouterr().out
 
 
@@ -173,8 +185,14 @@ def test_text_cache_dataset_hash_mismatch_allows_superset_cache(tmp_path, capsys
         str(root / "shards" / "text_00000.safetensors"),
     )
     _write_empty_prompt(root)
-    (root / "metadata.json").write_text(json.dumps({"text_dim": 4, "pooled_dim": 4, "encoders": [], "dataset_hash": "old-full-split-hash"}))
-    (root / "manifest.json").write_text(json.dumps({"num_samples": 2, "shards": [{"name": "text_00000.safetensors"}]}))
+    (root / "metadata.json").write_text(
+        json.dumps(
+            {"text_dim": 4, "pooled_dim": 4, "encoders": [], "dataset_hash": "old-full-split-hash"}
+        )
+    )
+    (root / "manifest.json").write_text(
+        json.dumps({"num_samples": 2, "shards": [{"name": "text_00000.safetensors"}]})
+    )
     (root / "index.jsonl").write_text(
         "\n".join(
             [
@@ -186,7 +204,9 @@ def test_text_cache_dataset_hash_mismatch_allows_superset_cache(tmp_path, capsys
     )
     cfg = TrainConfig.from_dict({"text_dim": 4, "pooled_dim": 4, "cache": {"strict": True}})
 
-    _validate_text_cache_for_mmdit(TextCache(root), cfg, [{"md5": "train-key", "caption": "x"}], strict=True)
+    _validate_text_cache_for_mmdit(
+        TextCache(root), cfg, [{"md5": "train-key", "caption": "x"}], strict=True
+    )
 
     out = capsys.readouterr().out
     assert "text cache dataset_hash mismatch" in out
@@ -206,11 +226,23 @@ def test_text_cache_text_hash_mismatch_is_still_strict(tmp_path) -> None:
         str(root / "shards" / "text_00000.safetensors"),
     )
     _write_empty_prompt(root)
-    (root / "metadata.json").write_text(json.dumps({"text_dim": 4, "pooled_dim": 4, "encoders": []}))
+    (root / "metadata.json").write_text(
+        json.dumps({"text_dim": 4, "pooled_dim": 4, "encoders": []})
+    )
     (root / "index.jsonl").write_text(
-        json.dumps({"key": "present", "shard": "text_00000.safetensors", "idx": 0, "text_hash": "definitely-stale"}) + "\n"
+        json.dumps(
+            {
+                "key": "present",
+                "shard": "text_00000.safetensors",
+                "idx": 0,
+                "text_hash": "definitely-stale",
+            }
+        )
+        + "\n"
     )
     cfg = TrainConfig.from_dict({"text_dim": 4, "pooled_dim": 4})
 
     with pytest.raises(RuntimeError, match="prompt/text hash mismatch"):
-        _validate_text_cache_for_mmdit(TextCache(root), cfg, [{"md5": "present", "caption": "new text"}], strict=True)
+        _validate_text_cache_for_mmdit(
+            TextCache(root), cfg, [{"md5": "present", "caption": "new text"}], strict=True
+        )

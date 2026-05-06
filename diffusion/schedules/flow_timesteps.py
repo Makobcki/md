@@ -15,4 +15,3 @@ def flow_timesteps(steps: int, *, device: torch.device, shift: float = 1.0) -> t
         ts[0] = 1.0
         ts[-1] = 0.0
     return ts
-

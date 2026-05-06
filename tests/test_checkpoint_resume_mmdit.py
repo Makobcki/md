@@ -7,7 +7,12 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from config.train import TrainConfig
-from diffusion.io.ckpt import load_ckpt, normalize_state_dict_for_keys, normalize_state_dict_for_model, save_ckpt
+from diffusion.io.ckpt import (
+    load_ckpt,
+    normalize_state_dict_for_keys,
+    normalize_state_dict_for_model,
+    save_ckpt,
+)
 from diffusion.objectives import RectifiedFlowObjective
 from diffusion.utils import EMA
 from model.mmdit import MMDiTConfig, MMDiTFlowModel
@@ -95,7 +100,9 @@ def test_checkpoint_resume_restores_train_state_and_continues(tmp_path: Path) ->
     cfg = _cfg()
     cfg_dict = cfg.to_dict()
     objective = RectifiedFlowObjective(timestep_sampling="uniform")
-    empty_text = TextConditioning(torch.zeros(2, 3, 8), torch.ones(2, 3, dtype=torch.bool), torch.zeros(2, 8))
+    empty_text = TextConditioning(
+        torch.zeros(2, 3, 8), torch.ones(2, 3, dtype=torch.bool), torch.zeros(2, 8)
+    )
 
     model = _model()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
@@ -125,7 +132,9 @@ def test_checkpoint_resume_restores_train_state_and_continues(tmp_path: Path) ->
     scaler2 = torch.amp.GradScaler("cuda", enabled=False)
     loaded = load_ckpt(str(path), torch.device("cpu"))
     validate_mmdit_checkpoint_compatibility(loaded, cfg_dict)
-    model2.load_state_dict(normalize_state_dict_for_model(loaded["model"], model2, name="model"), strict=True)
+    model2.load_state_dict(
+        normalize_state_dict_for_model(loaded["model"], model2, name="model"), strict=True
+    )
     optimizer2.load_state_dict(loaded["optimizer"])
     scaler2.load_state_dict(loaded["scaler"])
     ema_state = normalize_state_dict_for_keys(loaded["ema"], ema2.shadow.keys(), name="ema")
@@ -134,14 +143,20 @@ def test_checkpoint_resume_restores_train_state_and_continues(tmp_path: Path) ->
     assert resumed_step == 2
 
     for _ in range(2):
-        resumed_step = _train_one_step(model2, optimizer2, ema2, objective, empty_text, resumed_step)
+        resumed_step = _train_one_step(
+            model2, optimizer2, ema2, objective, empty_text, resumed_step
+        )
     assert resumed_step == 4
 
 
-def test_checkpoint_unsafe_pickle_fallback_is_config_gated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_checkpoint_unsafe_pickle_fallback_is_config_gated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("MD_ALLOW_UNSAFE_TORCH_LOAD", raising=False)
     path = tmp_path / "legacy.pt"
-    torch.save({"format_version": 2, "model": {}, "cfg": {}, "bad": _LegacyCheckpointObject()}, path)
+    torch.save(
+        {"format_version": 2, "model": {}, "cfg": {}, "bad": _LegacyCheckpointObject()}, path
+    )
 
     with pytest.raises(RuntimeError, match="unsafe pickle loading|weights_only"):
         load_ckpt(str(path), torch.device("cpu"))

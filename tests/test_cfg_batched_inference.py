@@ -18,7 +18,13 @@ class _CountingModel(torch.nn.Module):
         self.calls += 1
         source = kwargs.get("source_latent")
         source_term = 0.0 if source is None else source.mean(dim=(1, 2, 3)).view(-1, 1, 1, 1)
-        return x + t.view(-1, 1, 1, 1) + text.pooled.mean(dim=1).view(-1, 1, 1, 1) + source_term + self.anchor
+        return (
+            x
+            + t.view(-1, 1, 1, 1)
+            + text.pooled.mean(dim=1).view(-1, 1, 1, 1)
+            + source_term
+            + self.anchor
+        )
 
 
 def _text(pooled_value: float, batch: int = 2) -> TextConditioning:

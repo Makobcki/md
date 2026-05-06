@@ -58,15 +58,21 @@ def _gray(x: torch.Tensor) -> torch.Tensor:
     if x.shape[1] == 1:
         return x
     if x.shape[1] >= 3:
-        weights = torch.tensor([0.299, 0.587, 0.114], device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+        weights = torch.tensor([0.299, 0.587, 0.114], device=x.device, dtype=x.dtype).view(
+            1, 3, 1, 1
+        )
         return (x[:, :3] * weights).sum(dim=1, keepdim=True)
     return x.mean(dim=1, keepdim=True)
 
 
 def _sobel_magnitude(x: torch.Tensor) -> torch.Tensor:
     g = _gray(x).float()
-    kx = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]], device=x.device).view(1, 1, 3, 3)
-    ky = torch.tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]], device=x.device).view(1, 1, 3, 3)
+    kx = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]], device=x.device).view(
+        1, 1, 3, 3
+    )
+    ky = torch.tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]], device=x.device).view(
+        1, 1, 3, 3
+    )
     dx = F.conv2d(g, kx, padding=1)
     dy = F.conv2d(g, ky, padding=1)
     return torch.sqrt(dx.square() + dy.square() + 1.0e-12).to(dtype=x.dtype)
@@ -91,12 +97,18 @@ def _depth_proxy(x: torch.Tensor) -> torch.Tensor:
 
 def _normal_proxy(x: torch.Tensor) -> torch.Tensor:
     g = _gray(x).float()
-    kx = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]], device=x.device).view(1, 1, 3, 3)
-    ky = torch.tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]], device=x.device).view(1, 1, 3, 3)
+    kx = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]], device=x.device).view(
+        1, 1, 3, 3
+    )
+    ky = torch.tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]], device=x.device).view(
+        1, 1, 3, 3
+    )
     dx = F.conv2d(g, kx, padding=1)
     dy = F.conv2d(g, ky, padding=1)
     mag = torch.sqrt(dx.square() + dy.square() + 1.0e-12)
-    normal = torch.cat([_normalize01(dx), _normalize01(dy), _normalize01(mag)], dim=1).to(dtype=x.dtype)
+    normal = torch.cat([_normalize01(dx), _normalize01(dy), _normalize01(mag)], dim=1).to(
+        dtype=x.dtype
+    )
     return _repeat_to_channels(normal, x.shape[1])
 
 

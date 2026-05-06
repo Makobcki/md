@@ -1,33 +1,46 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
-import os
-from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Annotated, Any, AsyncIterator, Dict, List, Literal, Optional
-import re
-import shutil
-import time
-import uuid
 import base64
 import hashlib
 import hmac
+import json
+import logging
 import mimetypes
+import os
+import re
 import secrets
-import yaml
+import time
+import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
+from typing import Annotated, Any, Literal
 
-from fastapi import Cookie, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
+import yaml
+from fastapi import (
+    Cookie,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .argparse_reader import parse_argparse_args
 from .job_manager import JobManager
 from .services import config_service
-
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 RUNS_DIR = Path(os.environ.get("WEBUI_RUNS_DIR", ROOT_DIR / "webui_runs"))
@@ -36,8 +49,8 @@ UPLOADS_DIR = RUNS_DIR / "_uploads"
 
 class WSManager:
     def __init__(self) -> None:
-        self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self.connections: Dict[str, Dict[str, List[WebSocket]]] = {}
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.connections: dict[str, dict[str, list[WebSocket]]] = {}
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
@@ -50,9 +63,12 @@ class WSManager:
         self.connections.setdefault(run_id, {}).setdefault(channel, []).append(websocket)
 
     def disconnect(self, run_id: str, channel: str, websocket: WebSocket) -> None:
-        if run_id in self.connections and channel in self.connections[run_id]:
-            if websocket in self.connections[run_id][channel]:
-                self.connections[run_id][channel].remove(websocket)
+        if (
+            run_id in self.connections
+            and channel in self.connections[run_id]
+            and websocket in self.connections[run_id][channel]
+        ):
+            self.connections[run_id][channel].remove(websocket)
 
     async def broadcast(self, run_id: str, channel: str, message: str) -> None:
         for ws in list(self.connections.get(run_id, {}).get(channel, [])):
@@ -75,7 +91,12 @@ _FILE_TOKEN_SECRET = (
 ).encode("utf-8")
 _AUTH_COOKIE_NAME = "webui_auth"
 _AUTH_COOKIE_MAX_AGE = int(os.environ.get("WEBUI_AUTH_COOKIE_MAX_AGE", str(30 * 24 * 60 * 60)))
-_AUTH_COOKIE_SECURE = os.environ.get("WEBUI_AUTH_COOKIE_SECURE", "").strip().lower() in {"1", "true", "yes", "on"}
+_AUTH_COOKIE_SECURE = os.environ.get("WEBUI_AUTH_COOKIE_SECURE", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 _AUTH_MAX_FAILED_ATTEMPTS = int(os.environ.get("WEBUI_AUTH_MAX_FAILED_ATTEMPTS", "5"))
 _AUTH_LOCKOUT_SECONDS = int(os.environ.get("WEBUI_AUTH_LOCKOUT_SECONDS", "300"))
 _AUTH_FAILURE_WINDOW_SECONDS = int(os.environ.get("WEBUI_AUTH_FAILURE_WINDOW_SECONDS", "300"))
@@ -115,6 +136,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 def _get_out_dir() -> Path:
     cfg_path = config_service.get_config_path(ROOT_DIR)
     cfg = config_service.parse_config_text(cfg_path.read_text(encoding="utf-8"))
@@ -145,7 +167,9 @@ def _token_is_valid(value: str | None) -> bool:
 
 
 def _auth_cookie_value(expected: str | None = None) -> str:
-    token = _normalize_auth_token(expected if expected is not None else os.environ.get("WEBUI_AUTH_TOKEN"))
+    token = _normalize_auth_token(
+        expected if expected is not None else os.environ.get("WEBUI_AUTH_TOKEN")
+    )
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     body = _b64url(
         json.dumps(
@@ -165,7 +189,9 @@ def _auth_cookie_is_valid(value: str | None) -> bool:
         return False
     try:
         body, sig = str(value).split(".", 1)
-        expected_sig = _b64url(hmac.new(_FILE_TOKEN_SECRET, body.encode("ascii"), hashlib.sha256).digest())
+        expected_sig = _b64url(
+            hmac.new(_FILE_TOKEN_SECRET, body.encode("ascii"), hashlib.sha256).digest()
+        )
         if not _constant_time_equal(sig, expected_sig):
             return False
         payload = json.loads(_b64url_decode(body).decode("utf-8"))
@@ -197,7 +223,12 @@ def _clear_auth_cookie(response: Response) -> None:
 
 
 def _auth_client_key(request: Request) -> str:
-    trust_proxy = os.environ.get("WEBUI_TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes", "on"}
+    trust_proxy = os.environ.get("WEBUI_TRUST_PROXY_HEADERS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if trust_proxy:
         forwarded_for = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
         if forwarded_for:
@@ -224,7 +255,10 @@ def _auth_retry_after(key: str, now: float | None = None) -> int:
 def _record_auth_failure(key: str, now: float | None = None) -> int:
     current = time.time() if now is None else now
     record = _auth_failures.get(key)
-    if not record or current - float(record.get("first_failed_at", 0.0)) > _AUTH_FAILURE_WINDOW_SECONDS:
+    if (
+        not record
+        or current - float(record.get("first_failed_at", 0.0)) > _AUTH_FAILURE_WINDOW_SECONDS
+    ):
         record = {"count": 0, "first_failed_at": current, "locked_until": 0.0}
         _auth_failures[key] = record
     record["count"] = int(record.get("count", 0)) + 1
@@ -287,10 +321,8 @@ def _bounded_run_artifact_path(value: str | None, *, required: bool = False) -> 
         path = RUNS_DIR / path
     resolved = path.resolve()
     allowed_roots = [RUNS_DIR.resolve()]
-    try:
+    with suppress(Exception):
         allowed_roots.append(_get_out_dir().resolve())
-    except Exception:
-        pass
     for item in os.environ.get("WEBUI_ALLOWED_PATHS", "").split(os.pathsep):
         item = item.strip()
         if item:
@@ -308,7 +340,6 @@ def _read_bounded_text(value: str, *, limit_lines: int | None = None) -> str:
     if limit_lines is None:
         return path.read_text(encoding="utf-8")
     return _tail_text(path, limit_lines)
-
 
 
 def _configured_allowed_roots() -> list[Path]:
@@ -356,31 +387,33 @@ class SampleArgs(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     ckpt: str
-    out: Optional[str] = None
+    out: str | None = None
     n: int = Field(default=8, ge=1, le=64)
     steps: int = Field(default=30, ge=1, le=500)
     prompt: str = ""
     neg_prompt: str = ""
     cfg: float = Field(default=5.0, ge=0.0, le=30.0)
-    shift: Optional[float] = Field(default=None, gt=0.0, le=100.0)
+    shift: float | None = Field(default=None, gt=0.0, le=100.0)
     sampler: Literal["flow_euler", "flow_heun"] = "flow_heun"
-    seed: Optional[int] = 42
+    seed: int | None = 42
     device: Literal["auto", "cpu", "cuda"] = "auto"
-    width: Optional[int] = Field(default=None, ge=1)
-    height: Optional[int] = Field(default=None, ge=1)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
     task: Literal["txt2img", "img2img", "inpaint", "control"] = "txt2img"
     init_image: str = Field(default="", alias="init-image")
     strength: float = Field(default=1.0, ge=0.0, le=1.0)
     mask: str = ""
     control_image: str = Field(default="", alias="control-image")
     control_strength: float = Field(default=1.0, ge=0.0, alias="control-strength")
-    control_type: Literal["none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"] = Field(default="image", alias="control-type")
+    control_type: Literal[
+        "none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"
+    ] = Field(default="image", alias="control-type")
     latent_only: bool = Field(default=False, alias="latent-only")
     fake_vae: bool = Field(default=False, alias="fake-vae")
     use_ema: bool = Field(default=True, alias="use-ema")
 
     @model_validator(mode="after")
-    def _validate_paths(self) -> "SampleArgs":
+    def _validate_paths(self) -> SampleArgs:
         self.ckpt = _bounded_path(self.ckpt, required=True) or self.ckpt
         self.out = _bounded_path(self.out)
         self.init_image = _bounded_path(self.init_image) or ""
@@ -410,11 +443,15 @@ class SampleArgs(BaseModel):
         out_suffix = Path(self.out or "").suffix.lower()
         if self.latent_only and out_suffix and out_suffix not in {".pt", ".pth"}:
             raise ValueError("latent-only outputs must use .pt or .pth extension")
-        if not self.latent_only and out_suffix and out_suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        if (
+            not self.latent_only
+            and out_suffix
+            and out_suffix not in {".png", ".jpg", ".jpeg", ".webp"}
+        ):
             raise ValueError("image outputs must use .png, .jpg, .jpeg or .webp extension")
         return self
 
-    def to_cli_args(self) -> Dict[str, Any]:
+    def to_cli_args(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=True, exclude_none=True)
         if data.get("device") == "auto":
             data.pop("device")
@@ -422,7 +459,7 @@ class SampleArgs(BaseModel):
             data.pop("use-ema", None)
         return data
 
-    def to_sample_options_args(self) -> Dict[str, Any]:
+    def to_sample_options_args(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=False, exclude_none=True)
         if data.get("device") == "auto":
             data.pop("device")
@@ -436,10 +473,10 @@ class SampleRequest(BaseModel):
 
 class TrainRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    resume: Optional[str] = None
+    resume: str | None = None
 
     @model_validator(mode="after")
-    def _validate_resume(self) -> "TrainRequest":
+    def _validate_resume(self) -> TrainRequest:
         self.resume = _bounded_path(self.resume)
         return self
 
@@ -449,7 +486,7 @@ class LatentArgs(BaseModel):
 
     config: str = "./config/train.yaml"
     overwrite: bool = False
-    limit: Optional[int] = Field(default=None, ge=1)
+    limit: int | None = Field(default=None, ge=1)
     batch_size: int = Field(default=16, ge=1, le=512, alias="batch-size")
     num_workers: int = Field(default=4, ge=0, le=64, alias="num-workers")
     prefetch_factor: int = Field(default=2, ge=1, le=32, alias="prefetch-factor")
@@ -461,14 +498,16 @@ class LatentArgs(BaseModel):
     writer_threads: int = Field(default=1, ge=1, le=16, alias="writer-threads")
     shard_size: int = Field(default=4096, ge=0, alias="shard-size")
     stats_every_sec: float = Field(default=5.0, gt=0.0, le=3600.0, alias="stats-every-sec")
-    decode_backend: Literal["auto", "pil", "torchvision"] = Field(default="auto", alias="decode-backend")
+    decode_backend: Literal["auto", "pil", "torchvision"] = Field(
+        default="auto", alias="decode-backend"
+    )
 
     @model_validator(mode="after")
-    def _validate_config(self) -> "LatentArgs":
+    def _validate_config(self) -> LatentArgs:
         self.config = _bounded_path(self.config, required=True) or self.config
         return self
 
-    def to_cli_args(self) -> Dict[str, Any]:
+    def to_cli_args(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=True, exclude_none=True, exclude_defaults=True)
         data["config"] = self.config
         if data.get("device") == "auto":
@@ -504,10 +543,10 @@ _LATENT_PREPARE_ARG_KEYS = {
 }
 
 
-def _latent_prepare_arg_defaults() -> Dict[str, Any]:
+def _latent_prepare_arg_defaults() -> dict[str, Any]:
     cfg_path = config_service.get_config_path(ROOT_DIR)
     cfg = config_service.parse_config_text(cfg_path.read_text(encoding="utf-8"))
-    defaults: Dict[str, Any] = {
+    defaults: dict[str, Any] = {
         "config": str(cfg_path),
         "latent-dtype": cfg.latent_dtype,
         "autocast-dtype": cfg.latent_dtype,
@@ -524,14 +563,23 @@ def _latent_prepare_arg_defaults() -> Dict[str, Any]:
     prefix = "latent_prepare_"
     for key, value in cfg.extra.items():
         if key.startswith(prefix):
-            name = key[len(prefix):].replace("_", "-")
+            name = key[len(prefix) :].replace("_", "-")
             if name in _LATENT_PREPARE_ARG_KEYS:
                 defaults[name] = value
     return defaults
 
 
 _IMAGE_FILE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-_DOWNLOAD_FILE_EXTS = _IMAGE_FILE_EXTS | {".pt", ".pth", ".safetensors", ".json", ".yaml", ".yml", ".txt", ".log"}
+_DOWNLOAD_FILE_EXTS = _IMAGE_FILE_EXTS | {
+    ".pt",
+    ".pth",
+    ".safetensors",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".txt",
+    ".log",
+}
 
 
 def _b64url(data: bytes) -> str:
@@ -552,7 +600,9 @@ def _encode_file_token(path: Path) -> str:
 def _decode_file_token(token: str) -> Path:
     try:
         body, sig = token.split(".", 1)
-        expected = _b64url(hmac.new(_FILE_TOKEN_SECRET, body.encode("ascii"), hashlib.sha256).digest())
+        expected = _b64url(
+            hmac.new(_FILE_TOKEN_SECRET, body.encode("ascii"), hashlib.sha256).digest()
+        )
         if not hmac.compare_digest(sig, expected):
             raise ValueError("invalid file token signature")
         payload = json.loads(_b64url_decode(body).decode("utf-8"))
@@ -590,7 +640,9 @@ def _download_url_for_path(path: Path) -> str:
     return f"/api/files/download/{_encode_file_token(path)}"
 
 
-def _artifact_record(path: Path, *, source: str, run_id: str | None = None, preview: bool | None = None) -> Dict[str, Any]:
+def _artifact_record(
+    path: Path, *, source: str, run_id: str | None = None, preview: bool | None = None
+) -> dict[str, Any]:
     suffix = path.suffix.lower()
     is_image = suffix in _IMAGE_FILE_EXTS
     previewable = bool(is_image if preview is None else preview)
@@ -618,24 +670,35 @@ def _iter_files(root: Path, patterns: tuple[str, ...]) -> list[Path]:
     return [p for p in paths if p.is_file() or p.is_symlink()]
 
 
-def _collect_webui_samples(run_id: str | None = None, include_latents: bool = False) -> list[Dict[str, Any]]:
+def _collect_webui_samples(
+    run_id: str | None = None, include_latents: bool = False
+) -> list[dict[str, Any]]:
     if run_id:
         run_roots = [RUNS_DIR / run_id]
     elif RUNS_DIR.exists():
         run_roots = [p for p in RUNS_DIR.iterdir() if p.is_dir() and p.name != "_uploads"]
     else:
         run_roots = []
-    records: list[Dict[str, Any]] = []
-    patterns = ("*.png", "*.jpg", "*.jpeg", "*.webp") + (("*.pt", "*.pth") if include_latents else ())
+    records: list[dict[str, Any]] = []
+    patterns = ("*.png", "*.jpg", "*.jpeg", "*.webp") + (
+        ("*.pt", "*.pth") if include_latents else ()
+    )
     for run_root in run_roots:
         samples_root = run_root / "samples"
         for path in _iter_files(samples_root, patterns):
             source = "webui_latent" if path.suffix.lower() in {".pt", ".pth"} else "webui_sample"
-            records.append(_artifact_record(path, source=source, run_id=run_root.name, preview=path.suffix.lower() in _IMAGE_FILE_EXTS))
+            records.append(
+                _artifact_record(
+                    path,
+                    source=source,
+                    run_id=run_root.name,
+                    preview=path.suffix.lower() in _IMAGE_FILE_EXTS,
+                )
+            )
     return records
 
 
-def _collect_train_samples(run_id: str | None = None) -> list[Dict[str, Any]]:
+def _collect_train_samples(run_id: str | None = None) -> list[dict[str, Any]]:
     roots: list[Path] = []
     if run_id:
         run = job_manager.runs.get(run_id)
@@ -647,11 +710,9 @@ def _collect_train_samples(run_id: str | None = None) -> list[Dict[str, Any]]:
                     roots.append(Path(str(value)))
             roots.append(Path(run.run_dir))
     else:
-        try:
+        with suppress(Exception):
             roots.append(_get_out_dir())
-        except Exception:
-            pass
-    records: list[Dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     seen: set[Path] = set()
     for root in roots:
         candidates = [root / "eval", root / "samples"]
@@ -663,11 +724,13 @@ def _collect_train_samples(run_id: str | None = None) -> list[Dict[str, Any]]:
                 if resolved in seen:
                     continue
                 seen.add(resolved)
-                records.append(_artifact_record(path, source="train_sample", run_id=run_id, preview=True))
+                records.append(
+                    _artifact_record(path, source="train_sample", run_id=run_id, preview=True)
+                )
     return records
 
 
-def _collect_run_checkpoints(run_id: str | None = None) -> list[Dict[str, Any]]:
+def _collect_run_checkpoints(run_id: str | None = None) -> list[dict[str, Any]]:
     roots: list[Path] = []
     if run_id:
         run = job_manager.runs.get(run_id)
@@ -679,11 +742,9 @@ def _collect_run_checkpoints(run_id: str | None = None) -> list[Dict[str, Any]]:
                 if value:
                     roots.append(Path(str(value)))
     else:
-        try:
+        with suppress(Exception):
             roots.append(_get_out_dir())
-        except Exception:
-            pass
-    records: list[Dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     seen: set[Path] = set()
     for root in roots:
         for path in _iter_files(root, ("*.pt", "*.pth", "*.safetensors")):
@@ -693,7 +754,9 @@ def _collect_run_checkpoints(run_id: str | None = None) -> list[Dict[str, Any]]:
             if resolved in seen:
                 continue
             seen.add(resolved)
-            records.append(_artifact_record(path, source="checkpoint", run_id=run_id, preview=False))
+            records.append(
+                _artifact_record(path, source="checkpoint", run_id=run_id, preview=False)
+            )
     return records
 
 
@@ -727,18 +790,16 @@ def download_safe_file(token: str, _: None = Depends(_require_token)) -> FileRes
 def get_auth_status(
     authorization: str | None = Header(default=None),
     auth_cookie: str | None = Cookie(default=None, alias=_AUTH_COOKIE_NAME),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     required = bool(_normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN")))
     authenticated = (
-        (not required)
-        or _token_is_valid(authorization)
-        or _auth_cookie_is_valid(auth_cookie)
+        (not required) or _token_is_valid(authorization) or _auth_cookie_is_valid(auth_cookie)
     )
     return {"auth_required": required, "authenticated": authenticated}
 
 
 @app.post("/api/auth/login")
-def login(payload: AuthLoginRequest, response: Response, request: Request) -> Dict[str, Any]:
+def login(payload: AuthLoginRequest, response: Response, request: Request) -> dict[str, Any]:
     required = bool(_normalize_auth_token(os.environ.get("WEBUI_AUTH_TOKEN")))
     client_key = _auth_client_key(request)
     retry_after = _auth_retry_after(client_key)
@@ -768,7 +829,7 @@ def login(payload: AuthLoginRequest, response: Response, request: Request) -> Di
 
 
 @app.post("/api/auth/logout")
-def logout(response: Response) -> Dict[str, Any]:
+def logout(response: Response) -> dict[str, Any]:
     _clear_auth_cookie(response)
     return {"ok": True}
 
@@ -790,17 +851,17 @@ def get_safe_file(rel_path: str, _: None = Depends(_require_token)) -> FileRespo
 
 
 @app.get("/api/status")
-def get_status(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_status(_: None = Depends(_require_token)) -> dict[str, Any]:
     return job_manager.get_status()
 
 
 @app.get("/api/runs")
-def list_runs(_: None = Depends(_require_token)) -> List[Dict[str, Any]]:
+def list_runs(_: None = Depends(_require_token)) -> list[dict[str, Any]]:
     return [json.loads(json.dumps(r.__dict__)) for r in job_manager.list_runs()]
 
 
 @app.get("/api/runs/{run_id}")
-def get_run(run_id: str, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_run(run_id: str, _: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.get_run(run_id)
     except KeyError as exc:
@@ -809,7 +870,7 @@ def get_run(run_id: str, _: None = Depends(_require_token)) -> Dict[str, Any]:
 
 
 @app.get("/api/runs/{run_id}/config")
-def get_run_config(run_id: str, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_run_config(run_id: str, _: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.get_run(run_id)
     except KeyError as exc:
@@ -844,12 +905,17 @@ async def _send_log_backlog(websocket: WebSocket, run_id: str, limit: int) -> No
         if path is None or not path.exists():
             continue
         for line in _tail_text(path, limit).splitlines():
-            await websocket.send_text(json.dumps({
-                "type": "log",
-                "stream": stream,
-                "line": JobManager.format_log_line(line),
-                "backlog": True,
-            }, ensure_ascii=False))
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "log",
+                        "stream": stream,
+                        "line": JobManager.format_log_line(line),
+                        "backlog": True,
+                    },
+                    ensure_ascii=False,
+                )
+            )
 
 
 @app.get("/api/runs/{run_id}/logs/{stream}")
@@ -859,7 +925,7 @@ def get_run_log(
     limit: Annotated[int, Query(ge=1, le=50000)] = 2000,
     raw: Annotated[bool, Query()] = False,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if stream not in {"stdout", "stderr"}:
         raise HTTPException(status_code=400, detail="invalid log stream")
     try:
@@ -880,7 +946,7 @@ def get_run_metrics(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=50000)] = 2000,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     try:
         run = job_manager.get_run(run_id)
     except KeyError as exc:
@@ -906,13 +972,15 @@ def get_run_metrics(
 
 
 @app.get("/api/config")
-def get_train_config(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_train_config(_: None = Depends(_require_token)) -> dict[str, Any]:
     cfg_path = config_service.get_config_path(ROOT_DIR)
     return {"path": str(cfg_path), "content": config_service.read_config_text(ROOT_DIR)}
 
 
 @app.put("/api/config")
-def update_train_config(payload: Dict[str, Any], _: None = Depends(_require_token)) -> Dict[str, Any]:
+def update_train_config(
+    payload: dict[str, Any], _: None = Depends(_require_token)
+) -> dict[str, Any]:
     content = payload.get("content")
     if not isinstance(content, str):
         raise HTTPException(status_code=400, detail="content must be a string")
@@ -924,12 +992,12 @@ def update_train_config(payload: Dict[str, Any], _: None = Depends(_require_toke
 
 
 @app.get("/api/checkpoints")
-def list_checkpoints(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def list_checkpoints(_: None = Depends(_require_token)) -> dict[str, Any]:
     return {"items": job_manager.list_checkpoints()}
 
 
 @app.get("/api/checkpoints/info")
-def get_checkpoint_info(path: str, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_checkpoint_info(path: str, _: None = Depends(_require_token)) -> dict[str, Any]:
     if not path:
         raise HTTPException(status_code=400, detail="path is required")
     try:
@@ -944,23 +1012,34 @@ def get_checkpoint_info(path: str, _: None = Depends(_require_token)) -> Dict[st
         try:
             payload = json.loads(sidecar.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=500, detail="checkpoint metadata sidecar is invalid") from exc
+            raise HTTPException(
+                status_code=500, detail="checkpoint metadata sidecar is invalid"
+            ) from exc
         cfg = payload.get("cfg", {}) if isinstance(payload, dict) else {}
         metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
-        use_text_conditioning = bool(cfg.get("use_text_conditioning", True)) if isinstance(cfg, dict) else True
+        use_text_conditioning = (
+            bool(cfg.get("use_text_conditioning", True)) if isinstance(cfg, dict) else True
+        )
         return {
             "path": str(ckpt_path),
             "metadata_path": str(sidecar),
             "step": payload.get("step") if isinstance(payload, dict) else None,
-            "architecture": metadata.get("architecture") if isinstance(metadata, dict) else payload.get("architecture"),
-            "objective": metadata.get("objective") if isinstance(metadata, dict) else payload.get("objective"),
-            "prediction_type": metadata.get("prediction_type") if isinstance(metadata, dict) else payload.get("prediction_type"),
+            "architecture": metadata.get("architecture")
+            if isinstance(metadata, dict)
+            else payload.get("architecture"),
+            "objective": metadata.get("objective")
+            if isinstance(metadata, dict)
+            else payload.get("objective"),
+            "prediction_type": metadata.get("prediction_type")
+            if isinstance(metadata, dict)
+            else payload.get("prediction_type"),
             "use_text_conditioning": use_text_conditioning,
         }
 
     # Legacy fallback for old checkpoints without sidecars. This endpoint is
     # authenticated and path-bounded; new checkpoints avoid this heavy path.
     import torch
+
     from diffusion.utils import load_ckpt
 
     try:
@@ -986,7 +1065,7 @@ def get_checkpoint_info(path: str, _: None = Depends(_require_token)) -> Dict[st
 
 
 @app.get("/api/out_dir/summary")
-def get_out_dir_summary(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_out_dir_summary(_: None = Depends(_require_token)) -> dict[str, Any]:
     out_dir = _get_out_dir()
     train_log = out_dir / "metrics" / "events.jsonl"
     config_snapshot = out_dir / "config_snapshot.yaml"
@@ -1003,7 +1082,9 @@ def get_out_dir_summary(_: None = Depends(_require_token)) -> Dict[str, Any]:
         "train_log": {"path": str(train_log), "tail": _tail(train_log)},
         "config_snapshot": {
             "path": str(config_snapshot),
-            "content": config_snapshot.read_text(encoding="utf-8") if config_snapshot.exists() else "",
+            "content": config_snapshot.read_text(encoding="utf-8")
+            if config_snapshot.exists()
+            else "",
         },
         "run_meta": {
             "path": str(run_meta),
@@ -1013,41 +1094,234 @@ def get_out_dir_summary(_: None = Depends(_require_token)) -> Dict[str, Any]:
     }
 
 
-def _sample_arg_specs() -> list[Dict[str, Any]]:
+def _sample_arg_specs() -> list[dict[str, Any]]:
     return [
-        {"name": "ckpt", "flags": ["--ckpt"], "type": "str", "default": None, "required": True, "help": "Checkpoint path", "choices": None},
-        {"name": "out", "flags": ["--out"], "type": "str", "default": "", "required": False, "help": "Optional output path. Defaults to this WebUI run samples directory.", "choices": None},
-        {"name": "task", "flags": ["--task"], "type": "str", "default": "txt2img", "required": False, "help": "Generation task", "choices": ["txt2img", "img2img", "inpaint", "control"]},
-        {"name": "sampler", "flags": ["--sampler"], "type": "str", "default": "flow_heun", "required": False, "help": "Flow sampler", "choices": ["flow_euler", "flow_heun"]},
-        {"name": "n", "flags": ["--n"], "type": "int", "default": 1, "required": False, "help": "Number of images", "choices": None},
-        {"name": "steps", "flags": ["--steps"], "type": "int", "default": 30, "required": False, "help": "Sampling steps", "choices": None},
-        {"name": "cfg", "flags": ["--cfg"], "type": "float", "default": 5.0, "required": False, "help": "Classifier-free guidance scale", "choices": None},
-        {"name": "shift", "flags": ["--shift"], "type": "float", "default": None, "required": False, "help": "Positive inference timestep shift override. Empty = checkpoint/config default.", "choices": None},
-        {"name": "seed", "flags": ["--seed"], "type": "int", "default": 42, "required": False, "help": "Base seed. Empty/null lets backend choose a random seed.", "choices": None},
-        {"name": "device", "flags": ["--device"], "type": "str", "default": "auto", "required": False, "help": "Runtime device", "choices": ["auto", "cuda", "cpu"]},
-        {"name": "width", "flags": ["--width"], "type": "int", "default": None, "required": False, "help": "Output width. Empty = checkpoint/config image_size.", "choices": None},
-        {"name": "height", "flags": ["--height"], "type": "int", "default": None, "required": False, "help": "Output height. Empty = checkpoint/config image_size.", "choices": None},
-        {"name": "prompt", "flags": ["--prompt"], "type": "str", "default": "", "required": False, "help": "Positive prompt", "choices": None},
-        {"name": "neg_prompt", "flags": ["--neg_prompt", "--negative-prompt"], "type": "str", "default": "", "required": False, "help": "Negative prompt. Empty uses cached empty prompt when available.", "choices": None},
-        {"name": "init-image", "flags": ["--init-image"], "type": "str", "default": "", "required": False, "help": "Input image for img2img/inpaint", "choices": None},
-        {"name": "strength", "flags": ["--strength"], "type": "float", "default": 1.0, "required": False, "help": "Img2img start strength in [0, 1]", "choices": None},
-        {"name": "mask", "flags": ["--mask"], "type": "str", "default": "", "required": False, "help": "Inpaint mask path", "choices": None},
-        {"name": "control-image", "flags": ["--control-image"], "type": "str", "default": "", "required": False, "help": "Control conditioning image path", "choices": None},
-        {"name": "control-strength", "flags": ["--control-strength"], "type": "float", "default": 1.0, "required": False, "help": "Control latent multiplier", "choices": None},
-        {"name": "control-type", "flags": ["--control-type"], "type": "str", "default": "image", "required": False, "help": "Control preprocessor type", "choices": ["none", "latent_identity", "image", "canny", "depth", "pose", "lineart", "normal"]},
-        {"name": "latent-only", "flags": ["--latent-only"], "type": "bool", "default": False, "required": False, "help": "Write latent tensor instead of image", "choices": None},
-        {"name": "fake-vae", "flags": ["--fake-vae"], "type": "bool", "default": False, "required": False, "help": "Use deterministic fake VAE for smoke/sample tests", "choices": None},
-        {"name": "use-ema", "flags": ["--use-ema", "--no-ema"], "type": "bool", "default": True, "required": False, "help": "Use EMA weights from checkpoint when available", "choices": None},
+        {
+            "name": "ckpt",
+            "flags": ["--ckpt"],
+            "type": "str",
+            "default": None,
+            "required": True,
+            "help": "Checkpoint path",
+            "choices": None,
+        },
+        {
+            "name": "out",
+            "flags": ["--out"],
+            "type": "str",
+            "default": "",
+            "required": False,
+            "help": "Optional output path. Defaults to this WebUI run samples directory.",
+            "choices": None,
+        },
+        {
+            "name": "task",
+            "flags": ["--task"],
+            "type": "str",
+            "default": "txt2img",
+            "required": False,
+            "help": "Generation task",
+            "choices": ["txt2img", "img2img", "inpaint", "control"],
+        },
+        {
+            "name": "sampler",
+            "flags": ["--sampler"],
+            "type": "str",
+            "default": "flow_heun",
+            "required": False,
+            "help": "Flow sampler",
+            "choices": ["flow_euler", "flow_heun"],
+        },
+        {
+            "name": "n",
+            "flags": ["--n"],
+            "type": "int",
+            "default": 1,
+            "required": False,
+            "help": "Number of images",
+            "choices": None,
+        },
+        {
+            "name": "steps",
+            "flags": ["--steps"],
+            "type": "int",
+            "default": 30,
+            "required": False,
+            "help": "Sampling steps",
+            "choices": None,
+        },
+        {
+            "name": "cfg",
+            "flags": ["--cfg"],
+            "type": "float",
+            "default": 5.0,
+            "required": False,
+            "help": "Classifier-free guidance scale",
+            "choices": None,
+        },
+        {
+            "name": "shift",
+            "flags": ["--shift"],
+            "type": "float",
+            "default": None,
+            "required": False,
+            "help": "Positive inference timestep shift override. Empty = checkpoint/config default.",
+            "choices": None,
+        },
+        {
+            "name": "seed",
+            "flags": ["--seed"],
+            "type": "int",
+            "default": 42,
+            "required": False,
+            "help": "Base seed. Empty/null lets backend choose a random seed.",
+            "choices": None,
+        },
+        {
+            "name": "device",
+            "flags": ["--device"],
+            "type": "str",
+            "default": "auto",
+            "required": False,
+            "help": "Runtime device",
+            "choices": ["auto", "cuda", "cpu"],
+        },
+        {
+            "name": "width",
+            "flags": ["--width"],
+            "type": "int",
+            "default": None,
+            "required": False,
+            "help": "Output width. Empty = checkpoint/config image_size.",
+            "choices": None,
+        },
+        {
+            "name": "height",
+            "flags": ["--height"],
+            "type": "int",
+            "default": None,
+            "required": False,
+            "help": "Output height. Empty = checkpoint/config image_size.",
+            "choices": None,
+        },
+        {
+            "name": "prompt",
+            "flags": ["--prompt"],
+            "type": "str",
+            "default": "",
+            "required": False,
+            "help": "Positive prompt",
+            "choices": None,
+        },
+        {
+            "name": "neg_prompt",
+            "flags": ["--neg_prompt", "--negative-prompt"],
+            "type": "str",
+            "default": "",
+            "required": False,
+            "help": "Negative prompt. Empty uses cached empty prompt when available.",
+            "choices": None,
+        },
+        {
+            "name": "init-image",
+            "flags": ["--init-image"],
+            "type": "str",
+            "default": "",
+            "required": False,
+            "help": "Input image for img2img/inpaint",
+            "choices": None,
+        },
+        {
+            "name": "strength",
+            "flags": ["--strength"],
+            "type": "float",
+            "default": 1.0,
+            "required": False,
+            "help": "Img2img start strength in [0, 1]",
+            "choices": None,
+        },
+        {
+            "name": "mask",
+            "flags": ["--mask"],
+            "type": "str",
+            "default": "",
+            "required": False,
+            "help": "Inpaint mask path",
+            "choices": None,
+        },
+        {
+            "name": "control-image",
+            "flags": ["--control-image"],
+            "type": "str",
+            "default": "",
+            "required": False,
+            "help": "Control conditioning image path",
+            "choices": None,
+        },
+        {
+            "name": "control-strength",
+            "flags": ["--control-strength"],
+            "type": "float",
+            "default": 1.0,
+            "required": False,
+            "help": "Control latent multiplier",
+            "choices": None,
+        },
+        {
+            "name": "control-type",
+            "flags": ["--control-type"],
+            "type": "str",
+            "default": "image",
+            "required": False,
+            "help": "Control preprocessor type",
+            "choices": [
+                "none",
+                "latent_identity",
+                "image",
+                "canny",
+                "depth",
+                "pose",
+                "lineart",
+                "normal",
+            ],
+        },
+        {
+            "name": "latent-only",
+            "flags": ["--latent-only"],
+            "type": "bool",
+            "default": False,
+            "required": False,
+            "help": "Write latent tensor instead of image",
+            "choices": None,
+        },
+        {
+            "name": "fake-vae",
+            "flags": ["--fake-vae"],
+            "type": "bool",
+            "default": False,
+            "required": False,
+            "help": "Use deterministic fake VAE for smoke/sample tests",
+            "choices": None,
+        },
+        {
+            "name": "use-ema",
+            "flags": ["--use-ema", "--no-ema"],
+            "type": "bool",
+            "default": True,
+            "required": False,
+            "help": "Use EMA weights from checkpoint when available",
+            "choices": None,
+        },
     ]
 
 
 @app.get("/api/sample/args")
-def get_sample_args(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_sample_args(_: None = Depends(_require_token)) -> dict[str, Any]:
     return {"items": _sample_arg_specs()}
 
 
 @app.get("/api/latents/args")
-def get_latent_args(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def get_latent_args(_: None = Depends(_require_token)) -> dict[str, Any]:
     prep_path = ROOT_DIR / "scripts" / "prepare_latents.py"
     items = parse_argparse_args(prep_path)
     defaults = _latent_prepare_arg_defaults()
@@ -1065,8 +1339,8 @@ def list_artifacts(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
-    records: list[Dict[str, Any]] = []
+) -> dict[str, Any]:
+    records: list[dict[str, Any]] = []
     if source in {"all", "webui_samples", "latents"}:
         records.extend(_collect_webui_samples(run_id, include_latents=source in {"all", "latents"}))
     if source in {"all", "train_samples"}:
@@ -1074,7 +1348,7 @@ def list_artifacts(
     if source in {"all", "checkpoints"}:
         records.extend(_collect_run_checkpoints(run_id))
     records = sorted(records, key=lambda item: float(item.get("mtime") or 0.0))
-    return {"items": records[offset:offset + limit], "offset": offset, "total": len(records)}
+    return {"items": records[offset : offset + limit], "offset": offset, "total": len(records)}
 
 
 @app.get("/api/generated-samples")
@@ -1083,9 +1357,12 @@ def list_generated_samples(
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
     run_id: str | None = None,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
-    records = sorted(_collect_webui_samples(run_id, include_latents=False), key=lambda item: float(item.get("mtime") or 0.0))
-    return {"items": records[offset:offset + limit], "offset": offset, "total": len(records)}
+) -> dict[str, Any]:
+    records = sorted(
+        _collect_webui_samples(run_id, include_latents=False),
+        key=lambda item: float(item.get("mtime") or 0.0),
+    )
+    return {"items": records[offset : offset + limit], "offset": offset, "total": len(records)}
 
 
 @app.get("/api/train-samples")
@@ -1094,9 +1371,11 @@ def list_train_samples(
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
     run_id: str | None = None,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
-    records = sorted(_collect_train_samples(run_id), key=lambda item: float(item.get("mtime") or 0.0))
-    return {"items": records[offset:offset + limit], "offset": offset, "total": len(records)}
+) -> dict[str, Any]:
+    records = sorted(
+        _collect_train_samples(run_id), key=lambda item: float(item.get("mtime") or 0.0)
+    )
+    return {"items": records[offset : offset + limit], "offset": offset, "total": len(records)}
 
 
 @app.get("/api/samples")
@@ -1105,18 +1384,21 @@ def list_samples(
     limit: Annotated[int, Query(ge=1, le=5000)] = 500,
     run_id: str | None = None,
     _: None = Depends(_require_token),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     # Backward-compatible alias for generated WebUI sample images only.
-    records = sorted(_collect_webui_samples(run_id, include_latents=False), key=lambda item: float(item.get("mtime") or 0.0))
-    return {"items": records[offset:offset + limit], "offset": offset, "total": len(records)}
+    records = sorted(
+        _collect_webui_samples(run_id, include_latents=False),
+        key=lambda item: float(item.get("mtime") or 0.0),
+    )
+    return {"items": records[offset : offset + limit], "offset": offset, "total": len(records)}
 
 
 @app.post("/api/uploads/image")
 async def upload_image(
-    file: UploadFile = File(...),
-    kind: str = Form(default="image"),
-    _: None = Depends(_require_token),
-) -> Dict[str, Any]:
+    file: Annotated[UploadFile, File()],
+    kind: Annotated[str, Form()] = "image",
+    _: Annotated[None, Depends(_require_token)] = None,
+) -> dict[str, Any]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="file is required")
     content_type = (file.content_type or "").lower()
@@ -1144,6 +1426,7 @@ async def upload_image(
                 f.write(chunk)
         try:
             from PIL import Image
+
             with Image.open(tmp_path) as im:
                 fmt = (im.format or "").upper()
                 im.verify()
@@ -1172,7 +1455,9 @@ async def upload_image(
 
 
 @app.post("/api/train/start")
-def start_train(req: TrainRequest | None = None, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def start_train(
+    req: TrainRequest | None = None, _: None = Depends(_require_token)
+) -> dict[str, Any]:
     try:
         resume = req.resume if req else None
         run = job_manager.start_train(resume=resume)
@@ -1182,7 +1467,7 @@ def start_train(req: TrainRequest | None = None, _: None = Depends(_require_toke
 
 
 @app.post("/api/train/stop")
-def stop_train(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def stop_train(_: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.stop_current(expected_type="train")
     except RuntimeError as exc:
@@ -1193,7 +1478,7 @@ def stop_train(_: None = Depends(_require_token)) -> Dict[str, Any]:
 
 
 @app.post("/api/sample/start")
-def start_sample(req: SampleRequest, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def start_sample(req: SampleRequest, _: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.start_sample(req.args.to_sample_options_args())
     except ValueError as exc:
@@ -1204,7 +1489,9 @@ def start_sample(req: SampleRequest, _: None = Depends(_require_token)) -> Dict[
 
 
 @app.post("/api/latents/start")
-def start_latent_cache(req: LatentCacheRequest, _: None = Depends(_require_token)) -> Dict[str, Any]:
+def start_latent_cache(
+    req: LatentCacheRequest, _: None = Depends(_require_token)
+) -> dict[str, Any]:
     try:
         run = job_manager.start_prepare_latents(req.args.to_cli_args())
     except RuntimeError as exc:
@@ -1213,7 +1500,7 @@ def start_latent_cache(req: LatentCacheRequest, _: None = Depends(_require_token
 
 
 @app.post("/api/sample/stop")
-def stop_sample(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def stop_sample(_: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.stop_current(expected_type="sample")
     except RuntimeError as exc:
@@ -1224,7 +1511,7 @@ def stop_sample(_: None = Depends(_require_token)) -> Dict[str, Any]:
 
 
 @app.post("/api/latents/stop")
-def stop_latent_cache(_: None = Depends(_require_token)) -> Dict[str, Any]:
+def stop_latent_cache(_: None = Depends(_require_token)) -> dict[str, Any]:
     try:
         run = job_manager.stop_current(expected_type="latent_cache")
     except RuntimeError as exc:

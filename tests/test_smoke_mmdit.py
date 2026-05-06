@@ -45,7 +45,9 @@ def _install_fast_smoke_runtime(monkeypatch: pytest.MonkeyPatch) -> dict[str, li
     return {"sampler_calls": sampler_calls}
 
 
-def test_smoke_skips_eval_prompts_when_eval_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_smoke_skips_eval_prompts_when_eval_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg_path = tmp_path / "smoke.yaml"
     cfg_path.write_text(
         f"""
@@ -118,7 +120,9 @@ sampling:
     assert runtime["sampler_calls"]
 
 
-def test_synthetic_smoke_does_not_touch_dataset_or_caches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_synthetic_smoke_does_not_touch_dataset_or_caches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     cfg_path = tmp_path / "synthetic.yaml"
     cfg_path.write_text(
         f"""

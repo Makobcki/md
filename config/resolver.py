@@ -24,7 +24,6 @@ class ResolvedConfig:
 
 def recursive_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge dictionaries recursively with scalar/list replacement semantics."""
-
     result = deepcopy(base)
     for key, value in override.items():
         if (
@@ -41,7 +40,6 @@ def recursive_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str,
 
 def load_raw_config(path: str | Path) -> dict[str, Any]:
     """Load KDL or YAML config based on file extension."""
-
     file_path = Path(path)
     suffix = file_path.suffix.lower()
     if suffix == ".kdl":
@@ -128,7 +126,9 @@ def _alias_presets(
     return presets
 
 
-def _validate_target(data: dict[str, Any], expected_target: str | None, source: Path) -> tuple[str, int]:
+def _validate_target(
+    data: dict[str, Any], expected_target: str | None, source: Path
+) -> tuple[str, int]:
     meta = data.get("__meta__") if isinstance(data.get("__meta__"), dict) else {}
     target = str(meta.get("target", data.get("target", "")) or "")
     version = int(meta.get("version", data.get("version", 1)) or 1)
@@ -150,7 +150,6 @@ def resolve_config(
     expected_target: str | None = None,
 ) -> ResolvedConfig:
     """Resolve a target config, presets, preset aliases, and CLI overrides."""
-
     config_path = Path(path).resolve()
     raw = load_raw_config(config_path)
     target, version = _validate_target(raw, expected_target, config_path)

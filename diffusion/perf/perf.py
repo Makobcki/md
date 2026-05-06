@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict
 
 import torch
 
@@ -16,7 +15,7 @@ class PerfConfig:
     enable_math_sdp: bool
 
 
-def configure_performance(cfg: PerfConfig, device: torch.device) -> Dict[str, bool]:
+def configure_performance(cfg: PerfConfig, device: torch.device) -> dict[str, bool]:
     torch.set_float32_matmul_precision("high")
     torch.backends.cuda.matmul.allow_tf32 = bool(cfg.tf32)
     torch.backends.cudnn.allow_tf32 = bool(cfg.tf32)
@@ -39,10 +38,12 @@ def configure_performance(cfg: PerfConfig, device: torch.device) -> Dict[str, bo
         torch.backends.cuda.enable_mem_efficient_sdp(enable_mem_efficient)
         torch.backends.cuda.enable_math_sdp(enable_math)
 
-        active.update({
-            "sdp_flash": enable_flash,
-            "sdp_mem_efficient": enable_mem_efficient,
-            "sdp_math": enable_math,
-        })
+        active.update(
+            {
+                "sdp_flash": enable_flash,
+                "sdp_mem_efficient": enable_mem_efficient,
+                "sdp_math": enable_math,
+            }
+        )
 
     return active

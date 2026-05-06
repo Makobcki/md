@@ -28,7 +28,7 @@ class RMSNorm(nn.Module):
         dtype = x.dtype
         x_f = x.float()
         y = x_f * torch.rsqrt(x_f.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return (y.to(dtype=dtype) * self.weight.to(dtype=dtype))
+        return y.to(dtype=dtype) * self.weight.to(dtype=dtype)
 
 
 class AdaLNZero(nn.Module):
@@ -53,4 +53,3 @@ def build_norm(hidden_dim: int, *, rms_norm: bool) -> nn.Module:
 
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return x * (1.0 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-

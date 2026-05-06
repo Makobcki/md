@@ -79,9 +79,9 @@ class DistributedContext:
         if self.accelerator is not None:
             return self.accelerator.unwrap_model(model)
         if hasattr(model, "_orig_mod"):
-            return getattr(model, "_orig_mod")
+            return model._orig_mod
         if hasattr(model, "module"):
-            return getattr(model, "module")
+            return model.module
         return model
 
     def wait_for_everyone(self) -> None:
@@ -121,7 +121,9 @@ class DistributedContext:
         return (not self.save_on_rank0_only) or self.is_main_process
 
 
-def create_distributed_context(cfg: Any, *, device: torch.device | None = None) -> DistributedContext:
+def create_distributed_context(
+    cfg: Any, *, device: torch.device | None = None
+) -> DistributedContext:
     backend = str(getattr(cfg, "distributed_backend", "none") or "none")
     if backend == "none":
         return DistributedContext(
@@ -140,7 +142,9 @@ def create_distributed_context(cfg: Any, *, device: torch.device | None = None) 
     try:
         from accelerate import Accelerator
     except ImportError as exc:
-        raise RuntimeError("distributed_backend=accelerate requires the accelerate package.") from exc
+        raise RuntimeError(
+            "distributed_backend=accelerate requires the accelerate package."
+        ) from exc
 
     # This trainer keeps its explicit AMP/GradScaler path so Accelerate is used
     # for process placement, DDP wrapping, dataloader sharding, and rank-aware IO.

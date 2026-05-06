@@ -12,7 +12,7 @@ class KdlNode:
     name: str
     args: list[Any] = field(default_factory=list)
     props: dict[str, Any] = field(default_factory=dict)
-    children: list["KdlNode"] = field(default_factory=list)
+    children: list[KdlNode] = field(default_factory=list)
     line: int = 1
 
 
@@ -55,9 +55,7 @@ class _TokenStream:
     def expect(self, kind: str) -> tuple[str, Any, int]:
         token = self.pop()
         if token[0] != kind:
-            raise KdlParseError(
-                f"{self.source}:{token[2]}: expected {kind}, got {token[0]}"
-            )
+            raise KdlParseError(f"{self.source}:{token[2]}: expected {kind}, got {token[0]}")
         return token
 
     def skip_newlines(self) -> None:
@@ -230,7 +228,6 @@ def _parse_node(stream: _TokenStream) -> KdlNode:
 
 def parse_kdl(text: str, *, source: str = "<string>") -> list[KdlNode]:
     """Parse KDL text into nodes."""
-
     stream = _TokenStream(text, source=source)
     nodes: list[KdlNode] = []
     while True:
@@ -277,9 +274,7 @@ def _node_value(node: KdlNode) -> Any:
 def _document_to_dict(nodes: list[KdlNode], *, source: str) -> dict[str, Any]:
     meaningful = [node for node in nodes if node.name in {"config", "preset"}]
     if len(meaningful) != 1:
-        raise KdlParseError(
-            f"{source}: expected exactly one top-level config or preset node"
-        )
+        raise KdlParseError(f"{source}: expected exactly one top-level config or preset node")
     root = meaningful[0]
     body = _node_value(root)
     if not isinstance(body, dict):
@@ -301,7 +296,6 @@ def _document_to_dict(nodes: list[KdlNode], *, source: str) -> dict[str, Any]:
 
 def loads_kdl(text: str, *, source: str = "<string>") -> dict[str, Any]:
     """Load KDL text into a nested dictionary."""
-
     return _document_to_dict(parse_kdl(text, source=source), source=source)
 
 
@@ -311,6 +305,5 @@ def load_kdl(path: str | Path) -> dict[str, Any]:
     The returned mapping contains ``__kind__`` (``config`` or ``preset``),
     ``__meta__`` with root node properties, and ``__uses__`` if present.
     """
-
     file_path = Path(path)
     return loads_kdl(file_path.read_text(encoding="utf-8"), source=str(file_path))

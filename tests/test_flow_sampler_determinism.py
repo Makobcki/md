@@ -20,10 +20,11 @@ class _ZeroFlow(torch.nn.Module):
 
 def test_flow_sampler_same_seed_same_latent() -> None:
     model = _ZeroFlow()
-    text = TextConditioning(torch.zeros(1, 1, 4), torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 4))
+    text = TextConditioning(
+        torch.zeros(1, 1, 4), torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 4)
+    )
     g1 = torch.Generator().manual_seed(123)
     g2 = torch.Generator().manual_seed(123)
     a = sample_flow_euler(model, (1, 4, 4, 4), text, steps=3, generator=g1)
     b = sample_flow_euler(model, (1, 4, 4, 4), text, steps=3, generator=g2)
     assert torch.equal(a, b)
-

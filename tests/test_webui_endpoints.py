@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 from fastapi import HTTPException, Request, Response
@@ -25,6 +25,7 @@ def app_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[obje
     monkeypatch.setenv("WEBUI_CONFIG_PATH", str(cfg_dst))
     monkeypatch.setenv("WEBUI_RUNS_DIR", str(tmp_path / "webui_runs"))
     import webui.backend.app as app_module
+
     importlib.reload(app_module)
     yield app_module
 
@@ -77,7 +78,9 @@ def test_latent_args_endpoint_reads_prepare_config_defaults(app_module: object) 
     content = cfg_path.read_text(encoding="utf-8")
     if "latent_prepare_batch_size:" in content:
         content = "\n".join(
-            "latent_prepare_batch_size: 23" if line.startswith("latent_prepare_batch_size:") else line
+            "latent_prepare_batch_size: 23"
+            if line.startswith("latent_prepare_batch_size:")
+            else line
             for line in content.splitlines()
         )
     else:
@@ -253,7 +256,9 @@ def test_websocket_requires_token(app_module: object, monkeypatch: pytest.Monkey
     assert accepted_cookie.closed_code is None
 
 
-def test_http_auth_accepts_header_or_cookie(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_http_auth_accepts_header_or_cookie(
+    app_module: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
     cookie = app_module._auth_cookie_value()
 
@@ -266,7 +271,9 @@ def test_http_auth_accepts_header_or_cookie(app_module: object, monkeypatch: pyt
     assert exc.value.status_code == 401
 
 
-def test_auth_token_normalizes_bearer_prefix(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_token_normalizes_bearer_prefix(
+    app_module: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("WEBUI_AUTH_TOKEN", "Bearer secret")
 
     assert app_module._token_is_valid("secret")
@@ -282,7 +289,9 @@ def test_auth_token_accepts_non_ascii(app_module: object, monkeypatch: pytest.Mo
     assert app_module._token_is_valid("другой") is False
 
 
-def test_auth_login_accepts_non_ascii_token(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_login_accepts_non_ascii_token(
+    app_module: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("WEBUI_AUTH_TOKEN", "секрет")
     response = Response()
 
@@ -293,13 +302,17 @@ def test_auth_login_accepts_non_ascii_token(app_module: object, monkeypatch: pyt
     assert app_module._auth_cookie_is_valid(cookie)
 
 
-def test_non_ascii_cookie_signature_is_rejected_without_type_error(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_non_ascii_cookie_signature_is_rejected_without_type_error(
+    app_module: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
 
     assert app_module._auth_cookie_is_valid("body.подпись") is False
 
 
-def test_auth_login_sets_cookie_session(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_login_sets_cookie_session(
+    app_module: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
     response = Response()
 
@@ -312,7 +325,9 @@ def test_auth_login_sets_cookie_session(app_module: object, monkeypatch: pytest.
     assert app_module.get_auth_status(auth_cookie=cookie)["authenticated"] is True
 
 
-def test_auth_cookie_has_server_side_expiry(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_cookie_has_server_side_expiry(
+    app_module: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
     monkeypatch.setattr(app_module, "_AUTH_COOKIE_MAX_AGE", -1)
 
@@ -328,7 +343,9 @@ def test_auth_login_rejects_bad_token(app_module: object, monkeypatch: pytest.Mo
     assert exc.value.status_code == 401
 
 
-def test_auth_login_rate_limits_failed_attempts(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_login_rate_limits_failed_attempts(
+    app_module: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
     monkeypatch.setattr(app_module, "_AUTH_MAX_FAILED_ATTEMPTS", 2)
     monkeypatch.setattr(app_module, "_AUTH_LOCKOUT_SECONDS", 60)
@@ -347,7 +364,9 @@ def test_auth_login_rate_limits_failed_attempts(app_module: object, monkeypatch:
     assert locked.value.headers["Retry-After"]
 
 
-def test_auth_rate_limit_ignores_forwarded_headers_by_default(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_rate_limit_ignores_forwarded_headers_by_default(
+    app_module: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("WEBUI_TRUST_PROXY_HEADERS", raising=False)
     req = _request(headers=[(b"x-forwarded-for", b"203.0.113.9")])
 
@@ -357,9 +376,15 @@ def test_auth_rate_limit_ignores_forwarded_headers_by_default(app_module: object
     assert app_module._auth_client_key(req) == "203.0.113.9"
 
 
-def test_auth_login_success_clears_failed_attempts(app_module: object, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_auth_login_success_clears_failed_attempts(
+    app_module: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("WEBUI_AUTH_TOKEN", "secret")
-    app_module._auth_failures["127.0.0.1"] = {"count": 1, "first_failed_at": 1.0, "locked_until": 0.0}
+    app_module._auth_failures["127.0.0.1"] = {
+        "count": 1,
+        "first_failed_at": 1.0,
+        "locked_until": 0.0,
+    }
 
     response = Response()
     payload = app_module.login(app_module.AuthLoginRequest(token="secret"), response, _request())

@@ -7,8 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from data_loader import DataConfig, build_or_load_index
-from data_loader import indexing
+from data_loader import DataConfig, build_or_load_index, indexing
 
 
 def test_index_cache_with_stale_image_paths_is_rebuilt(tmp_path: Path) -> None:
@@ -40,7 +39,9 @@ def test_index_cache_with_stale_image_paths_is_rebuilt(tmp_path: Path) -> None:
     cache_path.write_text(
         "\n".join(
             [
-                json.dumps({"type": "meta", "schema_version": 3, "config": indexing._cache_metadata(cfg)}),
+                json.dumps(
+                    {"type": "meta", "schema_version": 3, "config": indexing._cache_metadata(cfg)}
+                ),
                 json.dumps({"split": "train", "entry": stale_entry}),
                 json.dumps({"type": "done", "schema_version": 3}),
             ]

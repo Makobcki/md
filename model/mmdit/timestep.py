@@ -32,4 +32,3 @@ class TimestepEmbedder(nn.Module):
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         return self.net(timestep_embedding(t, self.hidden_dim).to(dtype=self.net[0].weight.dtype))
-

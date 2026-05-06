@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-
+from typing import Any
 
 
 def _fail_or_warn(message: str, *, strict: bool) -> None:
@@ -12,7 +12,9 @@ def _fail_or_warn(message: str, *, strict: bool) -> None:
     print(f"[WARN] {message}", flush=True)
 
 
-def validate_cache(cfg, *, strict: bool | None = None, text_only: bool = False, latents_only: bool = False) -> dict:
+def validate_cache(
+    cfg: Any, *, strict: bool | None = None, text_only: bool = False, latents_only: bool = False
+) -> dict:
     from model.text.cache import TextCache
 
     """Validate the training caches referenced by a resolved TrainConfig.
@@ -22,7 +24,12 @@ def validate_cache(cfg, *, strict: bool | None = None, text_only: bool = False, 
     that. It is safe to run before a long training job.
     """
     strict = bool(cfg.cache_strict if strict is None else strict)
-    report: dict[str, object] = {"ok": True, "text_cache": None, "latent_cache": None, "training_manifest": None}
+    report: dict[str, object] = {
+        "ok": True,
+        "text_cache": None,
+        "latent_cache": None,
+        "training_manifest": None,
+    }
     data_root = Path(cfg.data_root)
 
     if not latents_only:
@@ -35,11 +42,17 @@ def validate_cache(cfg, *, strict: bool | None = None, text_only: bool = False, 
             expected_text_dim = int(cfg.text_dim)
             actual_text_dim = int(cache.metadata.get("text_dim", -1))
             if actual_text_dim != expected_text_dim:
-                _fail_or_warn(f"text cache text_dim mismatch: {actual_text_dim} != {expected_text_dim}", strict=strict)
+                _fail_or_warn(
+                    f"text cache text_dim mismatch: {actual_text_dim} != {expected_text_dim}",
+                    strict=strict,
+                )
             expected_pooled_dim = int(cfg.pooled_dim)
             actual_pooled_dim = int(cache.metadata.get("pooled_dim", -1))
             if actual_pooled_dim != expected_pooled_dim:
-                _fail_or_warn(f"text cache pooled_dim mismatch: {actual_pooled_dim} != {expected_pooled_dim}", strict=strict)
+                _fail_or_warn(
+                    f"text cache pooled_dim mismatch: {actual_pooled_dim} != {expected_pooled_dim}",
+                    strict=strict,
+                )
             report["text_cache"] = {
                 "root": str(text_root),
                 "num_entries": len(cache.entries),
@@ -57,8 +70,16 @@ def validate_cache(cfg, *, strict: bool | None = None, text_only: bool = False, 
             if not index_path.exists():
                 _fail_or_warn(f"missing latent cache index: {index_path}", strict=strict)
             else:
-                rows = [line for line in index_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-                report["latent_cache"] = {"root": str(latent_root), "index": str(index_path), "num_entries": len(rows)}
+                rows = [
+                    line
+                    for line in index_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                report["latent_cache"] = {
+                    "root": str(latent_root),
+                    "index": str(index_path),
+                    "num_entries": len(rows),
+                }
 
     manifest_path = data_root / str(cfg.cache_dir) / "training_cache_manifest.json"
     if manifest_path.exists():
@@ -77,11 +98,21 @@ def validate_cache(cfg, *, strict: bool | None = None, text_only: bool = False, 
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Validate text/latent training cache metadata and shard readability.")
+    parser = argparse.ArgumentParser(
+        description="Validate text/latent training cache metadata and shard readability."
+    )
     parser.add_argument("--config", default="", help="Config path. Defaults to configs/cache.kdl.")
-    parser.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
-    parser.add_argument("--strict", action="store_true", help="Treat warnings as errors, overriding config cache.strict.")
-    parser.add_argument("--non-strict", action="store_true", help="Turn compatible mismatches into warnings.")
+    parser.add_argument(
+        "--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE"
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Treat warnings as errors, overriding config cache.strict.",
+    )
+    parser.add_argument(
+        "--non-strict", action="store_true", help="Turn compatible mismatches into warnings."
+    )
     parser.add_argument("--text-only", action="store_true")
     parser.add_argument("--latents-only", action="store_true")
     args = parser.parse_args(argv)
@@ -90,9 +121,13 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("--text-only and --latents-only are mutually exclusive")
     from config.loader import load_cache_train_config, parse_cli_overrides
 
-    cfg = load_cache_train_config(args.config or None, overrides=parse_cli_overrides(args.set_values))
+    cfg = load_cache_train_config(
+        args.config or None, overrides=parse_cli_overrides(args.set_values)
+    )
     strict = True if args.strict else False if args.non_strict else None
-    report = validate_cache(cfg, strict=strict, text_only=bool(args.text_only), latents_only=bool(args.latents_only))
+    report = validate_cache(
+        cfg, strict=strict, text_only=bool(args.text_only), latents_only=bool(args.latents_only)
+    )
     print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
 
 

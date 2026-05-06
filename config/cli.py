@@ -9,10 +9,18 @@ from .loader import parse_cli_overrides, resolve_target_config
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Resolve md-diffusion KDL configs.")
-    parser.add_argument("--target", required=True, choices=("train", "sample", "webui", "eval", "cache"))
-    parser.add_argument("--config", default="", help="Override config path. Defaults to target config.")
-    parser.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
-    parser.add_argument("--sources", action="store_true", help="Include config/preset source paths.")
+    parser.add_argument(
+        "--target", required=True, choices=("train", "sample", "webui", "eval", "cache")
+    )
+    parser.add_argument(
+        "--config", default="", help="Override config path. Defaults to target config."
+    )
+    parser.add_argument(
+        "--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE"
+    )
+    parser.add_argument(
+        "--sources", action="store_true", help="Include config/preset source paths."
+    )
     args = parser.parse_args()
 
     path = args.config or default_config_path(args.target)

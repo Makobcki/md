@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable, Optional
+from collections.abc import Iterable
+from typing import Any
 
 import torch
 
@@ -12,7 +12,7 @@ from model.text.conditioning import TextConditioning, TrainBatch
 from train.checkpoint_mmdit import build_mmdit_checkpoint_metadata
 
 
-def as_train_batch(batch) -> TrainBatch:
+def as_train_batch(batch: Any) -> TrainBatch:
     if isinstance(batch, TrainBatch):
         return batch
     if isinstance(batch, dict):
@@ -36,7 +36,7 @@ def as_train_batch(batch) -> TrainBatch:
 def apply_cfg_dropout(
     text: TextConditioning,
     *,
-    empty_text: Optional[TextConditioning],
+    empty_text: TextConditioning | None,
     drop_prob: float,
 ) -> TextConditioning:
     if empty_text is None or drop_prob <= 0:
@@ -53,7 +53,7 @@ def training_step_mmdit(
     batch: TrainBatch,
     amp_enabled: bool = False,
     amp_dtype: torch.dtype = torch.bfloat16,
-    empty_text: Optional[TextConditioning] = None,
+    empty_text: TextConditioning | None = None,
     cfg_drop_prob: float = 0.0,
 ) -> torch.Tensor:
     x0 = batch.x0
@@ -76,16 +76,20 @@ def training_step_mmdit(
         if float(getattr(model.cfg, "x0_aux_weight", 0.0)) > 0:
             t_view = train_tuple.t.to(device=pred.device, dtype=pred.dtype).view(-1, 1, 1, 1)
             x0_pred = train_tuple.xt.to(device=pred.device, dtype=pred.dtype) - t_view * pred
-            loss = loss + float(model.cfg.x0_aux_weight) * (x0_pred.float() - x0.to(device=pred.device, dtype=torch.float32)).pow(2).mean()
+            loss = (
+                loss
+                + float(model.cfg.x0_aux_weight)
+                * (x0_pred.float() - x0.to(device=pred.device, dtype=torch.float32)).pow(2).mean()
+            )
         return loss
 
 
 def build_mmdit_checkpoint(
     *,
     model: torch.nn.Module,
-    ema: Optional[EMA],
-    optimizer: Optional[torch.optim.Optimizer],
-    scheduler,
+    ema: EMA | None,
+    optimizer: torch.optim.Optimizer | None,
+    scheduler: Any,
     step: int,
     cfg_dict: dict,
 ) -> dict:
@@ -93,41 +97,107 @@ def build_mmdit_checkpoint(
         def __init__(self, data: dict) -> None:
             self.latent_channels = int(data.get("latent_channels", 4))
             self.latent_patch_size = int(data.get("latent_patch_size", data.get("patch_size", 2)))
-            self.hidden_dim = int(data.get("hidden_dim", data.get("model", {}).get("hidden_dim", 1024)))
+            self.hidden_dim = int(
+                data.get("hidden_dim", data.get("model", {}).get("hidden_dim", 1024))
+            )
             self.depth = int(data.get("depth", data.get("model", {}).get("depth", 24)))
             self.num_heads = int(data.get("num_heads", data.get("model", {}).get("num_heads", 16)))
-            self.double_stream_blocks = int(data.get("double_stream_blocks", data.get("model", {}).get("double_stream_blocks", 16)))
-            self.single_stream_blocks = int(data.get("single_stream_blocks", data.get("model", {}).get("single_stream_blocks", 8)))
-            self.pos_embed = str(data.get("pos_embed", data.get("model", {}).get("pos_embed", "rope_2d")))
+            self.double_stream_blocks = int(
+                data.get(
+                    "double_stream_blocks", data.get("model", {}).get("double_stream_blocks", 16)
+                )
+            )
+            self.single_stream_blocks = int(
+                data.get(
+                    "single_stream_blocks", data.get("model", {}).get("single_stream_blocks", 8)
+                )
+            )
+            self.pos_embed = str(
+                data.get("pos_embed", data.get("model", {}).get("pos_embed", "rope_2d"))
+            )
             self.text_dim = int(data.get("text_dim", data.get("text", {}).get("text_dim", 1024)))
-            self.pooled_dim = int(data.get("pooled_dim", data.get("text", {}).get("pooled_dim", 1024)))
-            self.vae_pretrained = str(data.get("vae_pretrained", data.get("vae", {}).get("pretrained", "")))
-            self.vae_scaling_factor = float(data.get("vae_scaling_factor", data.get("vae", {}).get("scaling_factor", 0.18215)))
+            self.pooled_dim = int(
+                data.get("pooled_dim", data.get("text", {}).get("pooled_dim", 1024))
+            )
+            self.vae_pretrained = str(
+                data.get("vae_pretrained", data.get("vae", {}).get("pretrained", ""))
+            )
+            self.vae_scaling_factor = float(
+                data.get("vae_scaling_factor", data.get("vae", {}).get("scaling_factor", 0.18215))
+            )
             flow = data.get("flow", {})
-            self.flow_timestep_sampling = str(data.get("flow_timestep_sampling", flow.get("timestep_sampling", "logit_normal")))
+            self.flow_timestep_sampling = str(
+                data.get("flow_timestep_sampling", flow.get("timestep_sampling", "logit_normal"))
+            )
             self.flow_logit_mean = float(data.get("flow_logit_mean", flow.get("logit_mean", 0.0)))
             self.flow_logit_std = float(data.get("flow_logit_std", flow.get("logit_std", 1.0)))
-            self.flow_loss_weighting = str(data.get("flow_loss_weighting", flow.get("loss_weighting", "none")))
-            self.flow_timestep_shift = float(data.get("flow_timestep_shift", flow.get("timestep_shift", flow.get("shift", 1.0))))
-            self.flow_train_t_min = float(data.get("flow_train_t_min", flow.get("train_t_min", 0.0)))
-            self.flow_train_t_max = float(data.get("flow_train_t_max", flow.get("train_t_max", 1.0)))
+            self.flow_loss_weighting = str(
+                data.get("flow_loss_weighting", flow.get("loss_weighting", "none"))
+            )
+            self.flow_timestep_shift = float(
+                data.get("flow_timestep_shift", flow.get("timestep_shift", flow.get("shift", 1.0)))
+            )
+            self.flow_train_t_min = float(
+                data.get("flow_train_t_min", flow.get("train_t_min", 0.0))
+            )
+            self.flow_train_t_max = float(
+                data.get("flow_train_t_max", flow.get("train_t_max", 1.0))
+            )
             model = data.get("model", {}) if isinstance(data.get("model", {}), dict) else {}
-            self.text_resampler_enabled = bool(data.get("text_resampler_enabled", model.get("text_resampler_enabled", False)))
-            self.text_resampler_num_tokens = int(data.get("text_resampler_num_tokens", model.get("text_resampler_num_tokens", 128)))
-            self.text_resampler_depth = int(data.get("text_resampler_depth", model.get("text_resampler_depth", 2)))
-            self.attention_schedule = str(data.get("attention_schedule", model.get("attention_schedule", "full")))
-            self.early_joint_blocks = int(data.get("early_joint_blocks", model.get("early_joint_blocks", 0)))
-            self.late_joint_blocks = int(data.get("late_joint_blocks", model.get("late_joint_blocks", 0)))
-            self.source_patch_size = int(data.get("source_patch_size", model.get("source_patch_size", self.latent_patch_size)))
-            self.mask_patch_size = int(data.get("mask_patch_size", model.get("mask_patch_size", self.latent_patch_size)))
-            self.control_patch_size = int(data.get("control_patch_size", model.get("control_patch_size", self.latent_patch_size)))
-            self.mask_as_source_channel = bool(data.get("mask_as_source_channel", model.get("mask_as_source_channel", False)))
-            self.conditioning_rope = bool(data.get("conditioning_rope", model.get("conditioning_rope", True)))
-            self.strength_embed = bool(data.get("strength_embed", model.get("strength_embed", False)))
-            self.control_type_embed = bool(data.get("control_type_embed", model.get("control_type_embed", False)))
-            self.control_adapter = bool(data.get("control_adapter", model.get("control_adapter", False)))
-            self.control_adapter_ratio = float(data.get("control_adapter_ratio", model.get("control_adapter_ratio", 0.25)))
-            self.x0_aux_weight = float(data.get("x0_aux_weight", data.get("loss", {}).get("x0_aux_weight", 0.0))) if isinstance(data.get("loss", {}), dict) else float(data.get("x0_aux_weight", 0.0))
+            self.text_resampler_enabled = bool(
+                data.get("text_resampler_enabled", model.get("text_resampler_enabled", False))
+            )
+            self.text_resampler_num_tokens = int(
+                data.get("text_resampler_num_tokens", model.get("text_resampler_num_tokens", 128))
+            )
+            self.text_resampler_depth = int(
+                data.get("text_resampler_depth", model.get("text_resampler_depth", 2))
+            )
+            self.attention_schedule = str(
+                data.get("attention_schedule", model.get("attention_schedule", "full"))
+            )
+            self.early_joint_blocks = int(
+                data.get("early_joint_blocks", model.get("early_joint_blocks", 0))
+            )
+            self.late_joint_blocks = int(
+                data.get("late_joint_blocks", model.get("late_joint_blocks", 0))
+            )
+            self.source_patch_size = int(
+                data.get(
+                    "source_patch_size", model.get("source_patch_size", self.latent_patch_size)
+                )
+            )
+            self.mask_patch_size = int(
+                data.get("mask_patch_size", model.get("mask_patch_size", self.latent_patch_size))
+            )
+            self.control_patch_size = int(
+                data.get(
+                    "control_patch_size", model.get("control_patch_size", self.latent_patch_size)
+                )
+            )
+            self.mask_as_source_channel = bool(
+                data.get("mask_as_source_channel", model.get("mask_as_source_channel", False))
+            )
+            self.conditioning_rope = bool(
+                data.get("conditioning_rope", model.get("conditioning_rope", True))
+            )
+            self.strength_embed = bool(
+                data.get("strength_embed", model.get("strength_embed", False))
+            )
+            self.control_type_embed = bool(
+                data.get("control_type_embed", model.get("control_type_embed", False))
+            )
+            self.control_adapter = bool(
+                data.get("control_adapter", model.get("control_adapter", False))
+            )
+            self.control_adapter_ratio = float(
+                data.get("control_adapter_ratio", model.get("control_adapter_ratio", 0.25))
+            )
+            self.x0_aux_weight = (
+                float(data.get("x0_aux_weight", data.get("loss", {}).get("x0_aux_weight", 0.0)))
+                if isinstance(data.get("loss", {}), dict)
+                else float(data.get("x0_aux_weight", 0.0))
+            )
 
     metadata = build_mmdit_checkpoint_metadata(
         cfg=_CfgProxy(cfg_dict),
@@ -161,10 +231,10 @@ def run_minimal_mmdit_loop(
     device: torch.device,
     max_steps: int,
     grad_accum_steps: int = 1,
-    ema: Optional[EMA] = None,
+    ema: EMA | None = None,
     amp: bool = True,
     amp_dtype: torch.dtype = torch.bfloat16,
-    empty_text: Optional[TextConditioning] = None,
+    empty_text: TextConditioning | None = None,
     cfg_drop_prob: float = 0.0,
 ) -> list[float]:
     model.train()
@@ -182,16 +252,28 @@ def run_minimal_mmdit_loop(
                     tokens=batch.text.tokens.to(device),
                     mask=batch.text.mask.to(device),
                     pooled=batch.text.pooled.to(device),
-                    is_uncond=batch.text.is_uncond.to(device) if batch.text.is_uncond is not None else None,
-                    token_types=batch.text.token_types.to(device) if batch.text.token_types is not None else None,
+                    is_uncond=batch.text.is_uncond.to(device)
+                    if batch.text.is_uncond is not None
+                    else None,
+                    token_types=batch.text.token_types.to(device)
+                    if batch.text.token_types is not None
+                    else None,
                 ),
-                source_latent=batch.source_latent.to(device) if batch.source_latent is not None else None,
+                source_latent=batch.source_latent.to(device)
+                if batch.source_latent is not None
+                else None,
                 mask=batch.mask.to(device) if batch.mask is not None else None,
-                control_latents=batch.control_latents.to(device) if batch.control_latents is not None else None,
-                control_type=batch.control_type.to(device) if batch.control_type is not None else None,
+                control_latents=batch.control_latents.to(device)
+                if batch.control_latents is not None
+                else None,
+                control_type=batch.control_type.to(device)
+                if batch.control_type is not None
+                else None,
                 task=batch.task,
                 strength=batch.strength.to(device) if batch.strength is not None else None,
-                control_strength=batch.control_strength.to(device) if batch.control_strength is not None else None,
+                control_strength=batch.control_strength.to(device)
+                if batch.control_strength is not None
+                else None,
                 metadata=batch.metadata,
             )
             loss = training_step_mmdit(

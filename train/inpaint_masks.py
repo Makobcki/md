@@ -1,11 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Mapping
 
 import torch
-import torch.nn.functional as F
-
 
 DEFAULT_INPAINT_MASK_MODES: dict[str, float] = {
     "rectangle": 0.5,
@@ -28,14 +26,20 @@ _ALLOWED_MODES = {
 class InpaintMaskConfig:
     mask_min_area: float = 0.05
     mask_max_area: float = 0.60
-    mask_modes: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_INPAINT_MASK_MODES))
+    mask_modes: Mapping[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_INPAINT_MASK_MODES)
+    )
 
     def __post_init__(self) -> None:
         if not (0.0 <= float(self.mask_min_area) <= float(self.mask_max_area) <= 1.0):
-            raise ValueError("inpaint mask area must satisfy 0 <= mask_min_area <= mask_max_area <= 1.")
+            raise ValueError(
+                "inpaint mask area must satisfy 0 <= mask_min_area <= mask_max_area <= 1."
+            )
         unknown = sorted(set(self.mask_modes) - _ALLOWED_MODES)
         if unknown:
-            raise ValueError("inpaint.mask_modes contains unsupported mode(s): " + ", ".join(unknown))
+            raise ValueError(
+                "inpaint.mask_modes contains unsupported mode(s): " + ", ".join(unknown)
+            )
         if any(float(v) < 0 for v in self.mask_modes.values()):
             raise ValueError("inpaint.mask_modes weights must be non-negative.")
         if sum(float(v) for v in self.mask_modes.values()) <= 0:
@@ -49,7 +53,9 @@ class InpaintMaskConfig:
 
     @property
     def probabilities(self) -> torch.Tensor:
-        weights = torch.tensor([float(self.mask_modes[name]) for name in self.positive_modes], dtype=torch.float32)
+        weights = torch.tensor(
+            [float(self.mask_modes[name]) for name in self.positive_modes], dtype=torch.float32
+        )
         return weights / weights.sum()
 
 
@@ -62,17 +68,25 @@ def _randint(generator: torch.Generator, low: int, high: int) -> int:
 def _randfloat(generator: torch.Generator, low: float, high: float) -> float:
     if high <= low:
         return float(low)
-    return float(torch.empty((), dtype=torch.float32).uniform_(float(low), float(high), generator=generator).item())
+    return float(
+        torch.empty((), dtype=torch.float32)
+        .uniform_(float(low), float(high), generator=generator)
+        .item()
+    )
 
 
-def _target_area_pixels(generator: torch.Generator, h: int, w: int, min_area: float, max_area: float) -> int:
+def _target_area_pixels(
+    generator: torch.Generator, h: int, w: int, min_area: float, max_area: float
+) -> int:
     total = h * w
     lo = max(1, int(round(total * float(min_area))))
     hi = max(lo, int(round(total * float(max_area))))
     return _randint(generator, lo, hi + 1)
 
 
-def _rectangle_mask(generator: torch.Generator, h: int, w: int, area_pixels: int, *, center: bool = False) -> torch.Tensor:
+def _rectangle_mask(
+    generator: torch.Generator, h: int, w: int, area_pixels: int, *, center: bool = False
+) -> torch.Tensor:
     aspect = _randfloat(generator, 0.4, 2.5)
     mh = int(round((area_pixels / max(aspect, 1e-6)) ** 0.5))
     mw = int(round(mh * aspect))
@@ -112,7 +126,9 @@ def _random_blocks_mask(generator: torch.Generator, h: int, w: int, target: int)
     attempts = 0
     while remaining > 0 and attempts < 64:
         attempts += 1
-        block_area = max(1, min(remaining, _randint(generator, max(1, target // 12), max(2, target // 3 + 1))))
+        block_area = max(
+            1, min(remaining, _randint(generator, max(1, target // 12), max(2, target // 3 + 1)))
+        )
         block = _rectangle_mask(generator, h, w, block_area, center=False)
         before = int(mask.sum().item())
         mask = torch.maximum(mask, block)
@@ -120,7 +136,9 @@ def _random_blocks_mask(generator: torch.Generator, h: int, w: int, target: int)
     return mask
 
 
-def _adjust_area(generator: torch.Generator, mask: torch.Tensor, *, min_area: float, max_area: float) -> torch.Tensor:
+def _adjust_area(
+    generator: torch.Generator, mask: torch.Tensor, *, min_area: float, max_area: float
+) -> torch.Tensor:
     total = int(mask.numel())
     lo = max(1, int(round(total * float(min_area))))
     hi = max(lo, int(round(total * float(max_area))))
@@ -160,7 +178,6 @@ def generate_inpaint_mask(
     device: torch.device | str | None = None,
 ) -> torch.Tensor:
     """Generate a reproducible inpainting mask with shape [1,H,W]."""
-
     cfg = config or InpaintMaskConfig()
     if len(latent_shape) == 3:
         _, h, w = latent_shape

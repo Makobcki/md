@@ -13,4 +13,3 @@ def test_patchify_unpatchify_roundtrip() -> None:
     y = unpatchify(tokens, channels=4, height=8, width=8, patch_size=2)
     assert tokens.shape == (2, 16, 16)
     assert torch.equal(x, y)
-

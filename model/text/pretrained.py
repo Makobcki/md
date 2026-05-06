@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import torch
 from torch import nn
@@ -69,8 +70,8 @@ def _from_pretrained_with_local_fallback(factory: Any, model_name: str, **kwargs
     except (OSError, RuntimeError) as exc:
         try:
             return factory.from_pretrained(model_name, local_files_only=True, **kwargs)
-        except Exception:
-            raise exc
+        except Exception as local_exc:
+            raise exc from local_exc
 
 
 def _resolve_cached_model_path(model_name: str) -> str:
@@ -102,11 +103,20 @@ class FrozenTextEncoderBundle(nn.Module):
     ) -> None:
         super().__init__()
         text_cfg = cfg.get("text", cfg) if isinstance(cfg, dict) else {}
-        self.backend = str(backend or text_cfg.get("backend", text_cfg.get("fake_or_cached", "real"))).lower()
+        self.backend = str(
+            backend or text_cfg.get("backend", text_cfg.get("fake_or_cached", "real"))
+        ).lower()
         if self.backend in {"true", "1"}:
             self.backend = "fake"
-        self.text_dim = int(text_cfg.get("text_dim", cfg.get("text_dim", 1024) if isinstance(cfg, dict) else 1024))
-        self.pooled_dim = int(text_cfg.get("pooled_dim", cfg.get("pooled_dim", self.text_dim) if isinstance(cfg, dict) else self.text_dim))
+        self.text_dim = int(
+            text_cfg.get("text_dim", cfg.get("text_dim", 1024) if isinstance(cfg, dict) else 1024)
+        )
+        self.pooled_dim = int(
+            text_cfg.get(
+                "pooled_dim",
+                cfg.get("pooled_dim", self.text_dim) if isinstance(cfg, dict) else self.text_dim,
+            )
+        )
         self._device = torch.device(device or "cpu")
         self._dtype = dtype
 
@@ -122,16 +132,24 @@ class FrozenTextEncoderBundle(nn.Module):
                     cache=True,
                 )
                 for item in raw_specs
-            ] or [FrozenTextEncoderSpec("fake", "fake", fake_max_length, trainable=False, cache=True)]
+            ] or [
+                FrozenTextEncoderSpec("fake", "fake", fake_max_length, trainable=False, cache=True)
+            ]
             # A buffer gives the module a reliable device/dtype anchor without parameters.
-            self.register_buffer("_fake_anchor", torch.empty((), device=self._device, dtype=self._dtype), persistent=False)
+            self.register_buffer(
+                "_fake_anchor",
+                torch.empty((), device=self._device, dtype=self._dtype),
+                persistent=False,
+            )
             return
 
         self.backend = "real"
         try:
             from transformers import AutoModel, AutoTokenizer, CLIPTextModel, T5EncoderModel
         except ImportError as exc:
-            raise RuntimeError("FrozenTextEncoderBundle requires transformers to be installed, or text.backend='fake'.") from exc
+            raise RuntimeError(
+                "FrozenTextEncoderBundle requires transformers to be installed, or text.backend='fake'."
+            ) from exc
 
         specs = [
             FrozenTextEncoderSpec(
@@ -144,13 +162,17 @@ class FrozenTextEncoderBundle(nn.Module):
             for item in raw_specs
         ]
         if not specs:
-            raise ValueError("At least one text encoder spec is required for the real text backend.")
+            raise ValueError(
+                "At least one text encoder spec is required for the real text backend."
+            )
         self.specs = specs
         self.tokenizers = {}
         self.encoders = nn.ModuleDict()
         for spec in specs:
             model_path = _resolve_cached_model_path(spec.model_name)
-            self.tokenizers[spec.name] = _from_pretrained_with_local_fallback(AutoTokenizer, model_path)
+            self.tokenizers[spec.name] = _from_pretrained_with_local_fallback(
+                AutoTokenizer, model_path
+            )
             model_key = f"{spec.name} {spec.model_name}".lower()
             if spec.name.startswith("clip"):
                 model_cls = CLIPTextModel
@@ -172,7 +194,7 @@ class FrozenTextEncoderBundle(nn.Module):
         *,
         device: torch.device | str | None = None,
         dtype: torch.dtype = torch.bfloat16,
-    ) -> "FrozenTextEncoderBundle":
+    ) -> FrozenTextEncoderBundle:
         return cls(cfg, device=device, dtype=dtype)
 
     @property
@@ -189,7 +211,9 @@ class FrozenTextEncoderBundle(nn.Module):
         except StopIteration:
             return self._fake_anchor.dtype if hasattr(self, "_fake_anchor") else self._dtype
 
-    def _fake_token_values(self, prompt: str, length: int, dim: int, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    def _fake_token_values(
+        self, prompt: str, length: int, dim: int, *, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
         if length <= 0:
             return torch.empty(0, dim, device=device, dtype=dtype)
         digest = hashlib.sha256(prompt.encode("utf-8")).digest()
@@ -231,9 +255,15 @@ class FrozenTextEncoderBundle(nn.Module):
             pooled = (chunk * chunk_mask.unsqueeze(-1).to(dtype)).sum(dim=1) / denom
             pooled_chunks.append(_fit_dim(pooled, self.pooled_dim))
             offset += n
-        pooled = torch.stack(pooled_chunks, dim=0).mean(dim=0) if pooled_chunks else torch.zeros(b, self.pooled_dim, device=device, dtype=dtype)
+        pooled = (
+            torch.stack(pooled_chunks, dim=0).mean(dim=0)
+            if pooled_chunks
+            else torch.zeros(b, self.pooled_dim, device=device, dtype=dtype)
+        )
         is_uncond = torch.tensor([not p.strip() for p in prompts], device=device, dtype=torch.bool)
-        return TextConditioning(tokens=tokens, mask=mask, pooled=pooled, is_uncond=is_uncond, token_types=token_types)
+        return TextConditioning(
+            tokens=tokens, mask=mask, pooled=pooled, is_uncond=is_uncond, token_types=token_types
+        )
 
     @torch.no_grad()
     def forward(self, prompts: str | Iterable[str]) -> TextConditioning:
@@ -258,22 +288,30 @@ class FrozenTextEncoderBundle(nn.Module):
             )
             encoded = {k: v.to(device) for k, v in encoded.items()}
             out = self.encoders[spec.name](**encoded)
-            hidden = getattr(out, "last_hidden_state")
+            hidden = out.last_hidden_state
             pooled = getattr(out, "pooler_output", None)
             if pooled is None:
-                attn = encoded.get("attention_mask", torch.ones(hidden.shape[:2], device=device)).to(hidden.dtype)
-                pooled = (hidden * attn.unsqueeze(-1)).sum(dim=1) / attn.sum(dim=1, keepdim=True).clamp_min(1.0)
+                attn = encoded.get(
+                    "attention_mask", torch.ones(hidden.shape[:2], device=device)
+                ).to(hidden.dtype)
+                pooled = (hidden * attn.unsqueeze(-1)).sum(dim=1) / attn.sum(
+                    dim=1, keepdim=True
+                ).clamp_min(1.0)
             token_chunks.append(_fit_dim(hidden.to(dtype), self.text_dim))
             mask_chunk = encoded["attention_mask"].to(torch.bool)
             mask_chunks.append(mask_chunk)
-            token_type_chunks.append(torch.full_like(mask_chunk, int(_encoder_type_id(spec.name)), dtype=torch.long))
+            token_type_chunks.append(
+                torch.full_like(mask_chunk, int(_encoder_type_id(spec.name)), dtype=torch.long)
+            )
             pooled_chunks.append(_fit_dim(pooled.to(dtype), self.pooled_dim))
         tokens = torch.cat(token_chunks, dim=1)
         mask = torch.cat(mask_chunks, dim=1)
         token_types = torch.cat(token_type_chunks, dim=1)
         pooled = torch.stack(pooled_chunks, dim=0).mean(dim=0)
         is_uncond = torch.tensor([not p.strip() for p in prompts], device=device, dtype=torch.bool)
-        return TextConditioning(tokens=tokens, mask=mask, pooled=pooled, is_uncond=is_uncond, token_types=token_types)
+        return TextConditioning(
+            tokens=tokens, mask=mask, pooled=pooled, is_uncond=is_uncond, token_types=token_types
+        )
 
     def metadata(self) -> dict[str, Any]:
         return {

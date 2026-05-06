@@ -1,4 +1,10 @@
-from .flow_matching import Objective, RectifiedFlowObjective, TrainingTuple, rectified_flow_loss, sample_timestep
+from .flow_matching import (
+    Objective,
+    RectifiedFlowObjective,
+    TrainingTuple,
+    rectified_flow_loss,
+    sample_timestep,
+)
 
 __all__ = [
     "Objective",
@@ -7,4 +13,3 @@ __all__ = [
     "rectified_flow_loss",
     "sample_timestep",
 ]
-

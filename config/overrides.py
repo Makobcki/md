@@ -7,7 +7,6 @@ from typing import Any
 
 def parse_override_value(raw: str) -> Any:
     """Parse a CLI ``--set`` value into a Python scalar/list/dict."""
-
     text = raw.strip()
     lowered = text.lower()
     if lowered in {"true", "false"}:
@@ -29,7 +28,6 @@ def parse_override_value(raw: str) -> Any:
 
 def set_nested(data: dict[str, Any], path: str, value: Any) -> None:
     """Set a dotted path in a nested mapping."""
-
     keys = [part for part in path.split(".") if part]
     if not keys:
         raise ValueError("Override path must not be empty.")
@@ -51,7 +49,6 @@ def set_nested(data: dict[str, Any], path: str, value: Any) -> None:
 
 def parse_set_overrides(values: list[str] | tuple[str, ...] | None) -> dict[str, Any]:
     """Parse repeated ``--set section.key=value`` CLI values."""
-
     overrides: dict[str, Any] = {}
     for item in values or []:
         if "=" not in item:

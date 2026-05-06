@@ -55,7 +55,9 @@ def _tiny_cfg() -> dict:
 def _write_tiny_checkpoint(path: Path) -> None:
     cfg = _tiny_cfg()
     model = MMDiTFlowModel(MMDiTConfig.from_dict(cfg))
-    ckpt = build_mmdit_checkpoint(model=model, ema=None, optimizer=None, scheduler=None, step=9, cfg_dict=cfg)
+    ckpt = build_mmdit_checkpoint(
+        model=model, ema=None, optimizer=None, scheduler=None, step=9, cfg_dict=cfg
+    )
     save_ckpt(str(path), ckpt)
 
 
@@ -220,7 +222,9 @@ class _ConstantFlow(torch.nn.Module):
 
 
 def _cond() -> TextConditioning:
-    return TextConditioning(torch.zeros(1, 1, 4), torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 4))
+    return TextConditioning(
+        torch.zeros(1, 1, 4), torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 4)
+    )
 
 
 def test_img2img_sampler_strength_zero_starts_and_ends_at_source_for_zero_velocity() -> None:
@@ -242,7 +246,15 @@ def test_img2img_sampler_strength_one_matches_txt2img_when_model_ignores_source(
     model = _ConstantFlow(0.25)
     noise = torch.randn(1, 4, 4, 4)
     source = torch.randn(1, 4, 4, 4)
-    txt = sample_flow_euler(model, tuple(noise.shape), _cond(), steps=4, noise=noise.clone(), start_t=1.0, task="txt2img")
+    txt = sample_flow_euler(
+        model,
+        tuple(noise.shape),
+        _cond(),
+        steps=4,
+        noise=noise.clone(),
+        start_t=1.0,
+        task="txt2img",
+    )
     img = sample_flow_euler(
         model,
         tuple(noise.shape),
@@ -272,6 +284,7 @@ def test_inpaint_sampler_changes_masked_region_and_preserves_unmasked_region() -
     )
     assert torch.equal(out * (1.0 - mask), source * (1.0 - mask))
     assert not torch.equal(out * mask, source * mask)
+
 
 def test_sample_cli_control_with_fake_vae_writes_output_and_control_metadata(
     tmp_path: Path,

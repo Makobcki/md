@@ -23,7 +23,6 @@ TARGET_REGISTRY: dict[str, TargetSpec] = {
 
 def validate_target_name(target: str) -> str:
     """Validate and normalize a target name."""
-
     normalized = str(target).strip()
     if normalized not in TARGET_REGISTRY:
         allowed = ", ".join(sorted(TARGET_REGISTRY))
@@ -33,13 +32,11 @@ def validate_target_name(target: str) -> str:
 
 def target_default_path(target: str) -> str:
     """Return registered default config path for a target."""
-
     return TARGET_REGISTRY[validate_target_name(target)].default_path
 
 
 def target_registry_snapshot() -> dict[str, dict[str, Any]]:
     """Return a serializable copy of the target registry."""
-
     return {
         name: {"name": spec.name, "default_path": spec.default_path}
         for name, spec in TARGET_REGISTRY.items()

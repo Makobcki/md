@@ -26,7 +26,9 @@ def _tiny_model() -> MMDiTFlowModel:
     )
 
 
-def _text(batch: int = 1, *, token_value: float = 0.0, pooled_value: float = 0.0) -> TextConditioning:
+def _text(
+    batch: int = 1, *, token_value: float = 0.0, pooled_value: float = 0.0
+) -> TextConditioning:
     tokens = torch.full((batch, 4, 16), float(token_value))
     pooled = torch.full((batch, 16), float(pooled_value))
     mask = torch.ones(batch, 4, dtype=torch.bool)
@@ -36,8 +38,12 @@ def _text(batch: int = 1, *, token_value: float = 0.0, pooled_value: float = 0.0
 def test_different_text_conditioning_changes_mmdit_text_projection() -> None:
     model = _tiny_model()
 
-    proj_a = model._project_text_tokens(_text(token_value=0.0, pooled_value=0.0), device=torch.device("cpu"), dtype=torch.float32)
-    proj_b = model._project_text_tokens(_text(token_value=1.0, pooled_value=1.0), device=torch.device("cpu"), dtype=torch.float32)
+    proj_a = model._project_text_tokens(
+        _text(token_value=0.0, pooled_value=0.0), device=torch.device("cpu"), dtype=torch.float32
+    )
+    proj_b = model._project_text_tokens(
+        _text(token_value=1.0, pooled_value=1.0), device=torch.device("cpu"), dtype=torch.float32
+    )
 
     assert proj_a.shape == (1, 4, 32)
     assert proj_b.shape == (1, 4, 32)
@@ -91,7 +97,9 @@ def test_control_strength_zero_masks_control_stream() -> None:
         control_strength=torch.tensor([0.0, 1.0]),
         task=["control", "control"],
     )
-    control_tokens = (x.shape[-2] // model.cfg.control_patch_size) * (x.shape[-1] // model.cfg.control_patch_size)
+    control_tokens = (x.shape[-2] // model.cfg.control_patch_size) * (
+        x.shape[-1] // model.cfg.control_patch_size
+    )
     assert not img_mask[0, :control_tokens].any()
     assert img_mask[1, :control_tokens].all()
 

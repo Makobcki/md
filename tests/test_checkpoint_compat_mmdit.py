@@ -14,7 +14,9 @@ def test_mmdit_checkpoint_compatibility_detects_mismatch() -> None:
     ckpt = {"architecture": "mmdit_rf", "cfg": {"hidden_dim": 64, "depth": 2}}
     validate_mmdit_checkpoint_compatibility(ckpt, {"architecture": "mmdit_rf", "hidden_dim": 64})
     with pytest.raises(RuntimeError):
-        validate_mmdit_checkpoint_compatibility(ckpt, {"architecture": "mmdit_rf", "hidden_dim": 128})
+        validate_mmdit_checkpoint_compatibility(
+            ckpt, {"architecture": "mmdit_rf", "hidden_dim": 128}
+        )
 
 
 def test_mmdit_checkpoint_uses_human_step(tmp_path) -> None:

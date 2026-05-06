@@ -4,7 +4,6 @@ import sys
 from functools import wraps
 from typing import Any
 
-
 _CUDA_INCLUDE = '#include "cuda.h"'
 _PYTHON_INCLUDE = "#include <Python.h>"
 _PY_SSIZE_DEFINE = "#define PY_SSIZE_T_CLEAN"

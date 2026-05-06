@@ -145,7 +145,9 @@ def test_create_distributed_context_none_is_noop() -> None:
 
 
 def test_distributed_context_uses_fake_accelerator_rank_state() -> None:
-    ctx = DistributedContext(backend="accelerate", accelerator=_FakeNonMainAccelerator(), device=torch.device("cpu"))
+    ctx = DistributedContext(
+        backend="accelerate", accelerator=_FakeNonMainAccelerator(), device=torch.device("cpu")
+    )
     assert ctx.is_main_process is False
     assert ctx.rank == 1
     assert ctx.world_size == 2
@@ -158,7 +160,9 @@ def test_training_loop_rank_gates_checkpoint_and_event_writes(tmp_path: Path) ->
     model = _tiny_model()
     batch = _tiny_batch()
     checkpoint_dir = tmp_path / "checkpoints"
-    dist = DistributedContext(backend="accelerate", accelerator=_FakeNonMainAccelerator(), device=torch.device("cpu"))
+    dist = DistributedContext(
+        backend="accelerate", accelerator=_FakeNonMainAccelerator(), device=torch.device("cpu")
+    )
 
     run_mmdit_training_loop(
         cfg=cfg,
@@ -189,7 +193,9 @@ def test_training_loop_main_rank_still_writes_outputs(tmp_path: Path) -> None:
     model = _tiny_model()
     batch = _tiny_batch()
     checkpoint_dir = tmp_path / "checkpoints"
-    dist = DistributedContext(backend="accelerate", accelerator=_FakeMainAccelerator(), device=torch.device("cpu"))
+    dist = DistributedContext(
+        backend="accelerate", accelerator=_FakeMainAccelerator(), device=torch.device("cpu")
+    )
 
     run_mmdit_training_loop(
         cfg=cfg,

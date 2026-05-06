@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
 import torch
+
 from diffusion.io.ckpt import _torch_load
 
 
@@ -12,10 +14,11 @@ def strip_prefix(sd: dict, prefix: str) -> dict:
     out = {}
     for k, v in sd.items():
         if k.startswith(prefix):
-            out[k[len(prefix):]] = v
+            out[k[len(prefix) :]] = v
         else:
             out[k] = v
     return out
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()

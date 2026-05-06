@@ -33,7 +33,7 @@ class SampleConfig:
     raw: dict[str, Any]
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SampleConfig":
+    def from_dict(cls, data: dict[str, Any]) -> SampleConfig:
         model = _section(data, "model")
         sampling = _section(data, "sampling")
         sampler = _section(data, "sampler")
@@ -56,9 +56,9 @@ class SampleConfig:
             sampling.get("sampler", data.get("sampler", "flow_heun")),
         )
         seed_value = sampling.get("seed", data.get("seed", 42))
-        shift_value = sampling.get("shift", data.get("shift", None))
-        width_value = image.get("width", data.get("width", None))
-        height_value = image.get("height", data.get("height", None))
+        shift_value = sampling.get("shift", data.get("shift"))
+        width_value = image.get("width", data.get("width"))
+        height_value = image.get("height", data.get("height"))
 
         options = SampleOptions(
             ckpt=checkpoint,
@@ -108,7 +108,7 @@ class WebUIConfig:
     raw: dict[str, Any]
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "WebUIConfig":
+    def from_dict(cls, data: dict[str, Any]) -> WebUIConfig:
         webui = _section(data, "webui")
         return cls(
             target=str(data.get("target", "webui")),
@@ -129,7 +129,7 @@ class EvalConfig:
     raw: dict[str, Any]
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "EvalConfig":
+    def from_dict(cls, data: dict[str, Any]) -> EvalConfig:
         return cls(
             target=str(data.get("target", "eval")),
             version=int(data.get("version", 1)),
@@ -146,7 +146,7 @@ class CacheConfig:
     raw: dict[str, Any]
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CacheConfig":
+    def from_dict(cls, data: dict[str, Any]) -> CacheConfig:
         return cls(
             target=str(data.get("target", "cache")),
             version=int(data.get("version", 1)),

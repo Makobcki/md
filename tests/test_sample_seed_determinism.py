@@ -27,9 +27,15 @@ def test_latent_sampling_seed_determinism_without_vae() -> None:
         pooled=torch.zeros(1, 4),
     )
 
-    out1 = sample_flow_euler(model, shape, text, steps=3, cfg_scale=1.0, generator=torch.Generator().manual_seed(42))
-    out2 = sample_flow_euler(model, shape, text, steps=3, cfg_scale=1.0, generator=torch.Generator().manual_seed(42))
-    out3 = sample_flow_euler(model, shape, text, steps=3, cfg_scale=1.0, generator=torch.Generator().manual_seed(43))
+    out1 = sample_flow_euler(
+        model, shape, text, steps=3, cfg_scale=1.0, generator=torch.Generator().manual_seed(42)
+    )
+    out2 = sample_flow_euler(
+        model, shape, text, steps=3, cfg_scale=1.0, generator=torch.Generator().manual_seed(42)
+    )
+    out3 = sample_flow_euler(
+        model, shape, text, steps=3, cfg_scale=1.0, generator=torch.Generator().manual_seed(43)
+    )
 
     assert torch.equal(out1, out2)
     assert not torch.equal(out1, out3)

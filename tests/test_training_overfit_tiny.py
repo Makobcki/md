@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 
 torch = pytest.importorskip("torch")
-try:
+with contextlib.suppress(RuntimeError):
     torch.set_num_threads(1)
-except RuntimeError:
-    pass
 
 
 from diffusion.objectives import RectifiedFlowObjective

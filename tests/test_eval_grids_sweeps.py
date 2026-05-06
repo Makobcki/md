@@ -52,7 +52,9 @@ def _write_ckpt(path: Path) -> None:
     torch.manual_seed(1)
     model = MMDiTFlowModel(MMDiTConfig.from_dict(cfg))
     ema = EMA(model)
-    ckpt = build_mmdit_checkpoint(model=model, ema=ema, optimizer=None, scheduler=None, step=7, cfg_dict=cfg)
+    ckpt = build_mmdit_checkpoint(
+        model=model, ema=ema, optimizer=None, scheduler=None, step=7, cfg_dict=cfg
+    )
     save_ckpt(str(path), ckpt)
 
 
@@ -87,9 +89,17 @@ def test_fixed_seed_eval_grid_writes_metadata_events_and_is_reproducible(tmp_pat
     grid1 = out1 / "eval" / "step_000007" / "core_grid.png"
     assert grid1.exists()
     assert (out1 / "eval" / "step_000007" / "style_grid.png").exists()
-    metadata = json.loads((out1 / "eval" / "step_000007" / "metadata.json").read_text(encoding="utf-8"))
+    metadata = json.loads(
+        (out1 / "eval" / "step_000007" / "metadata.json").read_text(encoding="utf-8")
+    )
     assert metadata["checkpoint_step"] == 7
-    assert metadata["base"] == {"sampler": "flow_heun", "steps": 2, "cfg": 1.5, "seed": 123, "shift": 1.0}
+    assert metadata["base"] == {
+        "sampler": "flow_heun",
+        "steps": 2,
+        "cfg": 1.5,
+        "seed": 123,
+        "shift": 1.0,
+    }
     assert metadata["prompt_sets"] == ["core", "style"]
     assert result1.events
     assert result1.events[0]["type"] == "sample"
@@ -153,7 +163,10 @@ def test_eval_cfg_step_and_sampler_sweeps_write_per_variant_metadata(tmp_path: P
     assert metadata["sweep"]["steps"] == [1, 2]
     assert metadata["sweep"]["samplers"] == ["flow_euler", "flow_heun"]
     assert len(result.events) == 8
-    events = [json.loads(line) for line in (step_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    events = [
+        json.loads(line)
+        for line in (step_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     assert len(events) == 8
     assert all(event["type"] == "sample" for event in events)
 
@@ -186,8 +199,12 @@ def test_eval_shift_sweep_writes_shift_metadata_and_events(tmp_path: Path) -> No
     step_dir = tmp_path / "run" / "eval" / "step_000007"
     assert (step_dir / "base" / "metadata.json").exists()
     assert (step_dir / "shift_2_00" / "metadata.json").exists()
-    events = [json.loads(line) for line in (step_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    events = [
+        json.loads(line)
+        for line in (step_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
     assert {event["shift"] for event in events} == {1.0, 2.0}
+
 
 def test_eval_resolution_writes_separate_resolution_directory_and_metadata(tmp_path: Path) -> None:
     ckpt = tmp_path / "tiny.pt"

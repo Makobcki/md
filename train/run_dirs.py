@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -26,7 +25,9 @@ def _safe_name(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value).strip("_")
 
 
-def make_train_run_dir(base_dir: str | Path, *, run_name: str = "", now: float | None = None) -> Path:
+def make_train_run_dir(
+    base_dir: str | Path, *, run_name: str = "", now: float | None = None
+) -> Path:
     base = Path(base_dir)
     stamp = time.strftime("%Y-%m-%d_%H%M%S", time.localtime(now or time.time()))
     suffix = _safe_name(run_name)
@@ -67,10 +68,13 @@ def prepare_train_run_structure(
     # Compatibility aliases for older UI/readers; kept explicit in config_manifest.yaml.
     _write_yaml(run_dir / "config_resolved.yaml", cfg_dict)
     _write_yaml(run_dir / "config_snapshot.yaml", cfg_dict)
-    _write_yaml(run_dir / "config_manifest.yaml", {
-        "canonical": "config.yaml",
-        "aliases": ["config_resolved.yaml", "config_snapshot.yaml"],
-    })
+    _write_yaml(
+        run_dir / "config_manifest.yaml",
+        {
+            "canonical": "config.yaml",
+            "aliases": ["config_resolved.yaml", "config_snapshot.yaml"],
+        },
+    )
     cache_manifest_path = run_dir / "cache_manifest.json"
     if cache_manifest_source is not None and Path(cache_manifest_source).exists():
         cache_manifest_path.parent.mkdir(parents=True, exist_ok=True)

@@ -32,7 +32,9 @@ def test_train_config_accepts_main_yaml() -> None:
 
 
 def test_train_config_accepts_dev_yaml() -> None:
-    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_dev.yaml"))
+    cfg = TrainConfig.from_yaml(
+        str(Path(__file__).resolve().parents[1] / "config" / "train_dev.yaml")
+    )
 
     assert cfg.architecture == "mmdit_rf"
     assert cfg.objective == "rectified_flow"
@@ -43,7 +45,9 @@ def test_train_config_accepts_dev_yaml() -> None:
 
 
 def test_train_config_accepts_mmdit_smoke_yaml() -> None:
-    cfg = TrainConfig.from_yaml(str(Path(__file__).resolve().parents[1] / "config" / "train_smoke.yaml"))
+    cfg = TrainConfig.from_yaml(
+        str(Path(__file__).resolve().parents[1] / "config" / "train_smoke.yaml")
+    )
 
     assert cfg.architecture == "mmdit_rf"
     assert cfg.hidden_dim == 64

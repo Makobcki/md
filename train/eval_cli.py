@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from config.loader import load_eval_config, parse_cli_overrides
 from train.eval import DEFAULT_EVAL_PROMPT_SETS, load_eval_prompt_bank
-from train.eval_grid import DEFAULT_CFG_SWEEP, DEFAULT_SAMPLER_SWEEP, DEFAULT_SHIFT_SWEEP, DEFAULT_STEP_SWEEP, run_fixed_seed_eval_grids
+from train.eval_grid import (
+    DEFAULT_CFG_SWEEP,
+    DEFAULT_SAMPLER_SWEEP,
+    DEFAULT_SHIFT_SWEEP,
+    DEFAULT_STEP_SWEEP,
+    run_fixed_seed_eval_grids,
+)
 
 
 def _parse_float_list(items: list[str] | None, default: tuple[float, ...]) -> list[float] | None:
@@ -65,7 +71,7 @@ def build_prompt_bank_metadata(
     bank = load_eval_prompt_bank(selected, root=prompt_root, count_per_set=count_per_set)
     return {
         "version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "prompt_root": str(prompt_root),
         "prompt_sets": [
             {"name": name, "count": len(prompts), "prompts": prompts}
@@ -75,17 +81,28 @@ def build_prompt_bank_metadata(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Read eval prompt banks or run fixed-seed MMDiT eval grids.")
+    ap = argparse.ArgumentParser(
+        description="Read eval prompt banks or run fixed-seed MMDiT eval grids."
+    )
     ap.add_argument("--config", default="", help="Config path. Defaults to configs/eval.kdl.")
     ap.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
-    ap.add_argument("--print-config", action="store_true", help="Print resolved eval config and exit.")
+    ap.add_argument(
+        "--print-config", action="store_true", help="Print resolved eval config and exit."
+    )
     ap.add_argument("--prompt-root", default="data/eval_prompts")
-    ap.add_argument("--prompt-set", action="append", default=None, help="Prompt set name without .txt. Can be repeated.")
+    ap.add_argument(
+        "--prompt-set",
+        action="append",
+        default=None,
+        help="Prompt set name without .txt. Can be repeated.",
+    )
     ap.add_argument("--count-per-set", type=int, default=None)
     ap.add_argument("--metadata-out", default="")
     ap.add_argument("--print", action="store_true", dest="print_json")
 
-    ap.add_argument("--ckpt", default="", help="Checkpoint path. When provided, eval grids are generated.")
+    ap.add_argument(
+        "--ckpt", default="", help="Checkpoint path. When provided, eval grids are generated."
+    )
     ap.add_argument("--out-dir", default="runs/eval")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--sampler", choices=("flow_euler", "flow_heun"), default="flow_heun")
@@ -109,26 +126,35 @@ def main() -> None:
         args.config or None,
         overrides=parse_cli_overrides(args.set_values),
     )
-    eval_section = resolved.raw.get("eval", {}) if isinstance(resolved.raw.get("eval", {}), dict) else {}
-    model_section = resolved.raw.get("model", {}) if isinstance(resolved.raw.get("model", {}), dict) else {}
-    sampler_section = resolved.raw.get("sampler", {}) if isinstance(resolved.raw.get("sampler", {}), dict) else {}
+    eval_section = (
+        resolved.raw.get("eval", {}) if isinstance(resolved.raw.get("eval", {}), dict) else {}
+    )
+    model_section = (
+        resolved.raw.get("model", {}) if isinstance(resolved.raw.get("model", {}), dict) else {}
+    )
+    sampler_section = (
+        resolved.raw.get("sampler", {}) if isinstance(resolved.raw.get("sampler", {}), dict) else {}
+    )
     if args.print_config:
         print(json.dumps(resolved.raw, indent=2, ensure_ascii=False), flush=True)
         return
-    if not args.config and not args.set_values:
+    has_explicit_config = bool(args.config or args.set_values)
+    if not has_explicit_config:
         # Preserve the historical md-eval behavior: without an explicit
         # checkpoint it prints prompt-bank metadata instead of launching a grid.
         pass
     else:
         args.ckpt = args.ckpt or str(model_section.get("checkpoint", "") or "")
-    args.prompt_root = str(eval_section.get("prompt_root", args.prompt_root))
-    args.out_dir = str(eval_section.get("out_dir", args.out_dir))
-    args.seed = int(eval_section.get("seed", args.seed))
-    args.sampler = str(sampler_section.get("name", eval_section.get("sampler", args.sampler)))
-    args.sampler = {"rf_euler": "flow_euler", "rf_heun": "flow_heun"}.get(args.sampler, args.sampler)
-    args.steps = int(eval_section.get("steps", args.steps))
-    args.cfg = float(eval_section.get("cfg", args.cfg))
-    args.n_per_prompt = int(eval_section.get("n_per_prompt", args.n_per_prompt))
+        args.prompt_root = str(eval_section.get("prompt_root", args.prompt_root))
+        args.out_dir = str(eval_section.get("out_dir", args.out_dir))
+        args.seed = int(eval_section.get("seed", args.seed))
+        args.sampler = str(sampler_section.get("name", eval_section.get("sampler", args.sampler)))
+        args.sampler = {"rf_euler": "flow_euler", "rf_heun": "flow_heun"}.get(
+            args.sampler, args.sampler
+        )
+        args.steps = int(eval_section.get("steps", args.steps))
+        args.cfg = float(eval_section.get("cfg", args.cfg))
+        args.n_per_prompt = int(eval_section.get("n_per_prompt", args.n_per_prompt))
 
     if args.ckpt:
         result = run_fixed_seed_eval_grids(
@@ -156,7 +182,9 @@ def main() -> None:
         if args.metadata_out:
             out = Path(args.metadata_out)
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps(result.metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            out.write_text(
+                json.dumps(result.metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
         if args.print_json:
             print(json.dumps(result.metadata, indent=2, ensure_ascii=False))
         return

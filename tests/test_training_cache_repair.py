@@ -9,14 +9,13 @@ import pytest
 pytest.importorskip("torch")
 yaml = pytest.importorskip("yaml")
 
+import torch
 from PIL import Image
 
 from config.train import TrainConfig
 from model.text.cache import TextCache
 from scripts.prepare_text_cache import prepare_text_cache
 from scripts.prepare_training_cache import main as prepare_training_cache_main
-
-import torch
 
 
 def _make_dataset(root: Path, *, n: int = 3) -> None:
@@ -26,7 +25,9 @@ def _make_dataset(root: Path, *, n: int = 3) -> None:
         md5 = f"sample{idx}"
         Image.new("RGB", (512, 512), color=(idx, idx, idx)).save(root / "images" / f"{md5}.png")
         rows.append({"md5": md5, "file_name": f"images/{md5}.png", "caption": f"caption {idx}"})
-    (root / "metadata.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+    (root / "metadata.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+    )
 
 
 def _cfg(root: Path) -> TrainConfig:
@@ -104,7 +105,9 @@ def _run_prepare(monkeypatch: pytest.MonkeyPatch, cfg_path: Path, *extra: str) -
     prepare_training_cache_main()
 
 
-def test_repair_regenerates_missing_text_shard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_repair_regenerates_missing_text_shard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _make_dataset(tmp_path, n=3)
     cfg_path = _write_config(tmp_path)
     text_root = _prepare_text(tmp_path, shard_size=2)
@@ -118,7 +121,9 @@ def test_repair_regenerates_missing_text_shard(tmp_path: Path, monkeypatch: pyte
     assert (tmp_path / ".cache" / "training_cache_manifest.json").exists()
 
 
-def test_repair_rejects_broken_metadata_unless_force(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_repair_rejects_broken_metadata_unless_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _make_dataset(tmp_path, n=2)
     cfg_path = _write_config(tmp_path)
     text_root = _prepare_text(tmp_path, shard_size=2)
@@ -132,7 +137,9 @@ def test_repair_rejects_broken_metadata_unless_force(tmp_path: Path, monkeypatch
     assert metadata["text_dim"] == 6
 
 
-def test_repair_rejects_stale_dataset_hash_unless_rebuild(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_repair_rejects_stale_dataset_hash_unless_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _make_dataset(tmp_path, n=2)
     cfg_path = _write_config(tmp_path)
     text_root = _prepare_text(tmp_path, shard_size=2)

@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-from typing import Dict
-
 import torch
 import torch.nn as nn
 
+
 def unwrap_model(model: nn.Module) -> nn.Module:
     if hasattr(model, "_orig_mod"):
-        return getattr(model, "_orig_mod")
+        return model._orig_mod
     if hasattr(model, "module"):
-        return getattr(model, "module")
+        return model.module
     return model
+
 
 class EMA:
     def __init__(self, model: nn.Module, decay: float = 0.999) -> None:
         self.decay = float(decay)
-        self.shadow: Dict[str, torch.Tensor] = {}
-        self._swap_backup: Dict[str, torch.Tensor] | None = None
+        self.shadow: dict[str, torch.Tensor] = {}
+        self._swap_backup: dict[str, torch.Tensor] | None = None
 
         base = unwrap_model(model)
         for name, p in base.named_parameters():

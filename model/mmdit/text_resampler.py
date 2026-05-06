@@ -4,12 +4,22 @@ import torch
 from torch import nn
 
 from .attention import JointAttention
-from .norms import build_norm
 from .blocks import FeedForward
+from .norms import build_norm
 
 
 class TextResamplerLayer(nn.Module):
-    def __init__(self, hidden_dim: int, num_heads: int, mlp_ratio: float, dropout: float, attn_dropout: float, qk_norm: bool, rms_norm: bool, swiglu: bool) -> None:
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_heads: int,
+        mlp_ratio: float,
+        dropout: float,
+        attn_dropout: float,
+        qk_norm: bool,
+        rms_norm: bool,
+        swiglu: bool,
+    ) -> None:
         super().__init__()
         self.q_norm = build_norm(hidden_dim, rms_norm=rms_norm)
         self.kv_norm = build_norm(hidden_dim, rms_norm=rms_norm)
@@ -20,7 +30,9 @@ class TextResamplerLayer(nn.Module):
         self.ff_norm = build_norm(hidden_dim, rms_norm=rms_norm)
         self.ff = FeedForward(hidden_dim, mlp_ratio, dropout, swiglu)
 
-    def forward(self, queries: torch.Tensor, tokens: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    def forward(
+        self, queries: torch.Tensor, tokens: torch.Tensor, mask: torch.Tensor | None
+    ) -> torch.Tensor:
         q = self.q(self.q_norm(queries))
         k, v = self.kv(self.kv_norm(tokens)).chunk(2, dim=-1)
         queries = queries + self.out(self.attn(q, k, v, mask=mask))
@@ -58,14 +70,25 @@ class TextResampler(nn.Module):
         self.queries = nn.Parameter(torch.randn(1, self.num_tokens, hidden_dim) * 0.02)
         self.layers = nn.ModuleList(
             [
-                TextResamplerLayer(hidden_dim, num_heads, mlp_ratio, dropout, attn_dropout, qk_norm, rms_norm, swiglu)
+                TextResamplerLayer(
+                    hidden_dim,
+                    num_heads,
+                    mlp_ratio,
+                    dropout,
+                    attn_dropout,
+                    qk_norm,
+                    rms_norm,
+                    swiglu,
+                )
                 for _ in range(int(depth))
             ]
         )
         self.norm = build_norm(hidden_dim, rms_norm=rms_norm)
 
     def forward(self, tokens: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
-        q = self.queries.to(device=tokens.device, dtype=tokens.dtype).expand(tokens.shape[0], -1, -1)
+        q = self.queries.to(device=tokens.device, dtype=tokens.dtype).expand(
+            tokens.shape[0], -1, -1
+        )
         for layer in self.layers:
             q = layer(q, tokens, mask)
         return self.norm(q)

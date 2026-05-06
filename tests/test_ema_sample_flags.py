@@ -57,7 +57,9 @@ def _write_ckpt_with_zero_ema(path: Path) -> tuple[str, torch.Tensor, torch.Tens
     name, raw = next(iter(model.named_parameters()))
     for key in ema.shadow:
         ema.shadow[key] = torch.zeros_like(ema.shadow[key])
-    ckpt = build_mmdit_checkpoint(model=model, ema=ema, optimizer=None, scheduler=None, step=4, cfg_dict=cfg)
+    ckpt = build_mmdit_checkpoint(
+        model=model, ema=ema, optimizer=None, scheduler=None, step=4, cfg_dict=cfg
+    )
     save_ckpt(str(path), ckpt)
     return name, raw.detach().clone(), torch.zeros_like(raw.detach())
 

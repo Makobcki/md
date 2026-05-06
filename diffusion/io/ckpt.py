@@ -1,36 +1,37 @@
 from __future__ import annotations
 
 import json
-import pickle
-from pathlib import Path
-from typing import Any, Dict, Iterable
-
 import os
+import pickle
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
-
 
 _KNOWN_PREFIXES = ("_orig_mod.", "module.")
 CKPT_FORMAT_VERSION = 2
 
 
-def _torch_load(path: str | Path, map_location: torch.device | str, *, allow_unsafe: bool = False):
+def _torch_load(
+    path: str | Path, map_location: torch.device | str, *, allow_unsafe: bool = False
+) -> Any:
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
-    except TypeError:
+    except TypeError as exc:
         if not allow_unsafe:
             raise RuntimeError(
                 "This PyTorch version cannot safely load checkpoints with weights_only=True. "
                 "Upgrade PyTorch or set allow_unsafe_checkpoint_load=true only for trusted local checkpoints."
-            )
+            ) from exc
         return torch.load(path, map_location=map_location)
-    except (RuntimeError, pickle.UnpicklingError):
+    except (RuntimeError, pickle.UnpicklingError) as exc:
         if not allow_unsafe:
             raise RuntimeError(
                 "Checkpoint requires unsafe pickle loading. Refusing by default; set "
                 "allow_unsafe_checkpoint_load=true in config only for trusted legacy checkpoints."
-            )
+            ) from exc
         # Backward compatibility for legacy project checkpoints containing Python
         # objects unsupported by weights_only.
         return torch.load(path, map_location=map_location, weights_only=False)
@@ -54,7 +55,9 @@ def _write_checkpoint_metadata_sidecar(path: Path, obj: dict) -> None:
     }
     sidecar = _checkpoint_metadata_sidecar(path)
     tmp = sidecar.with_suffix(sidecar.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+    tmp.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8"
+    )
     _fsync_file(tmp)
     os.replace(tmp, sidecar)
     _fsync_dir(sidecar.parent)
@@ -66,7 +69,7 @@ def _strip_prefixes(key: str) -> str:
         changed = False
         for p in _KNOWN_PREFIXES:
             if key.startswith(p):
-                key = key[len(p):]
+                key = key[len(p) :]
                 changed = True
     return key
 
@@ -75,7 +78,7 @@ def sanitize_state_dict(sd: Any) -> Any:
     if not isinstance(sd, dict):
         return sd
 
-    out: Dict[str, Any] = {}
+    out: dict[str, Any] = {}
     for k, v in sd.items():
         nk = _strip_prefixes(str(k))
         if nk not in out or str(k) == nk:
@@ -94,8 +97,8 @@ def sanitize_ckpt(ck: Any) -> Any:
     return ck
 
 
-def _build_state_dict_mapping(sd: dict) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
+def _build_state_dict_mapping(sd: dict) -> dict[str, Any]:
+    out: dict[str, Any] = {}
     for k, v in sd.items():
         nk = _strip_prefixes(str(k))
         if nk not in out or str(k) == nk:
@@ -169,18 +172,30 @@ def resolve_resume_path(resume: str, out_dir: Path) -> str:
         return ""
     checkpoint_dir = out_dir / "checkpoints"
     if resume == "latest":
-        candidates = (checkpoint_dir / "latest.pt", out_dir / "latest.pt", out_dir / "ckpt_latest.pt")
+        candidates = (
+            checkpoint_dir / "latest.pt",
+            out_dir / "latest.pt",
+            out_dir / "ckpt_latest.pt",
+        )
         for path in candidates:
             if path.exists():
                 return str(path)
-        ckpts = sorted(checkpoint_dir.glob("step_*.pt")) or sorted(out_dir.glob("step_*.pt")) or sorted(out_dir.glob("ckpt_*.pt"))
+        ckpts = (
+            sorted(checkpoint_dir.glob("step_*.pt"))
+            or sorted(out_dir.glob("step_*.pt"))
+            or sorted(out_dir.glob("ckpt_*.pt"))
+        )
         ckpts = [p for p in ckpts if p.name not in {"ckpt_latest.pt", "ckpt_final.pt"}]
         if ckpts:
             return str(ckpts[-1])
         raise RuntimeError("No checkpoints found for resume=latest.")
     if resume.isdigit():
         step = int(resume)
-        candidates = (checkpoint_dir / f"step_{step:06d}.pt", out_dir / f"step_{step:06d}.pt", out_dir / f"ckpt_{step:07d}.pt")
+        candidates = (
+            checkpoint_dir / f"step_{step:06d}.pt",
+            out_dir / f"step_{step:06d}.pt",
+            out_dir / f"ckpt_{step:07d}.pt",
+        )
         for path in candidates:
             if path.exists():
                 return str(path)
@@ -188,13 +203,15 @@ def resolve_resume_path(resume: str, out_dir: Path) -> str:
     return resume
 
 
-def strip_state_dict_prefixes(sd: dict, prefixes: Iterable[str] = ("_orig_mod.", "module.")) -> dict:
+def strip_state_dict_prefixes(
+    sd: dict, prefixes: Iterable[str] = ("_orig_mod.", "module.")
+) -> dict:
     out = {}
     for k, v in sd.items():
         nk = k
         for p in prefixes:
             if nk.startswith(p):
-                nk = nk[len(p):]
+                nk = nk[len(p) :]
         out[nk] = v
     return out
 

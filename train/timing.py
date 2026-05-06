@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
+from types import TracebackType
 
 import torch
 
@@ -34,13 +34,13 @@ class _TimingBucket:
 
 
 class _TimingStats:
-    def __init__(self, *, use_cuda_events: bool, gpu_sections: Optional[set[str]] = None) -> None:
+    def __init__(self, *, use_cuda_events: bool, gpu_sections: set[str] | None = None) -> None:
         self.use_cuda_events = bool(use_cuda_events)
         self.gpu_sections = gpu_sections or set()
         self._cpu: dict[str, _TimingBucket] = {}
         self._gpu_events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event]]] = {}
 
-    def section(self, name: str):
+    def section(self, name: str) -> _SectionTimer:
         return _SectionTimer(self, name)
 
     def add_cpu(self, name: str, elapsed_sec: float) -> None:
@@ -74,11 +74,11 @@ class _SectionTimer:
         self.stats = stats
         self.name = name
         self.elapsed_sec: float = 0.0
-        self._start_cpu: Optional[float] = None
-        self._start_event: Optional[torch.cuda.Event] = None
-        self._end_event: Optional[torch.cuda.Event] = None
+        self._start_cpu: float | None = None
+        self._start_event: torch.cuda.Event | None = None
+        self._end_event: torch.cuda.Event | None = None
 
-    def __enter__(self) -> "_SectionTimer":
+    def __enter__(self) -> _SectionTimer:
         self._start_cpu = time.perf_counter()
         if self.stats.use_cuda_events and self.name in self.stats.gpu_sections:
             self._start_event = torch.cuda.Event(enable_timing=True)
@@ -86,7 +86,12 @@ class _SectionTimer:
             self._start_event.record()
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         if self._start_cpu is not None:
             self.elapsed_sec = time.perf_counter() - self._start_cpu
             self.stats.add_cpu(self.name, self.elapsed_sec)

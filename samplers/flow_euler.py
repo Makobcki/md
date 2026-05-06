@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
 from diffusion.schedules import flow_timesteps
 from model.text.conditioning import TextConditioning
+
 from .cfg import cfg_predict, preserve_inpaint_region
 
 
-def _infer_sampling_device(model, text_cond: TextConditioning, noise: torch.Tensor | None) -> torch.device:
+def _infer_sampling_device(
+    model: Any, text_cond: TextConditioning, noise: torch.Tensor | None
+) -> torch.device:
     if noise is not None:
         return noise.device
     try:
@@ -20,7 +24,7 @@ def _infer_sampling_device(model, text_cond: TextConditioning, noise: torch.Tens
 
 @torch.no_grad()
 def sample_flow_euler(
-    model,
+    model: Any,
     shape: tuple[int, int, int, int],
     text_cond: TextConditioning,
     *,
@@ -31,13 +35,21 @@ def sample_flow_euler(
     start_t: float = 1.0,
     noise: torch.Tensor | None = None,
     generator: torch.Generator | None = None,
-    progress_cb: Optional[Callable[[int, int], None]] = None,
-    **model_kwargs,
+    progress_cb: Callable[[int, int], None] | None = None,
+    **model_kwargs: Any,
 ) -> torch.Tensor:
     device = _infer_sampling_device(model, text_cond, noise)
-    x = torch.randn(shape, device=device, generator=generator) if noise is None else noise.to(device)
+    x = (
+        torch.randn(shape, device=device, generator=generator)
+        if noise is None
+        else noise.to(device)
+    )
     inpaint_reference_noise = None
-    if model_kwargs.get("task", "txt2img") == "inpaint" and model_kwargs.get("source_latent") is not None and model_kwargs.get("mask") is not None:
+    if (
+        model_kwargs.get("task", "txt2img") == "inpaint"
+        and model_kwargs.get("source_latent") is not None
+        and model_kwargs.get("mask") is not None
+    ):
         src = model_kwargs["source_latent"].to(device=device, dtype=x.dtype)
         start = float(start_t)
         if start > 0.0:

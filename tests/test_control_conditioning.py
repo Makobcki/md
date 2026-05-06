@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import torch
 
 from config.train import TrainConfig
 from model.text.conditioning import TextConditioning, TrainBatch
-from train.runner import _MMDiTCachedDataset, _collate_mmdit
+from train.runner import _collate_mmdit, _MMDiTCachedDataset
 
 
 class _LatentDataset(torch.utils.data.Dataset):
@@ -65,7 +63,12 @@ def test_control_collate_keeps_control_streams() -> None:
         pooled=torch.zeros(1, 8),
     )
     batch = [
-        TrainBatch(x0=torch.ones(4, 8, 8), text=text, control_latents=torch.ones(2, 4, 8, 8), task="control"),
+        TrainBatch(
+            x0=torch.ones(4, 8, 8),
+            text=text,
+            control_latents=torch.ones(2, 4, 8, 8),
+            task="control",
+        ),
         TrainBatch(x0=torch.ones(4, 8, 8), text=text, task="txt2img"),
     ]
 

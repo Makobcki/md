@@ -3,12 +3,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import torch
-import yaml
 from tqdm import tqdm
 
 from config.train import TrainConfig
@@ -27,7 +26,9 @@ def _dtype(name: str) -> torch.dtype:
     raise ValueError("dtype must be bf16, fp16, or fp32.")
 
 
-def _resolve_prepare_dtype(args_dtype: str | None, cfg_dtype: str, device: torch.device) -> torch.dtype:
+def _resolve_prepare_dtype(
+    args_dtype: str | None, cfg_dtype: str, device: torch.device
+) -> torch.dtype:
     if args_dtype == "auto":
         args_dtype = None
     if device.type == "cpu" and args_dtype is None:
@@ -123,7 +124,9 @@ def prepare_text_cache(
         )
     out_dir.mkdir(parents=True, exist_ok=True)
     preparing_manifest = {"version": 1, "status": "preparing"}
-    (out_dir / "manifest.json").write_text(json.dumps(preparing_manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (out_dir / "manifest.json").write_text(
+        json.dumps(preparing_manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     bundle = FrozenTextEncoderBundle(cfg.to_dict(), device=device, dtype=dtype)
     bundle_meta = bundle.metadata()
     metadata = {
@@ -145,7 +148,9 @@ def prepare_text_cache(
         ),
         "dtype": str(dtype).replace("torch.", ""),
     }
-    (out_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
     empty = bundle([""])
     _save_shard(
@@ -155,7 +160,11 @@ def prepare_text_cache(
             "mask": empty.mask.detach().cpu().to(torch.uint8),
             "pooled": empty.pooled.detach().cpu(),
             "is_uncond": torch.ones(1, dtype=torch.uint8),
-            **({"token_types": empty.token_types.detach().cpu().to(torch.long)} if empty.token_types is not None else {}),
+            **(
+                {"token_types": empty.token_types.detach().cpu().to(torch.long)}
+                if empty.token_types is not None
+                else {}
+            ),
         },
     )
 
@@ -170,7 +179,14 @@ def prepare_text_cache(
     shard_no = 0
 
     def flush() -> None:
-        nonlocal shard_no, shard_sample_ids, shard_tokens, shard_masks, shard_pooled, shard_uncond, shard_token_types
+        nonlocal \
+            shard_no, \
+            shard_sample_ids, \
+            shard_tokens, \
+            shard_masks, \
+            shard_pooled, \
+            shard_uncond, \
+            shard_token_types
         if not shard_tokens:
             return
         shard_name = f"text_{shard_no:05d}.safetensors"
@@ -191,7 +207,9 @@ def prepare_text_cache(
                 "tokens_shape": list(payload["tokens"].shape),
                 "mask_shape": list(payload["mask"].shape),
                 "pooled_shape": list(payload["pooled"].shape),
-                "token_types_shape": list(payload["token_types"].shape) if "token_types" in payload else None,
+                "token_types_shape": list(payload["token_types"].shape)
+                if "token_types" in payload
+                else None,
                 "dtype": str(payload["tokens"].dtype).replace("torch.", ""),
                 "encoders": metadata["encoders"],
                 "max_lengths": [int(e.get("max_length", 0)) for e in metadata["encoders"]],
@@ -228,17 +246,27 @@ def prepare_text_cache(
         shard_tokens.append(cond.tokens.detach().cpu())
         shard_masks.append(cond.mask.detach().cpu())
         shard_pooled.append(cond.pooled.detach().cpu())
-        shard_uncond.append((cond.is_uncond if cond.is_uncond is not None else torch.zeros(len(prompts), dtype=torch.bool, device=device)).detach().cpu())
+        shard_uncond.append(
+            (
+                cond.is_uncond
+                if cond.is_uncond is not None
+                else torch.zeros(len(prompts), dtype=torch.bool, device=device)
+            )
+            .detach()
+            .cpu()
+        )
         if cond.token_types is not None:
             shard_token_types.append(cond.token_types.detach().cpu())
         if sum(x.shape[0] for x in shard_tokens) >= shard_size:
             flush()
     flush()
-    (out_dir / "index.jsonl").write_text("\n".join(index_lines) + ("\n" if index_lines else ""), encoding="utf-8")
+    (out_dir / "index.jsonl").write_text(
+        "\n".join(index_lines) + ("\n" if index_lines else ""), encoding="utf-8"
+    )
     manifest = {
         "version": 1,
         "status": "complete",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "num_samples": len(entries),
         "dataset_hash": metadata["dataset_hash"],
         "caption_field": metadata["caption_field"],
@@ -254,18 +282,24 @@ def prepare_text_cache(
             "tokens_shape": list(empty.tokens.detach().cpu().shape),
             "mask_shape": list(empty.mask.detach().cpu().shape),
             "pooled_shape": list(empty.pooled.detach().cpu().shape),
-            "token_types_shape": list(empty.token_types.detach().cpu().shape) if empty.token_types is not None else None,
+            "token_types_shape": list(empty.token_types.detach().cpu().shape)
+            if empty.token_types is not None
+            else None,
         },
         "shards": shard_manifests,
     }
-    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (out_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     return manifest
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="", help="Config path. Defaults to configs/cache.kdl.")
-    parser.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument(
+        "--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE"
+    )
     parser.add_argument("--out", default="")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--shard-size", type=int, default=1024)
@@ -276,9 +310,15 @@ def main() -> None:
 
     from config.loader import load_cache_train_config, parse_cli_overrides
 
-    cfg = load_cache_train_config(args.config or None, overrides=parse_cli_overrides(args.set_values))
+    cfg = load_cache_train_config(
+        args.config or None, overrides=parse_cli_overrides(args.set_values)
+    )
     out = Path(args.out) if args.out else Path(cfg.data_root) / str(cfg.text_cache_dir)
-    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device))
+    device = torch.device(
+        "cuda"
+        if args.device == "auto" and torch.cuda.is_available()
+        else ("cpu" if args.device == "auto" else args.device)
+    )
     prepare_text_cache(
         cfg=cfg,
         out_dir=out,

@@ -4,7 +4,7 @@ import argparse
 import hashlib
 import json
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -73,9 +73,14 @@ def _latent_manifest(cfg: TrainConfig, entries: list[dict[str, Any]]) -> dict[st
     for entry in entries:
         md5 = str(entry.get("md5", ""))
         path = latent_cache_path(root, md5)
-        files.append({"sample_id": md5, "path": str(path.relative_to(root)) if path.is_relative_to(root) else str(path), "exists": path.exists()})
+        files.append(
+            {
+                "sample_id": md5,
+                "path": str(path.relative_to(root)) if path.is_relative_to(root) else str(path),
+                "exists": path.exists(),
+            }
+        )
     return {"mode": "files", "root": str(root), "files": files}
-
 
 
 def _read_json_strict(path: Path, *, label: str) -> dict[str, Any]:
@@ -90,7 +95,9 @@ def _read_json_strict(path: Path, *, label: str) -> dict[str, Any]:
     return data
 
 
-def _validate_text_cache_for_repair(cfg: TrainConfig, entries: list[dict[str, Any]], *, force: bool, rebuild: bool) -> str:
+def _validate_text_cache_for_repair(
+    cfg: TrainConfig, entries: list[dict[str, Any]], *, force: bool, rebuild: bool
+) -> str:
     root = Path(cfg.data_root) / str(cfg.text_cache_dir)
     current_hash = _text_dataset_hash(entries, str(cfg.caption_field)) if entries else ""
     if not root.exists():
@@ -121,7 +128,11 @@ def _validate_text_cache_for_repair(cfg: TrainConfig, entries: list[dict[str, An
         TextCache(root, shard_cache_size=int(cfg.text_shard_cache_size)).validate_files_readable()
     except Exception as exc:
         msg = str(exc).lower()
-        if "missing text cache tensor file" in msg or "missing empty prompt" in msg or "missing text cache index" in msg:
+        if (
+            "missing text cache tensor file" in msg
+            or "missing empty prompt" in msg
+            or "missing text cache index" in msg
+        ):
             return "missing_shard"
         if force or rebuild:
             return "broken_metadata"
@@ -129,7 +140,9 @@ def _validate_text_cache_for_repair(cfg: TrainConfig, entries: list[dict[str, An
     return "ready"
 
 
-def _validate_latent_cache_for_repair(cfg: TrainConfig, entries: list[dict[str, Any]], *, force: bool, rebuild: bool) -> str:
+def _validate_latent_cache_for_repair(
+    cfg: TrainConfig, entries: list[dict[str, Any]], *, force: bool, rebuild: bool
+) -> str:
     root = Path(cfg.data_root) / str(cfg.latent_cache_dir)
     if not root.exists():
         return "missing"
@@ -163,7 +176,10 @@ def _delete_cache_path(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path)
 
-def build_training_cache_manifest(cfg: TrainConfig, *, entries: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+
+def build_training_cache_manifest(
+    cfg: TrainConfig, *, entries: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     entries = _dataset_entries(cfg) if entries is None else entries
     latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
     text_root = Path(cfg.data_root) / str(cfg.text_cache_dir)
@@ -172,7 +188,7 @@ def build_training_cache_manifest(cfg: TrainConfig, *, entries: list[dict[str, A
     dataset_hash = _text_dataset_hash(entries, str(cfg.caption_field)) if entries else ""
     return {
         "version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "config_hash": _json_hash(cfg.to_dict()),
         "dataset_hash": dataset_hash,
         "num_samples": len(entries),
@@ -195,7 +211,9 @@ def build_training_cache_manifest(cfg: TrainConfig, *, entries: list[dict[str, A
     }
 
 
-def write_training_cache_manifest(cfg: TrainConfig, *, entries: list[dict[str, Any]] | None = None) -> Path:
+def write_training_cache_manifest(
+    cfg: TrainConfig, *, entries: list[dict[str, Any]] | None = None
+) -> Path:
     cache_root = Path(cfg.data_root) / str(cfg.cache_dir)
     cache_root.mkdir(parents=True, exist_ok=True)
     manifest = build_training_cache_manifest(cfg, entries=entries)
@@ -216,18 +234,33 @@ def main() -> None:
     ap.add_argument("--skip-text", action="store_true")
     ap.add_argument("--skip-latents", action="store_true")
     ap.add_argument("--overwrite-latents", action="store_true")
-    ap.add_argument("--repair", action="store_true", help="Validate cache and regenerate missing shards without ignoring metadata problems.")
-    ap.add_argument("--force", action="store_true", help="Allow repair to replace broken metadata/cache files.")
-    ap.add_argument("--rebuild", action="store_true", help="Delete stale cache and rebuild it for the current dataset.")
+    ap.add_argument(
+        "--repair",
+        action="store_true",
+        help="Validate cache and regenerate missing shards without ignoring metadata problems.",
+    )
+    ap.add_argument(
+        "--force", action="store_true", help="Allow repair to replace broken metadata/cache files."
+    )
+    ap.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Delete stale cache and rebuild it for the current dataset.",
+    )
     args = ap.parse_args()
 
+    from config.loader import load_cache_train_config, parse_cli_overrides
     from scripts.prepare_latents import prepare_latent_cache_for_config
     from scripts.prepare_text_cache import _resolve_prepare_dtype, prepare_text_cache
 
-    from config.loader import load_cache_train_config, parse_cli_overrides
-
-    cfg = load_cache_train_config(args.config or None, overrides=parse_cli_overrides(args.set_values))
-    device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else ("cpu" if args.device == "auto" else args.device))
+    cfg = load_cache_train_config(
+        args.config or None, overrides=parse_cli_overrides(args.set_values)
+    )
+    device = torch.device(
+        "cuda"
+        if args.device == "auto" and torch.cuda.is_available()
+        else ("cpu" if args.device == "auto" else args.device)
+    )
     entries = _dataset_entries(cfg)
     text_root = Path(cfg.data_root) / str(cfg.text_cache_dir)
     latent_root = Path(cfg.data_root) / str(cfg.latent_cache_dir)
@@ -240,7 +273,9 @@ def main() -> None:
 
     if args.repair:
         if not args.skip_text:
-            text_state = _validate_text_cache_for_repair(cfg, entries, force=bool(args.force), rebuild=bool(args.rebuild))
+            text_state = _validate_text_cache_for_repair(
+                cfg, entries, force=bool(args.force), rebuild=bool(args.rebuild)
+            )
             if text_state in {"broken_metadata", "changed_dataset"}:
                 _delete_cache_path(text_root)
             elif text_state == "ready":
@@ -248,9 +283,13 @@ def main() -> None:
             else:
                 print(f"[INFO] repairing text cache ({text_state}): {text_root}")
         if not args.skip_latents:
-            latent_state = _validate_latent_cache_for_repair(cfg, entries, force=bool(args.force), rebuild=bool(args.rebuild))
+            latent_state = _validate_latent_cache_for_repair(
+                cfg, entries, force=bool(args.force), rebuild=bool(args.rebuild)
+            )
             if latent_state == "broken_metadata" and not args.force and not args.rebuild:
-                raise RuntimeError("Latent cache metadata is broken. Use --force to replace it or --rebuild to start over.")
+                raise RuntimeError(
+                    "Latent cache metadata is broken. Use --force to replace it or --rebuild to start over."
+                )
             if latent_state in {"broken_metadata", "changed_dataset"}:
                 _delete_cache_path(latent_root)
             elif latent_state == "ready":
@@ -269,7 +308,9 @@ def main() -> None:
             dtype=_resolve_prepare_dtype(args.text_dtype, str(cfg.latent_dtype), device),
         )
     if not args.skip_latents:
-        prepare_latent_cache_for_config(cfg, overwrite=bool(args.overwrite_latents or args.repair or args.rebuild))
+        prepare_latent_cache_for_config(
+            cfg, overwrite=bool(args.overwrite_latents or args.repair or args.rebuild)
+        )
     manifest_path = write_training_cache_manifest(cfg, entries=entries)
     print(f"[OK] wrote training cache manifest: {manifest_path}")
 

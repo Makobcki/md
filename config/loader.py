@@ -40,14 +40,12 @@ def resolve_target_config(
     overrides: dict[str, Any] | None = None,
 ) -> ResolvedConfig:
     """Public API for resolving KDL target configs."""
-
     config_path = Path(path) if path else default_config_path(target)
     return resolve_config(config_path, overrides=overrides, expected_target=target)
 
 
 def build_train_config(data: dict[str, Any]) -> TrainConfig:
     """Build the legacy flat TrainConfig from a nested target config."""
-
     return TrainConfig.from_dict(data)
 
 
@@ -63,7 +61,6 @@ def load_train_config(
     ``cache`` so they can use ``configs/cache.kdl`` while still receiving the
     flat ``TrainConfig`` required by existing cache code.
     """
-
     return build_train_config(_resolve_or_load_yaml(path, target=target, overrides=overrides))
 
 
@@ -72,7 +69,6 @@ def load_cache_train_config(
     overrides: dict[str, Any] | None = None,
 ) -> TrainConfig:
     """Load the cache target as a train-compatible config."""
-
     return load_train_config(path, overrides=overrides, target="cache")
 
 
@@ -81,7 +77,6 @@ def load_sample_config(
     overrides: dict[str, Any] | None = None,
 ) -> SampleConfig:
     """Load and validate a sample target config."""
-
     data = _resolve_or_load_yaml(path, target="sample", overrides=overrides)
     return SampleConfig.from_dict(data)
 
@@ -91,7 +86,6 @@ def load_webui_config(
     overrides: dict[str, Any] | None = None,
 ) -> WebUIConfig:
     """Load and validate a WebUI target config."""
-
     data = _resolve_or_load_yaml(path, target="webui", overrides=overrides)
     return WebUIConfig.from_dict(data)
 
@@ -101,7 +95,6 @@ def load_eval_config(
     overrides: dict[str, Any] | None = None,
 ) -> EvalConfig:
     """Load and validate an eval target config."""
-
     data = _resolve_or_load_yaml(path, target="eval", overrides=overrides)
     return EvalConfig.from_dict(data)
 
@@ -111,12 +104,10 @@ def load_cache_config(
     overrides: dict[str, Any] | None = None,
 ) -> CacheConfig:
     """Load and validate a cache target config."""
-
     data = _resolve_or_load_yaml(path, target="cache", overrides=overrides)
     return CacheConfig.from_dict(data)
 
 
 def parse_cli_overrides(values: list[str] | tuple[str, ...] | None) -> dict[str, Any]:
     """Compatibility wrapper for parsing repeated ``--set`` values."""
-
     return parse_set_overrides(values)

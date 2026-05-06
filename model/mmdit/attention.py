@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -11,7 +9,9 @@ from .pos_embed import apply_2d_rope, apply_2d_rope_sections
 
 
 class JointAttention(nn.Module):
-    def __init__(self, hidden_dim: int, num_heads: int, attn_dropout: float = 0.0, qk_norm: bool = True) -> None:
+    def __init__(
+        self, hidden_dim: int, num_heads: int, attn_dropout: float = 0.0, qk_norm: bool = True
+    ) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
         self.num_heads = int(num_heads)
@@ -29,14 +29,16 @@ class JointAttention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-        rope_grid_hw: Optional[tuple[int, int]] = None,
+        mask: torch.Tensor | None = None,
+        rope_grid_hw: tuple[int, int] | None = None,
         rope_start: int = 0,
         rope_length: int = 0,
-        rope_base_grid_hw: Optional[tuple[int, int]] = None,
+        rope_base_grid_hw: tuple[int, int] | None = None,
         rope_scaling: str = "none",
         rope_theta: float = 10000.0,
-        rope_sections: tuple[tuple[int, int, int, int], ...] | tuple[tuple[int, int, int, int, int, int], ...] | None = None,
+        rope_sections: tuple[tuple[int, int, int, int], ...]
+        | tuple[tuple[int, int, int, int, int, int], ...]
+        | None = None,
     ) -> torch.Tensor:
         qh = self.q_norm(self._shape(q))
         kh = self.k_norm(self._shape(k))
@@ -72,4 +74,3 @@ class JointAttention(nn.Module):
             dropout_p=self.attn_dropout if self.training else 0.0,
         )
         return out.transpose(1, 2).reshape(q.shape[0], q.shape[1], self.hidden_dim)
-

@@ -32,4 +32,6 @@ def test_train_config_accepts_new_timestep_sampling_modes_and_rejects_bad_shift(
         assert cfg.flow_timestep_sampling == mode
         assert cfg.flow_timestep_shift == 2.0
     with pytest.raises(ValueError, match="flow_timestep_shift"):
-        TrainConfig.from_dict({"flow": {"timestep_sampling": "shifted_logit_normal", "timestep_shift": 0.0}})
+        TrainConfig.from_dict(
+            {"flow": {"timestep_sampling": "shifted_logit_normal", "timestep_shift": 0.0}}
+        )

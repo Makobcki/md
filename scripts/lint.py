@@ -46,7 +46,6 @@ EXCLUDED_PATH_PARTS: frozenset[str] = frozenset(
 
 def _project_root() -> Path:
     """Return the repository root for the installed or source-tree package."""
-
     return Path(__file__).resolve().parents[1]
 
 
@@ -59,8 +58,8 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
     Returns:
         True when `path` can be expressed relative to `parent`.
-    """
 
+    """
     try:
         path.relative_to(parent)
     except ValueError:
@@ -70,7 +69,6 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 def _display_path(path: Path, root: Path) -> str:
     """Format paths consistently for CLI output and subprocess arguments."""
-
     if _is_relative_to(path, root):
         return path.relative_to(root).as_posix()
     return path.as_posix()
@@ -78,7 +76,6 @@ def _display_path(path: Path, root: Path) -> str:
 
 def _is_excluded(path: Path, root: Path) -> bool:
     """Return whether `path` should be skipped by the project linter."""
-
     display_path = _display_path(path, root)
     parts = set(path.parts)
     return any(
@@ -96,8 +93,8 @@ def _existing_paths(raw_paths: Sequence[str], root: Path) -> list[Path]:
 
     Returns:
         Existing resolved paths in input order.
-    """
 
+    """
     paths: list[Path] = []
     for raw_path in raw_paths:
         path = Path(raw_path)
@@ -121,8 +118,8 @@ def _iter_python_files(paths: Iterable[Path], root: Path) -> list[Path]:
 
     Returns:
         Sorted unique Python files, excluding generated and heavy directories.
-    """
 
+    """
     files: set[Path] = set()
     for path in paths:
         if _is_excluded(path, root):
@@ -138,7 +135,6 @@ def _iter_python_files(paths: Iterable[Path], root: Path) -> list[Path]:
 
 def _run_py_compile(paths: Sequence[Path], root: Path) -> int:
     """Compile Python files to catch syntax errors before heavier lint checks."""
-
     python_files = _iter_python_files(paths, root)
     if not python_files:
         print("py_compile: no Python files found")
@@ -158,7 +154,6 @@ def _run_py_compile(paths: Sequence[Path], root: Path) -> int:
 
 def _run_subprocess(command: Sequence[str], root: Path) -> int:
     """Run a linter subprocess from the project root."""
-
     print(f"$ {shlex.join(command)}")
     completed = subprocess.run(command, cwd=root, check=False)
     return completed.returncode
@@ -166,7 +161,6 @@ def _run_subprocess(command: Sequence[str], root: Path) -> int:
 
 def _ruff_paths(paths: Sequence[Path], root: Path) -> list[str]:
     """Convert paths to stable Ruff CLI arguments."""
-
     return [_display_path(path, root) for path in paths if not _is_excluded(path, root)]
 
 
@@ -181,8 +175,8 @@ def _run_ruff(paths: Sequence[Path], root: Path, *, fix: bool, skip_missing: boo
 
     Returns:
         Process return code.
-    """
 
+    """
     ruff = shutil.which("ruff")
     if ruff is None:
         message = (
@@ -212,7 +206,6 @@ def _run_ruff(paths: Sequence[Path], root: Path, *, fix: bool, skip_missing: boo
 
 def _build_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser."""
-
     parser = argparse.ArgumentParser(
         description="Run project syntax checks, Ruff linting, and Ruff formatting checks."
     )
@@ -253,8 +246,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     Returns:
         Process return code.
-    """
 
+    """
     parser = _build_parser()
     args = parser.parse_args(argv)
 

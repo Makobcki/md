@@ -22,7 +22,9 @@ class _FakeLatentDataset:
 
 class _FakeTextCache:
     def load(self, key):
-        return TextConditioning(torch.zeros(2, 16), torch.ones(2, dtype=torch.bool), torch.zeros(16))
+        return TextConditioning(
+            torch.zeros(2, 16), torch.ones(2, dtype=torch.bool), torch.zeros(16)
+        )
 
 
 def test_txt2img_weight_one_yields_only_txt2img_batches() -> None:
@@ -47,7 +49,9 @@ def test_img2img_batch_uses_x0_as_source_latent() -> None:
 
 
 def test_inpaint_batch_uses_reproducible_mask_and_source_latent() -> None:
-    mask_cfg = InpaintMaskConfig(mask_min_area=0.25, mask_max_area=0.25, mask_modes={"rectangle": 1.0})
+    mask_cfg = InpaintMaskConfig(
+        mask_min_area=0.25, mask_max_area=0.25, mask_modes={"rectangle": 1.0}
+    )
     ds1 = _MMDiTCachedDataset(
         _FakeLatentDataset(),
         _FakeTextCache(),

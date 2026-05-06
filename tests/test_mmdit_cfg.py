@@ -22,8 +22,11 @@ def test_cfg_predict_batched() -> None:
     model = _ToyModel()
     x = torch.zeros(1, 1, 2, 2)
     t = torch.ones(1)
-    cond = TextConditioning(torch.zeros(1, 1, 2), torch.ones(1, 1, dtype=torch.bool), torch.ones(1, 2))
-    uncond = TextConditioning(torch.zeros(1, 1, 2), torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 2))
+    cond = TextConditioning(
+        torch.zeros(1, 1, 2), torch.ones(1, 1, dtype=torch.bool), torch.ones(1, 2)
+    )
+    uncond = TextConditioning(
+        torch.zeros(1, 1, 2), torch.ones(1, 1, dtype=torch.bool), torch.zeros(1, 2)
+    )
     out = cfg_predict(model, x, t, cond, uncond, scale=2.0)
     assert torch.allclose(out, torch.full_like(x, 2.0))
-

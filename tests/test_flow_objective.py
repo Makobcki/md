@@ -16,4 +16,3 @@ def test_rectified_flow_training_tuple_shapes() -> None:
     assert tup.weight.shape == (4,)
     assert float(tup.t.min()) >= 0.0
     assert float(tup.t.max()) <= 1.0
-

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 import torch
 
@@ -15,7 +15,7 @@ from samplers import sample_flow_euler, sample_flow_heun
 from train.eval import save_image_grid
 
 
-def _select_flow_sampler(name: str):
+def _select_flow_sampler(name: str) -> Callable[..., torch.Tensor]:
     if name == "flow_euler":
         return sample_flow_euler
     if name == "flow_heun":
@@ -116,7 +116,7 @@ def run_mmdit_eval_sampling(
             )
         metadata = {
             "version": 1,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "step": int(step),
             "prompt_set": "eval_prompts_file",
             "sampler": str(eval_sampler),
@@ -126,10 +126,11 @@ def run_mmdit_eval_sampling(
             "shift": float(shift),
             "outputs": output_records,
         }
-        (eval_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        (eval_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
         return events
     finally:
         if swapped_ema:
             ema.restore(model)
         model.train(was_training)
-

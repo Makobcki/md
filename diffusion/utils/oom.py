@@ -7,7 +7,6 @@ from typing import TextIO
 
 import torch
 
-
 _MEMORY_UNITS = {
     "b": 1,
     "byte": 1,
@@ -67,7 +66,9 @@ def find_torch_oom_error(exc: BaseException) -> BaseException | None:
         if isinstance(current, torch.OutOfMemoryError):
             return current
         message = str(current).lower()
-        if "out of memory" in message and ("cuda" in message or "mps" in message or "torch" in message):
+        if "out of memory" in message and (
+            "cuda" in message or "mps" in message or "torch" in message
+        ):
             return current
         if current.__cause__ is not None:
             stack.append(current.__cause__)
@@ -94,7 +95,11 @@ def parse_torch_oom_message(message: str) -> OomMemoryInfo:
 
     requested = _search(r"Tried to allocate\s+(" + _MEMORY_VALUE_RE + r")")
     total_free = re.search(
-        r"total capacity of\s+(" + _MEMORY_VALUE_RE + r")\s+of which\s+(" + _MEMORY_VALUE_RE + r")\s+is free",
+        r"total capacity of\s+("
+        + _MEMORY_VALUE_RE
+        + r")\s+of which\s+("
+        + _MEMORY_VALUE_RE
+        + r")\s+is free",
         message,
         flags=re.IGNORECASE,
     )
@@ -107,7 +112,9 @@ def parse_torch_oom_message(message: str) -> OomMemoryInfo:
 
     process_used = _search(r"this process has\s+(" + _MEMORY_VALUE_RE + r")\s+memory in use")
     allocated = _search(r"allocated memory\s+(" + _MEMORY_VALUE_RE + r")\s+is allocated by PyTorch")
-    reserved = _search(r"and\s+(" + _MEMORY_VALUE_RE + r")\s+is reserved by PyTorch but unallocated")
+    reserved = _search(
+        r"and\s+(" + _MEMORY_VALUE_RE + r")\s+is reserved by PyTorch but unallocated"
+    )
 
     return OomMemoryInfo(
         requested_bytes=requested,
@@ -133,7 +140,11 @@ def format_bytes(num_bytes: int | None) -> str:
 def format_torch_oom_message(exc: BaseException, *, context: str | None = None) -> str:
     oom_exc = find_torch_oom_error(exc) or exc
     info = parse_torch_oom_message(str(oom_exc))
-    title = "[OOM] CUDA out of memory" if context is None else f"[OOM] CUDA out of memory during {context}"
+    title = (
+        "[OOM] CUDA out of memory"
+        if context is None
+        else f"[OOM] CUDA out of memory during {context}"
+    )
     lines = [title]
     if info.requested_bytes is not None:
         lines.append(f"requested allocation: {format_bytes(info.requested_bytes)}")
@@ -142,19 +153,28 @@ def format_torch_oom_message(exc: BaseException, *, context: str | None = None) 
     if info.shortfall_bytes is not None:
         lines.append(f"estimated shortfall: {format_bytes(info.shortfall_bytes)}")
     if info.total_bytes is not None or info.free_bytes is not None:
-        lines.append(f"device memory: total={format_bytes(info.total_bytes)}, free={format_bytes(info.free_bytes)}")
+        lines.append(
+            f"device memory: total={format_bytes(info.total_bytes)}, free={format_bytes(info.free_bytes)}"
+        )
     if info.process_used_bytes is not None:
         lines.append(f"process memory in use: {format_bytes(info.process_used_bytes)}")
-    if info.pytorch_allocated_bytes is not None or info.pytorch_reserved_unallocated_bytes is not None:
+    if (
+        info.pytorch_allocated_bytes is not None
+        or info.pytorch_reserved_unallocated_bytes is not None
+    ):
         lines.append(
             "pytorch memory: "
             f"allocated={format_bytes(info.pytorch_allocated_bytes)}, "
             f"reserved_unallocated={format_bytes(info.pytorch_reserved_unallocated_bytes)}"
         )
     if info.shortfall_bytes == 0 and info.requested_bytes is not None:
-        lines.append("capacity shortfall is 0; fragmentation or non-PyTorch reservations may be the cause")
+        lines.append(
+            "capacity shortfall is 0; fragmentation or non-PyTorch reservations may be the cause"
+        )
     return "\n".join(lines)
 
 
-def print_torch_oom(exc: BaseException, *, context: str | None = None, file: TextIO | None = None) -> None:
+def print_torch_oom(
+    exc: BaseException, *, context: str | None = None, file: TextIO | None = None
+) -> None:
     print(format_torch_oom_message(exc, context=context), file=file or sys.stderr, flush=True)

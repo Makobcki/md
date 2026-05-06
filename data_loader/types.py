@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, List
 
 
 @dataclass(frozen=True)
@@ -13,7 +12,7 @@ class DataConfig:
     tags_dir: str = ""
     caption_field: str = "caption_llava_34b_no_tags_short"
     text_field: str = ""
-    text_fields: List[str] | None = None
+    text_fields: list[str] | None = None
     images_only: bool = False
     use_text_conditioning: bool = True
     min_tag_count: int = 0
@@ -34,6 +33,6 @@ class LatentShardLocation:
 class LatentCacheMetadata:
     vae_pretrained: str
     scaling_factor: float
-    latent_shape: Tuple[int, int, int]
+    latent_shape: tuple[int, int, int]
     dtype: str
     format_version: int = 1

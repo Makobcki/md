@@ -56,7 +56,9 @@ def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
     total += _norm_params(d, rms_norm=bool(cfg.rms_norm))
     if bool(getattr(cfg, "control_adapter", False)):
         inner = max(1, int(d * float(getattr(cfg, "control_adapter_ratio", 0.25))))
-        total += _norm_params(d, rms_norm=True) + _linear_params(d, inner) + _linear_params(inner, d)
+        total += (
+            _norm_params(d, rms_norm=True) + _linear_params(d, inner) + _linear_params(inner, d)
+        )
 
     qk_norm_params = 2 * head_dim if bool(cfg.qk_norm) else 0
     norm = _norm_params(d, rms_norm=bool(cfg.rms_norm))
@@ -69,7 +71,9 @@ def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
         resampler_layer += _linear_params(d, 2 * d)
         resampler_layer += qk_norm_params
         resampler_layer += _linear_params(d, d)
-        resampler_layer += _ff_params(d, float(getattr(cfg, "text_resampler_mlp_ratio", 4.0)), swiglu=bool(cfg.swiglu))
+        resampler_layer += _ff_params(
+            d, float(getattr(cfg, "text_resampler_mlp_ratio", 4.0)), swiglu=bool(cfg.swiglu)
+        )
         total += int(getattr(cfg, "text_resampler_depth", 2)) * resampler_layer
         total += norm
 
@@ -142,15 +146,40 @@ def _main_impl() -> None:
     ap.add_argument(
         "--profile",
         default="",
-        choices=("", "smoke", "overfit", "dev", "base", "full", "stage_a", "stage_b", "stage_c", "stage_d", "milestone_a", "milestone_b", "milestone_c", "distributed_smoke", "fsdp_template"),
+        choices=(
+            "",
+            "smoke",
+            "overfit",
+            "dev",
+            "base",
+            "full",
+            "stage_a",
+            "stage_b",
+            "stage_c",
+            "stage_d",
+            "milestone_a",
+            "milestone_b",
+            "milestone_c",
+            "distributed_smoke",
+            "fsdp_template",
+        ),
         help="Convenience profile; ignored when --config is set.",
     )
     ap.add_argument("--resume", default="")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--ckpt-keep-last", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--print-config", action="store_true", help="Print the resolved TrainConfig and exit.")
-    ap.add_argument("--set", dest="set_values", action="append", default=[], metavar="KEY=VALUE", help="Override config value, e.g. --set training.batch_size=8.")
+    ap.add_argument(
+        "--print-config", action="store_true", help="Print the resolved TrainConfig and exit."
+    )
+    ap.add_argument(
+        "--set",
+        dest="set_values",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override config value, e.g. --set training.batch_size=8.",
+    )
     args = ap.parse_args()
 
     profile_to_config = {

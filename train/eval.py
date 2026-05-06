@@ -4,7 +4,6 @@ from pathlib import Path
 
 import torch
 
-
 DEFAULT_EVAL_PROMPT_SETS: tuple[str, ...] = (
     "core",
     "composition",
@@ -28,9 +27,10 @@ def save_image_grid(x: torch.Tensor, path: str | Path, nrow: int) -> None:
     except Exception:
         pass
 
-    from PIL import Image
     import math
+
     import numpy as np
+    from PIL import Image
 
     b, c, h, w = x.shape
     if c == 1:
@@ -65,7 +65,11 @@ def load_eval_prompt_set(
     count: int | None = None,
 ) -> list[str]:
     prompt_set = str(name).strip()
-    if not prompt_set or any(part in prompt_set for part in ("/", "\\")) or prompt_set in {".", ".."}:
+    if (
+        not prompt_set
+        or any(part in prompt_set for part in ("/", "\\"))
+        or prompt_set in {".", ".."}
+    ):
         raise RuntimeError(f"Invalid eval prompt set name: {name!r}")
     return load_prompt_file(Path(root) / f"{prompt_set}.txt", count=count)
 
