@@ -64,6 +64,7 @@ def _apply_cli_args(options: SampleOptions, args: argparse.Namespace) -> SampleO
         "cfg",
         "shift",
         "sampler",
+        "family",
         "seed",
         "device",
         "width",
@@ -118,7 +119,8 @@ def _main_impl() -> None:
         default=None,
         help="Positive inference timestep shift override. Defaults to checkpoint/config sampling shift.",
     )
-    ap.add_argument("--sampler", default=None, choices=("flow_euler", "flow_heun"))
+    ap.add_argument("--sampler", default=None, choices=("flow_euler", "flow_heun", "var_autoregressive"))
+    ap.add_argument("--family", default=None, choices=("mmdit", "pixart_sigma", "var"))
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--width", type=_positive_int, default=None)

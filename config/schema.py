@@ -66,6 +66,7 @@ class SampleConfig:
             neg_prompt=str(prompt.get("negative", "") or ""),
             cfg=float(cfg_value),
             sampler=_sampler_name(str(sampler_value)),
+            family=str(model.get("family", "mmdit") or "mmdit"),
             seed=None if seed_value is None else int(seed_value),
             shift=None if shift_value is None else float(shift_value),
             device=str(sampling.get("device", "auto")),

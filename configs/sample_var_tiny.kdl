@@ -1,0 +1,19 @@
+config target="sample" version=2 {
+  model {
+    family "var"
+    variant "var_tiny"
+    checkpoint "checkpoints/var_tiny.pt"
+  }
+  sampler {
+    name "var_autoregressive"
+  }
+  sampling {
+    task "txt2img"
+    steps 1
+    n 1
+    latent_only true
+  }
+  output {
+    path "outputs/var_tiny/tokens.pt"
+  }
+}

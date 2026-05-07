@@ -111,6 +111,25 @@ def _estimate_mmdit_params_from_config(cfg: TrainConfig) -> int:
 
 
 def _dry_run_light(cfg: TrainConfig) -> None:
+    if cfg.model_family == "pixart_sigma":
+        latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
+        print(
+            "[DRY-RUN] "
+            f"family={cfg.model_family} architecture={cfg.architecture} objective={cfg.objective} "
+            f"image_size={cfg.image_size} latent_shape=({cfg.latent_channels}, {latent_side}, {latent_side}) "
+            f"hidden_dim={cfg.hidden_dim} depth={cfg.depth} num_heads={cfg.num_heads}",
+            flush=True,
+        )
+        return
+    if cfg.model_family == "var":
+        print(
+            "[DRY-RUN] "
+            f"family={cfg.model_family} architecture={cfg.architecture} objective={cfg.autoregressive_objective} "
+            f"codebook_size={cfg.codebook_size} scale_schedule={list(cfg.scale_schedule)} "
+            f"max_token_length={cfg.max_token_length} hidden_dim={cfg.hidden_dim} depth={cfg.depth}",
+            flush=True,
+        )
+        return
     if cfg.architecture != "mmdit_rf":
         raise RuntimeError("Only architecture=mmdit_rf is supported.")
     if str(cfg.mode) != "latent":

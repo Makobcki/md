@@ -1468,6 +1468,9 @@ def dry_run(cfg: TrainConfig) -> None:
 
 
 def run(cfg: TrainConfig) -> None:
+    if cfg.model_family in {"pixart_sigma", "var"}:
+        _run_family_smoke(cfg)
+        return
     if cfg.architecture != "mmdit_rf":
         raise RuntimeError("Only architecture=mmdit_rf is supported.")
 
@@ -1499,3 +1502,53 @@ def run(cfg: TrainConfig) -> None:
         else False
     )
     _run_mmdit_rf(cfg, device=device, perf_active=perf_active, dist=dist)
+
+
+def _run_family_smoke(cfg: TrainConfig) -> None:
+    """Run a minimal CPU/GPU smoke train step for non-MMDiT v1 families."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_model(cfg).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr))
+    optimizer.zero_grad(set_to_none=True)
+    if cfg.model_family == "pixart_sigma":
+        x = torch.randn(
+            int(cfg.batch_size),
+            int(cfg.latent_channels),
+            int(cfg.image_size) // int(cfg.latent_downsample_factor),
+            int(cfg.image_size) // int(cfg.latent_downsample_factor),
+            device=device,
+        )
+        t = torch.rand(int(cfg.batch_size), device=device)
+        text = torch.randn(
+            int(cfg.batch_size),
+            min(int(cfg.max_text_tokens), 8),
+            int(cfg.caption_channels),
+            device=device,
+        )
+        loss = model(x=x, t=t, text=text).float().square().mean()
+    else:
+        from model.var import next_scale_cross_entropy
+
+        generator = torch.Generator(device=device)
+        generator.manual_seed(int(cfg.seed))
+        tokens = [
+            torch.randint(
+                0,
+                int(cfg.codebook_size),
+                (int(cfg.batch_size), int(scale) * int(scale)),
+                generator=generator,
+                device=device,
+            )
+            for scale in cfg.scale_schedule
+        ]
+        logits = model(tokens)
+        loss = next_scale_cross_entropy(logits, tokens[-1])
+    loss.backward()
+    optimizer.step()
+    out_dir = Path(cfg.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(
+        "[SMOKE-TRAIN] "
+        f"family={cfg.model_family} architecture={cfg.architecture} loss={float(loss.detach().cpu()):.6f}",
+        flush=True,
+    )

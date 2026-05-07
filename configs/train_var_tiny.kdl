@@ -1,0 +1,35 @@
+config target="train" version=2 {
+  model {
+    family "var"
+    variant "var_tiny"
+    architecture {
+      image_size 32
+      depth 1
+      hidden_size 32
+      num_heads 4
+      scale_schedule [1, 2]
+      max_token_length 5
+    }
+    tokenizer {
+      kind "synthetic"
+      codebook_size 32
+      codebook_dim 8
+      downsample_factor 16
+      checkpoint null
+    }
+    autoregressive {
+      objective "next_scale_prediction"
+      prediction_type "token_logits"
+      conditioning "none"
+      causal_mode "scale_causal"
+      loss "cross_entropy"
+    }
+  }
+  training {
+    batch_size 2
+    max_steps 1
+  }
+  output {
+    dir "runs/train_var_tiny"
+  }
+}

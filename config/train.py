@@ -115,6 +115,10 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
 
     model = data.get("model")
     if isinstance(model, dict):
+        if "family" in model and "model_family" not in flat:
+            flat["model_family"] = model["family"]
+        if "variant" in model and "model_variant" not in flat:
+            flat["model_variant"] = model["variant"]
         for key in (
             "hidden_dim",
             "depth",
@@ -287,6 +291,7 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
 
     flow = data.get("flow")
     if isinstance(flow, dict):
+        flat["has_flow_config"] = True
         mapping = {
             "timestep_sampling": "flow_timestep_sampling",
             "logit_mean": "flow_logit_mean",
@@ -325,6 +330,8 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
             "pretrained": "vae_pretrained",
             "freeze": "vae_freeze",
             "scaling_factor": "vae_scaling_factor",
+            "downsample_factor": "latent_downsample_factor",
+            "latent_channels": "latent_channels",
         }
         for src, dst in mapping.items():
             if src in vae and dst not in flat:
@@ -466,6 +473,7 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(model, dict):
         architecture = model.get("architecture")
         if isinstance(architecture, dict):
+            family = str(model.get("family", flat.get("model_family", "mmdit")) or "mmdit")
             architecture_mapping = {
                 "latent_channels": "latent_channels",
                 "patch_size": "latent_patch_size",
@@ -483,12 +491,22 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
                 "dropout": "dropout",
                 "attn_dropout": "attn_dropout",
                 "gradient_checkpointing": "gradient_checkpointing",
+                "caption_channels": "caption_channels",
+                "cross_attention_dim": "cross_attention_dim",
+                "max_text_tokens": "max_text_tokens",
+                "scale_schedule": "scale_schedule",
+                "max_token_length": "max_token_length",
+                "drop_path": "drop_path",
             }
             for src, dst in architecture_mapping.items():
                 if src in architecture and dst not in flat:
                     flat[dst] = architecture[src]
             if "image_size" in architecture and "image_size" not in flat:
                 flat["image_size"] = architecture["image_size"]
+            if family == "pixart_sigma":
+                flat.setdefault("architecture", "pixart_sigma_rf")
+            elif family == "var":
+                flat.setdefault("architecture", "var_ar")
             rope = architecture.get("rope")
             if isinstance(rope, dict):
                 for src, dst in {
@@ -500,6 +518,7 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
                         flat[dst] = rope[src]
         diffusion = model.get("diffusion")
         if isinstance(diffusion, dict):
+            flat["has_model_diffusion_config"] = True
             if "objective" in diffusion and "objective" not in flat:
                 flat["objective"] = diffusion["objective"]
             if "prediction_type" in diffusion and "prediction_type" not in flat:
@@ -507,6 +526,32 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
                 if prediction_type == "velocity":
                     prediction_type = "flow_velocity"
                 flat["prediction_type"] = prediction_type
+        tokenizer = model.get("tokenizer")
+        if isinstance(tokenizer, dict):
+            flat["has_model_tokenizer_config"] = True
+            mapping = {
+                "kind": "tokenizer_kind",
+                "codebook_size": "codebook_size",
+                "codebook_dim": "codebook_dim",
+                "downsample_factor": "tokenizer_downsample_factor",
+                "checkpoint": "tokenizer_checkpoint",
+            }
+            for src, dst in mapping.items():
+                if src in tokenizer and dst not in flat:
+                    flat[dst] = tokenizer[src]
+        autoregressive = model.get("autoregressive")
+        if isinstance(autoregressive, dict):
+            flat["has_model_autoregressive_config"] = True
+            mapping = {
+                "objective": "autoregressive_objective",
+                "prediction_type": "autoregressive_prediction_type",
+                "conditioning": "autoregressive_conditioning",
+                "causal_mode": "autoregressive_causal_mode",
+                "loss": "autoregressive_loss",
+            }
+            for src, dst in mapping.items():
+                if src in autoregressive and dst not in flat:
+                    flat[dst] = autoregressive[src]
 
     sampler_section = data.get("sampler")
     if isinstance(sampler_section, dict):
@@ -537,6 +582,12 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class TrainConfig:
+    model_family: str = "mmdit"
+    model_variant: str = "mmdit_rf_base"
+    has_model_diffusion_config: bool = False
+    has_model_tokenizer_config: bool = False
+    has_model_autoregressive_config: bool = False
+    has_flow_config: bool = False
     architecture: str = "mmdit_rf"
     objective: str = "rectified_flow"
     prediction_type: str = "flow_velocity"
@@ -669,6 +720,23 @@ class TrainConfig:
     control_adapter_ratio: float = 0.25
     hierarchical_tokens_enabled: bool = False
     coarse_patch_size: int = 4
+    caption_channels: int = 4096
+    cross_attention_dim: int = 1152
+    max_text_tokens: int = 300
+    drop_path: float = 0.0
+
+    tokenizer_kind: str = ""
+    codebook_size: int = 0
+    codebook_dim: int = 0
+    tokenizer_downsample_factor: int = 16
+    tokenizer_checkpoint: str | None = None
+    scale_schedule: list[int] = field(default_factory=list)
+    max_token_length: int = 0
+    autoregressive_objective: str = ""
+    autoregressive_prediction_type: str = ""
+    autoregressive_conditioning: str = "none"
+    autoregressive_causal_mode: str = "scale_causal"
+    autoregressive_loss: str = ""
 
     text_resampler_enabled: bool = False
     text_resampler_num_tokens: int = 128
@@ -746,6 +814,16 @@ class TrainConfig:
     extra: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
+        allowed_families = {"mmdit", "pixart_sigma", "var"}
+        if self.model_family not in allowed_families:
+            allowed = ", ".join(("mmdit", "pixart_sigma", "var"))
+            raise ValueError(f"Unknown model family {self.model_family!r}. Allowed: {allowed}.")
+        if self.model_family == "var":
+            self._validate_var_family()
+            return
+        if self.model_family == "pixart_sigma":
+            self._validate_pixart_sigma_family()
+            return
         if self.architecture != "mmdit_rf":
             raise ValueError("Only architecture=mmdit_rf is supported.")
         if self.objective != "rectified_flow":
@@ -981,6 +1059,66 @@ class TrainConfig:
             raise ValueError("curriculum_steps must be non-negative.")
         if self.curriculum_solo_weight <= 0 or self.curriculum_non_solo_weight <= 0:
             raise ValueError("curriculum_solo_weight and curriculum_non_solo_weight must be positive.")
+
+    def _validate_pixart_sigma_family(self) -> None:
+        if self.architecture != "pixart_sigma_rf":
+            raise ValueError("model.family=pixart_sigma requires architecture=pixart_sigma_rf.")
+        if self.objective != "rectified_flow":
+            raise ValueError("model.family=pixart_sigma requires diffusion.objective=rectified_flow.")
+        if self.prediction_type != "flow_velocity":
+            raise ValueError("model.family=pixart_sigma requires diffusion.prediction_type=velocity.")
+        model_extra = self.extra.get("model", {}) if isinstance(self.extra.get("model", {}), dict) else {}
+        if self.has_model_tokenizer_config or "tokenizer" in model_extra or self.tokenizer_kind:
+            raise ValueError("model.family=pixart_sigma forbids tokenizer.* configuration.")
+        if self.has_model_autoregressive_config or "autoregressive" in model_extra or self.autoregressive_objective:
+            raise ValueError("model.family=pixart_sigma forbids autoregressive.* configuration.")
+        if self.image_size <= 0 or self.latent_downsample_factor <= 0:
+            raise ValueError("image_size and latent_downsample_factor must be positive.")
+        latent_size = self.image_size // self.latent_downsample_factor
+        architecture = (
+            model_extra.get("architecture", {}) if isinstance(model_extra.get("architecture", {}), dict) else {}
+        )
+        declared_latent_size = architecture.get("latent_size", latent_size)
+        if int(declared_latent_size) != latent_size:
+            raise ValueError("pixart_sigma latent_size must equal image_size / vae.downsample_factor.")
+        if self.latent_channels <= 0:
+            raise ValueError("latent_channels must be positive.")
+        if latent_size % int(self.latent_patch_size) != 0:
+            raise ValueError("pixart_sigma latent_size must be divisible by patch_size.")
+        if self.hidden_dim <= 0 or self.num_heads <= 0 or self.hidden_dim % self.num_heads != 0:
+            raise ValueError("hidden_size must be positive and divisible by num_heads.")
+        if self.depth <= 0:
+            raise ValueError("depth must be positive.")
+        if self.caption_channels <= 0 or self.max_text_tokens <= 0:
+            raise ValueError("caption_channels and max_text_tokens must be positive.")
+
+    def _validate_var_family(self) -> None:
+        if self.architecture != "var_ar":
+            raise ValueError("model.family=var requires architecture=var_ar.")
+        model_extra = self.extra.get("model", {}) if isinstance(self.extra.get("model", {}), dict) else {}
+        if self.has_model_diffusion_config or "diffusion" in model_extra:
+            raise ValueError("model.family=var forbids diffusion.* configuration.")
+        if self.has_flow_config or "flow" in self.extra:
+            raise ValueError("model.family=var forbids flow.* configuration.")
+        if self.sampling_sampler in {"flow_euler", "flow_heun"} and "sampling" in self.extra:
+            raise ValueError("model.family=var forbids diffusion samplers.")
+        if self.autoregressive_objective != "next_scale_prediction":
+            raise ValueError("model.family=var requires autoregressive.objective=next_scale_prediction.")
+        if self.autoregressive_prediction_type != "token_logits":
+            raise ValueError("model.family=var requires autoregressive.prediction_type=token_logits.")
+        if self.autoregressive_loss != "cross_entropy":
+            raise ValueError("model.family=var requires autoregressive.loss=cross_entropy.")
+        if not self.tokenizer_kind:
+            raise ValueError("model.family=var requires tokenizer.* configuration.")
+        if self.codebook_size <= 0 or self.codebook_dim <= 0:
+            raise ValueError("VAR tokenizer codebook_size and codebook_dim must be positive.")
+        if not self.scale_schedule or any(int(v) <= 0 for v in self.scale_schedule):
+            raise ValueError("VAR scale_schedule must contain positive integers.")
+        token_count = sum(int(v) * int(v) for v in self.scale_schedule)
+        if self.max_token_length <= 0 or token_count > int(self.max_token_length):
+            raise ValueError("VAR max_token_length must cover scale_schedule token count.")
+        if self.hidden_dim <= 0 or self.num_heads <= 0 or self.hidden_dim % self.num_heads != 0:
+            raise ValueError("VAR hidden_size must be positive and divisible by num_heads.")
 
 
     @classmethod

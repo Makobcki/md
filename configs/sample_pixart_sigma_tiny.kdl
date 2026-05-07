@@ -1,0 +1,18 @@
+config target="sample" version=2 {
+  model {
+    family "pixart_sigma"
+    variant "pixart_sigma_tiny"
+    checkpoint "checkpoints/pixart_sigma_tiny.pt"
+  }
+  sampler {
+    name "flow_euler"
+  }
+  sampling {
+    task "txt2img"
+    steps 2
+    n 1
+  }
+  output {
+    dir "outputs/pixart_sigma_tiny"
+  }
+}

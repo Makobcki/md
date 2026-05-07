@@ -22,7 +22,8 @@ class SampleOptions:
     prompt: str = ""
     neg_prompt: str = ""
     cfg: float = 5.0
-    sampler: Literal["flow_euler", "flow_heun"] = "flow_heun"
+    sampler: str = "flow_heun"
+    family: str = "mmdit"
     seed: int | None = 42
     shift: float | None = None
     device: str = "auto"
@@ -44,8 +45,17 @@ class SampleOptions:
             raise SampleValidationError("n must be >= 1")
         if self.steps < 1:
             raise SampleValidationError("steps must be >= 1")
-        if self.sampler not in {"flow_euler", "flow_heun"}:
+        if self.family not in {"mmdit", "pixart_sigma", "var"}:
+            raise SampleValidationError("family must be one of: mmdit, pixart_sigma, var")
+        if self.family == "var":
+            if self.sampler != "var_autoregressive":
+                raise SampleValidationError("model.family=var requires the autoregressive sampler")
+            if self.task != "txt2img":
+                raise SampleValidationError("model.family=var supports only txt2img token generation")
+        elif self.sampler not in {"flow_euler", "flow_heun"}:
             raise SampleValidationError("sampler must be one of: flow_euler, flow_heun")
+        if self.family == "pixart_sigma" and self.task != "txt2img":
+            raise SampleValidationError(f"model.family=pixart_sigma does not support task={self.task}")
         if self.task not in {"txt2img", "img2img", "inpaint", "control"}:
             raise SampleValidationError("task must be one of: txt2img, img2img, inpaint, control")
         if not (0.0 <= float(self.strength) <= 1.0):
@@ -334,6 +344,7 @@ def _sample_metadata(
         )
         if isinstance(meta, dict)
         else "flow_velocity",
+        "family": str(cfg.get("model_family", _cfg_section(cfg, "model").get("family", "mmdit"))),
         "prompt": str(_get_opt(args, "prompt", "")),
         "negative_prompt": negative_prompt,
         "negative_prompt_source": str(getattr(built, "empty_text_source", "encoder"))
