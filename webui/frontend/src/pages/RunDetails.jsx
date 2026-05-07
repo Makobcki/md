@@ -69,7 +69,7 @@ export default function RunDetails() {
       <PageHeader
         eyebrow={formatRunType(run.run_type)}
         title={formatRunId(runId)}
-        description="Captured config, metrics, logs, checkpoints and generated artifacts for this run."
+        description="Config, logs and artifacts."
         meta={<StatusPill status={run.status} />}
       />
       <div className="card">

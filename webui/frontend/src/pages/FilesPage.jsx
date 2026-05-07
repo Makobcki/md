@@ -85,7 +85,7 @@ export default function FilesPage() {
       <PageHeader
         eyebrow="Run history"
         title="Logs"
-        description="Filter live and historical stdout/stderr streams by run, level, text and timestamp."
+        description="Filter run streams."
       />
       {error && <div className="muted">{error}</div>}
       <div className="split">

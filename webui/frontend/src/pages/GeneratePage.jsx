@@ -1,35 +1,11 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { api, wsUrl, absoluteFileUrl, absoluteDownloadUrl, API_ORIGIN } from "../api.js";
 import useLogBuffer from "../hooks/useLogBuffer.js";
 import useRunLogStream from "../hooks/useRunLogStream.js";
-import ArgField from "../components/ArgField.jsx";
 import PageHeader from "../components/PageHeader.jsx";
 import { isMetricEvent, mergeMetricEvents } from "../utils/metrics.js";
-
-const quickFields = ["family", "task", "ckpt", "steps", "n", "seed"];
-const promptFields = ["prompt", "neg_prompt"];
-const hiddenPathFields = new Set(["init-image", "mask", "control-image"]);
-
-const TASK_HELP = {
-  txt2img: "Text → image generation from prompt only.",
-  img2img: "Image → image generation. Upload an init image and adjust strength.",
-  inpaint: "Inpaint generation. Upload an image and draw the white mask over regions to regenerate.",
-  control: "Control generation with a control image.",
-};
-
-function familyAwareSpec(spec, family) {
-  if (spec.name === "task" && family !== "mmdit") {
-    return { ...spec, choices: ["txt2img"] };
-  }
-  if (spec.name === "sampler" && family === "var") {
-    return { ...spec, choices: ["var_autoregressive"] };
-  }
-  if (spec.name === "sampler") {
-    return { ...spec, choices: ["flow_euler", "flow_heun"] };
-  }
-  return spec;
-}
-
+import { buildArgsWithStoredSettings, SAMPLE_SETTINGS_KEY } from "../utils/settingsModel.js";
 
 const absolutePreviewUrl = (value) => {
   if (!value) return "";
@@ -38,120 +14,178 @@ const absolutePreviewUrl = (value) => {
   return absoluteFileUrl(value) || "";
 };
 
-function TaskAssetCard({
-  title,
-  description,
-  previewUrl,
-  fileName,
-  pathValue,
-  onPick,
-  onClear,
-  disabled = false,
-  children = null,
-}) {
+function ImageAttachPortal({ open, onClose, onPick, disabled = false }) {
   const inputRef = useRef(null);
 
-  return (
-    <div className="task-asset-card">
-      <div className="row task-asset-header">
+  useEffect(() => {
+    if (!open) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose, open]);
+
+  if (!open || typeof document === "undefined") return null;
+
+  const pickFile = (file) => {
+    if (!file || disabled) return;
+    onPick(file);
+    onClose();
+  };
+
+  const handleDrop = (event) => {
+    event.preventDefault();
+    pickFile(event.dataTransfer.files?.[0]);
+  };
+
+  return createPortal(
+    <div className="attach-portal" role="presentation">
+      <button
+        type="button"
+        className="attach-portal-backdrop"
+        onClick={onClose}
+        aria-label="Close image attachment dialog"
+      />
+      <div
+        className="attach-portal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Attach source image"
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={handleDrop}
+      >
         <div>
-          <div className="card-title">{title}</div>
-          {description ? <div className="muted">{description}</div> : null}
+          <h2>Attach image</h2>
+          <p className="muted">Drop an image here or choose a local file.</p>
         </div>
-        <div className="row">
-          <button type="button" className="secondary" onClick={() => inputRef.current?.click()} disabled={disabled}>
-            Upload
-          </button>
-          {(previewUrl || pathValue) && (
-            <button type="button" className="secondary" onClick={onClear} disabled={disabled}>
-              Clear
-            </button>
-          )}
-        </div>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => inputRef.current?.click()}
+          disabled={disabled}
+        >
+          Choose file
+        </button>
+        <button type="button" className="ghost" onClick={onClose}>
+          Cancel
+        </button>
       </div>
       <input
         ref={inputRef}
+        name="source-image"
         type="file"
         accept="image/png,image/jpeg,image/webp,image/bmp"
         hidden
         onChange={(event) => {
           const file = event.target.files?.[0];
-          if (file) onPick(file);
+          pickFile(file);
           event.target.value = "";
         }}
         disabled={disabled}
       />
-      {previewUrl ? (
-        <div className="task-asset-preview">
-          <img src={previewUrl} alt={title} />
-        </div>
-      ) : (
-        <div className="task-asset-empty muted">No image selected</div>
-      )}
-      {fileName ? <div className="badge">{fileName}</div> : null}
-      {pathValue ? <div className="task-asset-path muted">{pathValue}</div> : null}
-      {children}
-    </div>
+    </div>,
+    document.body
   );
 }
 
-function MaskEditor({ imageUrl, value, onChange, disabled = false }) {
+function AttachedImageEditor({
+  imageUrl,
+  fileName,
+  maskValue,
+  onMaskChange,
+  onClearMask,
+  onRemove,
+  onOpenPicker,
+  disabled = false,
+}) {
   const imgRef = useRef(null);
-  const canvasRef = useRef(null);
+  const overlayCanvasRef = useRef(null);
+  const maskCanvasRef = useRef(null);
   const drawingRef = useRef(false);
   const lastPointRef = useRef(null);
   const [brushSize, setBrushSize] = useState(32);
-  const [eraseMode, setEraseMode] = useState(false);
-  const [imageAspect, setImageAspect] = useState(1);
+  const [maskMode, setMaskMode] = useState("reveal");
+  const hasDrawnMaskRef = useRef(Boolean(maskValue));
 
-  const exportMask = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    onChange(canvas.toDataURL("image/png"));
-  };
-
-  const fillCanvas = (fillStyle) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    ctx.save();
-    ctx.globalCompositeOperation = "source-over";
-    ctx.fillStyle = fillStyle;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.restore();
-  };
-
-  const setupCanvas = () => {
+  const resetCanvases = () => {
+    const overlayCanvas = overlayCanvasRef.current;
+    const maskCanvas = maskCanvasRef.current;
     const img = imgRef.current;
-    const canvas = canvasRef.current;
-    if (!img || !canvas || !img.naturalWidth || !img.naturalHeight) return;
-    const sameSize = canvas.width === img.naturalWidth && canvas.height === img.naturalHeight;
-    if (!sameSize) {
+    if (!overlayCanvas || !maskCanvas || !img?.naturalWidth || !img?.naturalHeight) return;
+
+    [overlayCanvas, maskCanvas].forEach((canvas) => {
       canvas.width = img.naturalWidth;
       canvas.height = img.naturalHeight;
-      fillCanvas("black");
-      onChange("");
+    });
+
+    const overlayCtx = overlayCanvas.getContext("2d");
+    overlayCtx.save();
+    overlayCtx.globalCompositeOperation = "source-over";
+    overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    overlayCtx.fillStyle = "rgba(236, 236, 241, 0.42)";
+    overlayCtx.fillRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    overlayCtx.restore();
+
+    const maskCtx = maskCanvas.getContext("2d");
+    maskCtx.save();
+    maskCtx.globalCompositeOperation = "source-over";
+    maskCtx.fillStyle = "black";
+    maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+    maskCtx.restore();
+  };
+
+  const clearMask = () => {
+    hasDrawnMaskRef.current = false;
+    resetCanvases();
+    onClearMask();
+  };
+
+  const exportMask = () => {
+    const canvas = maskCanvasRef.current;
+    if (!canvas || !hasDrawnMaskRef.current) {
+      onMaskChange("");
+      return;
     }
-    setImageAspect(img.naturalWidth / img.naturalHeight);
+    const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data;
+    let hasWhitePixels = false;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index] > 8 || pixels[index + 1] > 8 || pixels[index + 2] > 8) {
+        hasWhitePixels = true;
+        break;
+      }
+    }
+    if (!hasWhitePixels) {
+      hasDrawnMaskRef.current = false;
+      onMaskChange("");
+      return;
+    }
+    onMaskChange(canvas.toDataURL("image/png"));
   };
 
   useEffect(() => {
     if (!imageUrl) {
-      onChange("");
+      onMaskChange("");
+      return undefined;
     }
-  }, [imageUrl, onChange]);
-
-  useEffect(() => {
     const img = imgRef.current;
     if (!img) return undefined;
-    if (img.complete) setupCanvas();
-    const onLoad = () => setupCanvas();
+    if (img.complete) {
+      hasDrawnMaskRef.current = false;
+      resetCanvases();
+      onMaskChange("");
+    }
+    const onLoad = () => {
+      hasDrawnMaskRef.current = false;
+      resetCanvases();
+      onMaskChange("");
+    };
     img.addEventListener("load", onLoad);
     return () => img.removeEventListener("load", onLoad);
-  }, [imageUrl]);
+  }, [imageUrl, onMaskChange]);
 
   const pointerPoint = (event) => {
-    const canvas = canvasRef.current;
+    const canvas = overlayCanvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
@@ -162,24 +196,36 @@ function MaskEditor({ imageUrl, value, onChange, disabled = false }) {
   };
 
   const drawSegment = (from, to) => {
-    const canvas = canvasRef.current;
-    if (!canvas || !from || !to) return;
-    const ctx = canvas.getContext("2d");
-    ctx.save();
-    ctx.globalCompositeOperation = "source-over";
-    ctx.strokeStyle = eraseMode ? "black" : "white";
-    ctx.fillStyle = eraseMode ? "black" : "white";
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.lineWidth = brushSize;
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(to.x, to.y);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(to.x, to.y, brushSize / 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+    const overlayCanvas = overlayCanvasRef.current;
+    const maskCanvas = maskCanvasRef.current;
+    if (!overlayCanvas || !maskCanvas || !from || !to) return;
+
+    const drawLine = (ctx, mode, strokeStyle, fillStyle) => {
+      ctx.save();
+      ctx.globalCompositeOperation = mode;
+      ctx.strokeStyle = strokeStyle;
+      ctx.fillStyle = fillStyle;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = brushSize;
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(to.x, to.y, brushSize / 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    };
+
+    if (maskMode === "restore") {
+      drawLine(overlayCanvas.getContext("2d"), "source-over", "rgba(236, 236, 241, 0.42)", "rgba(236, 236, 241, 0.42)");
+      drawLine(maskCanvas.getContext("2d"), "source-over", "black", "black");
+    } else {
+      drawLine(overlayCanvas.getContext("2d"), "destination-out", "rgba(0,0,0,1)", "rgba(0,0,0,1)");
+      drawLine(maskCanvas.getContext("2d"), "source-over", "white", "white");
+      hasDrawnMaskRef.current = true;
+    }
   };
 
   const startDraw = (event) => {
@@ -206,52 +252,66 @@ function MaskEditor({ imageUrl, value, onChange, disabled = false }) {
     exportMask();
   };
 
-  const clearMask = () => {
-    fillCanvas("black");
-    exportMask();
-  };
-
-  if (!imageUrl) {
-    return <div className="task-asset-empty muted">Upload an init image to start drawing an inpaint mask.</div>;
-  }
-
   return (
-    <div className="mask-editor-block">
-      <div className="mask-editor-toolbar row">
-        <label className="mask-editor-brush">
-          Brush
-          <input
-            type="range"
-            min="4"
-            max="160"
-            step="1"
-            value={brushSize}
-            onChange={(event) => setBrushSize(Number(event.target.value))}
-            disabled={disabled}
-          />
-          <span>{brushSize}px</span>
-        </label>
-        <button type="button" className={`secondary mask-toggle ${eraseMode ? "active" : ""}`} onClick={() => setEraseMode((prev) => !prev)} disabled={disabled}>
-          {eraseMode ? "Erase" : "Paint mask"}
+    <div className={`attached-image-card ${maskValue ? "has-mask" : ""}`}>
+      <div className="attached-image-toolbar">
+        <button
+          type="button"
+          className={`mask-mode-button ${maskMode === "reveal" ? "active" : ""}`}
+          onClick={() => setMaskMode("reveal")}
+          disabled={disabled}
+        >
+          Reveal
         </button>
-        <button type="button" className="secondary" onClick={clearMask} disabled={disabled}>
-          Clear mask
+        <button
+          type="button"
+          className={`mask-mode-button ${maskMode === "restore" ? "active" : ""}`}
+          onClick={() => setMaskMode("restore")}
+          disabled={disabled}
+        >
+          Restore
         </button>
-        {value ? <span className="badge">Mask ready</span> : <span className="badge">Mask empty</span>}
+        <button type="button" className="mask-brush-button" disabled={disabled}>
+          Brush {brushSize}px
+        </button>
+        <input
+          className="mask-brush-range"
+          type="range"
+          min="8"
+          max="140"
+          step="1"
+          value={brushSize}
+          onChange={(event) => setBrushSize(Number(event.target.value))}
+          disabled={disabled}
+          aria-label="Mask brush size"
+        />
+        <button type="button" className="ghost" onClick={clearMask} disabled={disabled || !maskValue}>
+          Clear
+        </button>
+        <button type="button" className="ghost" onClick={onOpenPicker} disabled={disabled}>
+          Replace
+        </button>
+        <button type="button" className="ghost" onClick={onRemove} disabled={disabled}>
+          Remove
+        </button>
       </div>
-      <div className="mask-editor-stage" style={{ aspectRatio: imageAspect || 1 }}>
-        <img ref={imgRef} src={imageUrl} alt="Init preview" draggable="false" />
+      <div className="attached-image-stage">
+        <img ref={imgRef} src={imageUrl} alt="Attached source" draggable="false" />
         <canvas
-          ref={canvasRef}
-          className="mask-editor-canvas"
+          ref={overlayCanvasRef}
+          className="attached-mask-overlay"
           onPointerDown={startDraw}
           onPointerMove={moveDraw}
           onPointerUp={stopDraw}
           onPointerLeave={stopDraw}
           onPointerCancel={stopDraw}
         />
+        <canvas ref={maskCanvasRef} hidden />
       </div>
-      <div className="muted">Paint with white to regenerate those areas. Black regions stay preserved.</div>
+      <div className="attached-image-meta">
+        <span className="badge">{fileName || "attached image"}</span>
+        <span className="muted">Hover and draw to erase the overlay into an inpaint mask.</span>
+      </div>
     </div>
   );
 }
@@ -263,9 +323,7 @@ async function dataUrlToFile(dataUrl, fileName) {
 }
 
 export default function GeneratePage() {
-  const [argSpecs, setArgSpecs] = useState([]);
   const [args, setArgs] = useState({});
-  const [checkpoints, setCheckpoints] = useState([]);
   const [status, setStatus] = useState({ active: false });
   const [runId, setRunId] = useState(null);
   const [output, setOutput] = useState(null);
@@ -274,12 +332,10 @@ export default function GeneratePage() {
   const [textConditioningAvailable, setTextConditioningAvailable] = useState(true);
   const [initFile, setInitFile] = useState(null);
   const [initPreview, setInitPreview] = useState("");
-  const [controlFile, setControlFile] = useState(null);
-  const [controlPreview, setControlPreview] = useState("");
   const [maskDataUrl, setMaskDataUrl] = useState("");
+  const [attachPortalOpen, setAttachPortalOpen] = useState(false);
   const [isUploadingAssets, setIsUploadingAssets] = useState(false);
   const initBlobUrlRef = useRef("");
-  const controlBlobUrlRef = useRef("");
   const wasGeneratingRef = useRef(false);
   const promptRef = useRef(null);
   const negativeRef = useRef(null);
@@ -292,21 +348,12 @@ export default function GeneratePage() {
   useEffect(() => {
     const load = async () => {
       const [argsData, ckptData] = await Promise.all([api.getSampleArgs(), api.listCheckpoints()]);
-      setArgSpecs(argsData.items || []);
-      setCheckpoints(ckptData.items || []);
 
-      const initial = {};
-      (argsData.items || []).forEach((spec) => {
-        if (spec.name === "ckpt" && ckptData.items?.length > 0) {
-          initial[spec.name] = ckptData.items[0];
-        } else if (spec.default !== null && spec.default !== undefined) {
-          initial[spec.name] = spec.default;
-        } else if (spec.type === "bool") {
-          initial[spec.name] = false;
-        } else {
-          initial[spec.name] = "";
-        }
-      });
+      const initial = buildArgsWithStoredSettings(
+        argsData.items || [],
+        SAMPLE_SETTINGS_KEY,
+        { checkpoints: ckptData.items || [] }
+      );
       setArgs(initial);
     };
     load();
@@ -394,7 +441,6 @@ export default function GeneratePage() {
   useEffect(() => {
     return () => {
       if (initBlobUrlRef.current) URL.revokeObjectURL(initBlobUrlRef.current);
-      if (controlBlobUrlRef.current) URL.revokeObjectURL(controlBlobUrlRef.current);
     };
   }, []);
 
@@ -423,29 +469,29 @@ export default function GeneratePage() {
     });
     if (name === "task" || name === "family") {
       setInitFile(null);
-      setControlFile(null);
       setInitPreview("");
-      setControlPreview("");
       setMaskDataUrl("");
     }
   };
 
-  const setLocalPreview = (kind, file) => {
+  const setLocalPreview = (file) => {
     const nextUrl = file ? URL.createObjectURL(file) : "";
-    if (kind === "init") {
-      if (initBlobUrlRef.current) URL.revokeObjectURL(initBlobUrlRef.current);
-      initBlobUrlRef.current = nextUrl;
-      setInitFile(file || null);
-      setInitPreview(nextUrl);
-      setArgs((prev) => ({ ...prev, "init-image": file ? "" : prev["init-image"] || "" }));
-      if (!file) setMaskDataUrl("");
-      return;
-    }
-    if (controlBlobUrlRef.current) URL.revokeObjectURL(controlBlobUrlRef.current);
-    controlBlobUrlRef.current = nextUrl;
-    setControlFile(file || null);
-    setControlPreview(nextUrl);
-    setArgs((prev) => ({ ...prev, "control-image": file ? "" : prev["control-image"] || "" }));
+    if (initBlobUrlRef.current) URL.revokeObjectURL(initBlobUrlRef.current);
+    initBlobUrlRef.current = nextUrl;
+    setInitFile(file || null);
+    setInitPreview(nextUrl);
+    setMaskDataUrl("");
+    setArgs((prev) => ({
+      ...prev,
+      task: file ? "img2img" : "txt2img",
+      "init-image": file ? "" : "",
+      mask: "",
+      "control-image": "",
+    }));
+  };
+
+  const clearAttachedImage = () => {
+    setLocalPreview(null);
   };
 
   const resizePromptInput = (node) => {
@@ -454,29 +500,40 @@ export default function GeneratePage() {
     node.style.height = `${Math.min(node.scrollHeight, 96)}px`;
   };
 
-  const currentTask = args.task || "txt2img";
-  const currentFamily = args.family || "mmdit";
+  const promptText = String(args.prompt || "").trim();
+  const hasAttachedImage = Boolean(initPreview || args["init-image"]);
+  const uiMode = hasAttachedImage
+    ? maskDataUrl
+      ? "inpaint"
+      : "image-image"
+    : promptText
+      ? "text-image"
+      : "none-image";
+  const currentTask = uiMode === "inpaint" ? "inpaint" : hasAttachedImage ? "img2img" : "txt2img";
   const needsInit = currentTask === "img2img" || currentTask === "inpaint";
   const needsMask = currentTask === "inpaint";
-  const needsControl = currentTask === "control";
+
+  useEffect(() => {
+    setArgs((prev) => (prev.task === currentTask ? prev : { ...prev, task: currentTask }));
+  }, [currentTask]);
 
   const uploadPendingAssets = async (payload) => {
-    const next = { ...payload };
+    const next = { ...payload, task: currentTask };
     if (needsInit && initFile) {
       const uploaded = await api.uploadImage(initFile, currentTask === "inpaint" ? "inpaint-init" : "init");
       next["init-image"] = uploaded.path;
       setArgs((prev) => ({ ...prev, "init-image": uploaded.path }));
-    }
-    if (needsControl && controlFile) {
-      const uploaded = await api.uploadImage(controlFile, "control");
-      next["control-image"] = uploaded.path;
-      setArgs((prev) => ({ ...prev, "control-image": uploaded.path }));
     }
     if (needsMask && maskDataUrl) {
       const maskFile = await dataUrlToFile(maskDataUrl, "inpaint-mask.png");
       const uploaded = await api.uploadImage(maskFile, "inpaint-mask");
       next.mask = uploaded.path;
       setArgs((prev) => ({ ...prev, mask: uploaded.path }));
+    }
+    if (!needsInit) {
+      delete next["init-image"];
+      delete next.mask;
+      delete next["control-image"];
     }
     return next;
   };
@@ -492,13 +549,10 @@ export default function GeneratePage() {
       }
       payload = await uploadPendingAssets(payload);
       if (needsInit && !payload["init-image"]) {
-        throw new Error(currentTask === "inpaint" ? "Для inpaint нужно загрузить init image." : "Для img2img нужно загрузить init image.");
+        throw new Error(currentTask === "inpaint" ? "Для inpaint нужно прикрепить image." : "Для image-image нужно прикрепить image.");
       }
       if (needsMask && !payload.mask) {
-        throw new Error("Для inpaint нужно нарисовать или указать mask.");
-      }
-      if (needsControl && !payload["control-image"]) {
-        throw new Error("Для control generation нужно загрузить control image.");
+        throw new Error("Для inpaint нужно нарисовать mask.");
       }
       const resp = await api.startSample(payload);
       setRunId(resp.run_id);
@@ -532,31 +586,9 @@ export default function GeneratePage() {
     : !textConditioningAvailable
       ? "Модель не поддерживает генерацию на основе текста"
       : "";
+  const previewUrl = output ? absoluteFileUrl(output) : "";
+  const downloadUrl = output ? absoluteDownloadUrl(output) : "";
 
-  const negativeSpec = useMemo(
-    () => argSpecs.find((spec) => spec.name === "neg_prompt"),
-    [argSpecs]
-  );
-  const quickSpecs = useMemo(
-    () =>
-      argSpecs
-        .filter((spec) => quickFields.includes(spec.name))
-        .map((spec) => familyAwareSpec(spec, currentFamily)),
-    [argSpecs, currentFamily]
-  );
-  const advancedSpecs = useMemo(
-    () =>
-      argSpecs.filter(
-        (spec) =>
-          !quickFields.includes(spec.name) &&
-          !promptFields.includes(spec.name) &&
-          spec.name !== "out" &&
-          !hiddenPathFields.has(spec.name) &&
-          !(currentFamily !== "mmdit" && ["strength", "control-strength", "control-type"].includes(spec.name)) &&
-          !(currentFamily === "var" && ["cfg", "shift", "width", "height", "fake-vae"].includes(spec.name))
-      ).map((spec) => familyAwareSpec(spec, currentFamily)),
-    [argSpecs, currentFamily]
-  );
 
   useEffect(() => {
     if (isGenerating) {
@@ -580,120 +612,70 @@ export default function GeneratePage() {
     }
   };
 
+  const handleMaskChange = useCallback((value) => {
+    setMaskDataUrl(value);
+    setArgs((prev) => ({ ...prev, mask: "" }));
+  }, []);
+
   useLayoutEffect(() => {
     resizePromptInput(promptRef.current);
     resizePromptInput(negativeRef.current);
-  }, [args.prompt, args[negativeSpec?.name || "neg_prompt"]]);
+  }, [args.prompt, args.neg_prompt]);
 
   const initPreviewUrl = absolutePreviewUrl(initPreview || args["init-image"]);
-  const controlPreviewUrl = absolutePreviewUrl(controlPreview || args["control-image"]);
 
   return (
-    <div className="page generate-page">
+    <div className="page fit-page generate-page">
+      <ImageAttachPortal
+        open={attachPortalOpen}
+        onClose={() => setAttachPortalOpen(false)}
+        onPick={setLocalPreview}
+        disabled={status.active || isUploadingAssets}
+      />
       <PageHeader
         eyebrow="Sampling"
         title="Generate"
-        description="Prompt-first workspace for txt2img, img2img, inpaint, control and family-aware sampling."
+        description="Prompt, image and mask."
       />
       <div className="generate-workspace">
-        <div className={`generate-stage ${isGenerating ? "is-generating" : ""} ${output ? "has-output" : ""}`}>
-          <div className="settings-panel generate-panel settings-square">
-            {error && <div className="muted">{error}</div>}
-            {status.active && !activeRun && <div className="muted">Job запускается...</div>}
+        {error && <div className="alert error">{error}</div>}
+        {status.active && !activeRun && <div className="alert">Job запускается...</div>}
 
-            <div className="quick-settings">
-              {quickSpecs.map((spec) => (
-                <ArgField
-                  key={spec.name}
-                  spec={spec}
-                  value={args[spec.name]}
-                  onChange={handleChange}
-                  checkpoints={checkpoints}
-                  variant="flat"
-                />
-              ))}
-            </div>
-
-            <div className="task-hint muted">{TASK_HELP[currentTask] || ""}</div>
-
-            {(needsInit || needsControl) && (
-              <div className="settings-section task-assets-grid">
-                {needsInit && (
-                  <TaskAssetCard
-                    title="Init image"
-                    description="Source image used for img2img / inpaint."
-                    previewUrl={initPreviewUrl}
-                    fileName={initFile?.name || ""}
-                    pathValue={args["init-image"] || ""}
-                    onPick={(file) => setLocalPreview("init", file)}
-                    onClear={() => {
-                      if (initBlobUrlRef.current) URL.revokeObjectURL(initBlobUrlRef.current);
-                      initBlobUrlRef.current = "";
-                      setInitFile(null);
-                      setInitPreview("");
-                      setMaskDataUrl("");
-                      setArgs((prev) => ({ ...prev, "init-image": "", mask: "" }));
-                    }}
-                    disabled={status.active || isUploadingAssets}
-                  >
-                    {needsMask ? (
-                      <MaskEditor
-                        imageUrl={initPreviewUrl}
-                        value={maskDataUrl}
-                        onChange={setMaskDataUrl}
-                        disabled={status.active || isUploadingAssets}
-                      />
-                    ) : null}
-                  </TaskAssetCard>
-                )}
-                {needsControl && (
-                  <TaskAssetCard
-                    title="Control image"
-                    description="Conditioning image for control generation."
-                    previewUrl={controlPreviewUrl}
-                    fileName={controlFile?.name || ""}
-                    pathValue={args["control-image"] || ""}
-                    onPick={(file) => setLocalPreview("control", file)}
-                    onClear={() => {
-                      if (controlBlobUrlRef.current) URL.revokeObjectURL(controlBlobUrlRef.current);
-                      controlBlobUrlRef.current = "";
-                      setControlFile(null);
-                      setControlPreview("");
-                      setArgs((prev) => ({ ...prev, "control-image": "" }));
-                    }}
-                    disabled={status.active || isUploadingAssets}
-                  />
-                )}
-              </div>
-            )}
-
-            <div className="settings-section">
-              <div className="flat-grid">
-                {advancedSpecs.map((spec) => (
-                  <ArgField
-                    key={spec.name}
-                    spec={spec}
-                    value={args[spec.name]}
-                    onChange={handleChange}
-                    checkpoints={checkpoints}
-                    variant="flat"
-                  />
-                ))}
-              </div>
-            </div>
-          </div>
-
+        <div
+          className={`generate-stage ${isGenerating ? "is-generating" : ""} ${output ? "has-output" : ""} ${hasAttachedImage ? "has-attachment" : ""}`}
+        >
+          {hasAttachedImage ? (
+            <AttachedImageEditor
+              imageUrl={initPreviewUrl}
+              fileName={initFile?.name || String(args["init-image"] || "").split("/").pop()}
+              maskValue={maskDataUrl}
+              onMaskChange={handleMaskChange}
+              onClearMask={() => {
+                setMaskDataUrl("");
+                setArgs((prev) => ({ ...prev, mask: "", task: "img2img" }));
+              }}
+              onRemove={clearAttachedImage}
+              onOpenPicker={() => setAttachPortalOpen(true)}
+              disabled={status.active || isUploadingAssets}
+            />
+          ) : null}
           <div className="generation-preview-square">
             {isGenerating ? (
               <div className="preview-loader" />
-            ) : output && absoluteFileUrl(output) ? (
-              <img src={absoluteFileUrl(output)} alt="sample" />
-            ) : output && absoluteDownloadUrl(output) ? (
-              <div className="task-asset-empty muted">
-                Output is not previewable. <a href={absoluteDownloadUrl(output)}>Download artifact</a>
+            ) : previewUrl ? (
+              <img src={previewUrl} alt="sample" />
+            ) : downloadUrl ? (
+              <div className="empty-state preview-empty-state">
+                <strong>Preview unavailable</strong>
+                <span>
+                  Output is not previewable. <a href={downloadUrl}>Download artifact</a>
+                </span>
               </div>
             ) : (
-              <div className="preview-loader" />
+              <div className="empty-state preview-empty-state">
+                <strong>No preview yet</strong>
+                <span>Start a generation to see the latest sample here.</span>
+              </div>
             )}
           </div>
         </div>
@@ -708,10 +690,23 @@ export default function GeneratePage() {
             </div>
           )}
           <div className={`chat-input-row ${blockingRunType ? "blocked" : ""}`}>
+            <button
+              type="button"
+              className={`attach-action ${hasAttachedImage ? "active" : ""}`}
+              onClick={() => setAttachPortalOpen(true)}
+              disabled={status.active || isUploadingAssets}
+              aria-label="Attach image"
+              title={hasAttachedImage ? "Replace image" : "Attach image"}
+            >
+              <svg viewBox="0 -960 960 960" aria-hidden="true">
+                <path d="M440-440H200v-80h240v-240h80v240h240v80H520v240h-80v-240Z" />
+              </svg>
+            </button>
             <div className={`chat-fields ${inputOverlay ? "unavailable" : ""}`}>
               <div className="chat-field prompt-field-main">
                 <textarea
                   ref={promptRef}
+                  name="prompt"
                   value={args.prompt ?? ""}
                   onChange={(event) => {
                     handleChange("prompt", event.target.value);
@@ -726,9 +721,10 @@ export default function GeneratePage() {
               <div className="chat-field prompt-field-negative">
                 <textarea
                   ref={negativeRef}
-                  value={args[negativeSpec?.name || "neg_prompt"] ?? ""}
+                  name="negative-prompt"
+                  value={args.neg_prompt ?? ""}
                   onChange={(event) => {
-                    handleChange(negativeSpec?.name || "neg_prompt", event.target.value);
+                    handleChange("neg_prompt", event.target.value);
                     resizePromptInput(event.target);
                   }}
                   onKeyDown={handlePromptKeyDown}
@@ -744,7 +740,7 @@ export default function GeneratePage() {
               type="button"
               className={`generate-action ${isGenerating ? "stop" : ""}`}
               onClick={isGenerating ? handleStop : handleStart}
-              disabled={(status.active && !isGenerating) || isUploadingAssets}
+              disabled={(status.active && !isGenerating) || isUploadingAssets || uiMode === "none-image"}
               aria-label={isGenerating ? "Stop generation" : "Start generation"}
               title={isGenerating ? "Stop" : isUploadingAssets ? "Uploading assets" : "Start"}
             >

@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Routes, Route, NavLink } from "react-router-dom";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Routes, Route, NavLink, useNavigate } from "react-router-dom";
 import Dashboard from "./pages/Dashboard.jsx";
 import TrainPage from "./pages/TrainPage.jsx";
 import GeneratePage from "./pages/GeneratePage.jsx";
@@ -7,6 +7,7 @@ import RunDetails from "./pages/RunDetails.jsx";
 import FilesPage from "./pages/FilesPage.jsx";
 import PrepareLatentsPage from "./pages/PrepareLatentsPage.jsx";
 import TrainSamplesPage from "./pages/TrainSamplesPage.jsx";
+import SettingsPage from "./pages/SettingsPage.jsx";
 import { api, clearLegacyAuthToken } from "./api.js";
 import StatusPill from "./components/StatusPill.jsx";
 import { formatRunId, formatRunType } from "./utils/formatters.js";
@@ -24,28 +25,66 @@ const ICONS = {
     "M240-280h280v-80H240v80Zm0-160h480v-80H240v80Zm0-160h480v-80H240v80ZM160-120q-33 0-56.5-23.5T80-200v-560q0-33 23.5-56.5T160-840h640q33 0 56.5 23.5T880-760v560q0 33-23.5 56.5T800-120H160Z",
   samples:
     "M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm40-160h480L570-480 450-320l-90-120-120 160Z",
+  settings:
+    "m370-80-16-128q-13-5-24.5-12T307-235l-119 50L78-375l103-78q-1-7-1-13.5v-27q0-6.5 1-13.5L78-585l110-190 119 50q11-8 22.5-15t24.5-12l16-128h220l16 128q13 5 24.5 12t22.5 15l119-50 110 190-103 78q1 7 1 13.5v27q0 6.5-2 13.5l104 78-110 190-120-50q-11 8-22.5 15T606-208L590-80H370Zm110-260q58 0 99-41t41-99q0-58-41-99t-99-41q-58 0-99 41t-41 99q0 58 41 99t99 41Z",
+  menu:
+    "M120-240v-80h720v80H120Zm0-200v-80h720v80H120Zm0-200v-80h720v80H120Z",
+  search:
+    "M784-120 532-372q-30 24-69 38t-83 14q-109 0-184.5-75.5T120-580q0-109 75.5-184.5T380-840q109 0 184.5 75.5T640-580q0 44-14 83t-38 69l252 252-56 56ZM380-400q75 0 127.5-52.5T560-580q0-75-52.5-127.5T380-760q-75 0-127.5 52.5T200-580q0 75 52.5 127.5T380-400Z",
 };
 
 const navSections = [
   {
-    label: "Monitor",
+    label: "Workspace",
     items: [
-      { to: "/", end: true, label: "Dashboard", icon: "dashboard" },
-      { to: "/files", label: "Logs", icon: "logs" },
+      {
+        to: "/",
+        end: true,
+        label: "Dashboard",
+        icon: "dashboard",
+        keywords: "home overview status runs artifacts",
+      },
+      {
+        to: "/generate",
+        label: "Generate",
+        icon: "generate",
+        keywords: "txt2img img2img inpaint control sampler prompt",
+      },
+      {
+        to: "/train",
+        label: "Train",
+        icon: "train",
+        keywords: "config presets checkpoints metrics loss",
+      },
     ],
   },
   {
-    label: "Workflows",
+    label: "Operations",
     items: [
-      { to: "/generate", label: "Generate", icon: "generate" },
-      { to: "/train", label: "Train", icon: "train" },
-      { to: "/latents", label: "Latents", icon: "cache" },
-    ],
-  },
-  {
-    label: "Artifacts",
-    items: [
-      { to: "/train/samples", label: "Train samples", icon: "samples" },
+      {
+        to: "/latents",
+        label: "Latent cache",
+        icon: "cache",
+        keywords: "prepare cache shards dataset vae",
+      },
+      {
+        to: "/files",
+        label: "Runs & logs",
+        icon: "logs",
+        keywords: "stdout stderr history logs metrics",
+      },
+      {
+        to: "/train/samples",
+        label: "Train samples",
+        icon: "samples",
+        keywords: "images artifacts previews samples",
+      },
+      {
+        to: "/settings",
+        label: "Settings",
+        icon: "settings",
+        keywords: "config preferences presets sample latent cache",
+      },
     ],
   },
 ];
@@ -80,10 +119,13 @@ function AuthPage({ onAuthenticated }) {
   return (
     <div className="auth-page">
       <form className="auth-panel" onSubmit={submit}>
+        <div className="brand-mark">md</div>
         <div>
-          <div className="brand-mark">md</div>
+          <div className="page-eyebrow">Secure workspace</div>
           <h1>md-diffusion WebUI</h1>
-          <p className="muted">Enter WEBUI_AUTH_TOKEN to continue.</p>
+          <p className="muted">
+            Enter WEBUI_AUTH_TOKEN to open the local generation, training and cache console.
+          </p>
         </div>
         <label className="auth-field">
           <span>Token</span>
@@ -118,7 +160,11 @@ function ThemeIcon({ dark }) {
 }
 
 function AppShell({ authRequired, onLogout, theme, setTheme }) {
+  const navigate = useNavigate();
+  const searchInputRef = useRef(null);
   const [status, setStatus] = useState({ active: false });
+  const [query, setQuery] = useState("");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const isDark = theme === "dark";
 
   useEffect(() => {
@@ -139,6 +185,48 @@ function AppShell({ authRequired, onLogout, theme, setTheme }) {
     };
   }, []);
 
+  useEffect(() => {
+    const handleKeyDown = (event) => {
+      const tagName = event.target?.tagName?.toLowerCase();
+      const isTyping = ["input", "textarea", "select"].includes(tagName) || event.target?.isContentEditable;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        return;
+      }
+      if (!isTyping && event.key === "/") {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  const flatNavItems = useMemo(
+    () => navSections.flatMap((section) => section.items.map((item) => ({ ...item, section: section.label }))),
+    []
+  );
+  const filteredItems = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return flatNavItems;
+    return flatNavItems.filter((item) =>
+      `${item.label} ${item.section} ${item.keywords}`.toLowerCase().includes(needle)
+    );
+  }, [flatNavItems, query]);
+
+  const handleSearchKeyDown = (event) => {
+    if (event.key === "Enter" && filteredItems[0]) {
+      navigate(filteredItems[0].to);
+      setQuery("");
+      setSidebarOpen(false);
+    }
+    if (event.key === "Escape") {
+      setQuery("");
+      searchInputRef.current?.blur();
+    }
+  };
+
   const activeRun = status.active ? status.run : null;
   const runCaption = useMemo(() => {
     if (!activeRun) return "No active job";
@@ -147,7 +235,24 @@ function AppShell({ authRequired, onLogout, theme, setTheme }) {
 
   return (
     <>
-      <header className="app-sidebar">
+      <button
+        type="button"
+        className="mobile-menu-button"
+        onClick={() => setSidebarOpen((value) => !value)}
+        aria-label="Toggle navigation"
+      >
+        <NavIcon name="menu" />
+      </button>
+      {sidebarOpen ? (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          onClick={() => setSidebarOpen(false)}
+          aria-label="Close navigation"
+        />
+      ) : null}
+
+      <aside className={`app-sidebar ${sidebarOpen ? "open" : ""}`}>
         <div>
           <div className="brand-block">
             <div className="brand-mark">md</div>
@@ -156,23 +261,63 @@ function AppShell({ authRequired, onLogout, theme, setTheme }) {
               <span>MMDiT RF workspace</span>
             </div>
           </div>
+
+          <label className="sidebar-search">
+            <NavIcon name="search" />
+            <input
+              ref={searchInputRef}
+              name="workflow-search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="Search workflows"
+              aria-label="Search workflows"
+            />
+            <kbd>⌘K</kbd>
+          </label>
+
           <nav aria-label="Primary navigation">
-            {navSections.map((section) => (
-              <div key={section.label} className="nav-section">
-                <div className="nav-section-label">{section.label}</div>
-                {section.items.map((item) => (
-                  <NavLink key={item.to} to={item.to} end={item.end}>
-                    <NavIcon name={item.icon} />
-                    <span>{item.label}</span>
-                  </NavLink>
-                ))}
+            {query ? (
+              <div className="nav-section">
+                <div className="nav-section-label">Search results</div>
+                {filteredItems.length ? (
+                  filteredItems.map((item) => (
+                    <NavLink key={item.to} to={item.to} end={item.end} onClick={() => setSidebarOpen(false)}>
+                      <NavIcon name={item.icon} />
+                      <span>{item.label}</span>
+                    </NavLink>
+                  ))
+                ) : (
+                  <div className="empty-nav">No matching workflow.</div>
+                )}
               </div>
-            ))}
+            ) : (
+              navSections.map((section) => (
+                <div key={section.label} className="nav-section">
+                  <div className="nav-section-label">{section.label}</div>
+                  {section.items.map((item) => (
+                    <NavLink
+                      key={item.to}
+                      to={item.to}
+                      end={item.end}
+                      onClick={() => setSidebarOpen(false)}
+                    >
+                      <NavIcon name={item.icon} />
+                      <span>{item.label}</span>
+                    </NavLink>
+                  ))}
+                </div>
+              ))
+            )}
           </nav>
         </div>
 
         <div className="sidebar-footer">
-          <div className="job-dock">
+          <NavLink
+            className="job-dock"
+            to={activeRun ? `/runs/${activeRun.run_id}` : "/"}
+            onClick={() => setSidebarOpen(false)}
+          >
             <StatusPill status={activeRun?.status || "stopped"} />
             <div>
               <div className="job-dock-label">Runtime</div>
@@ -180,7 +325,7 @@ function AppShell({ authRequired, onLogout, theme, setTheme }) {
                 {runCaption}
               </div>
             </div>
-          </div>
+          </NavLink>
           <div className="header-actions">
             {authRequired ? (
               <button type="button" className="ghost" onClick={onLogout}>
@@ -199,7 +344,8 @@ function AppShell({ authRequired, onLogout, theme, setTheme }) {
             </button>
           </div>
         </div>
-      </header>
+      </aside>
+
       <main className="app-shell">
         <Routes>
           <Route path="/" element={<Dashboard />} />
@@ -208,6 +354,7 @@ function AppShell({ authRequired, onLogout, theme, setTheme }) {
           <Route path="/generate" element={<GeneratePage />} />
           <Route path="/latents" element={<PrepareLatentsPage />} />
           <Route path="/files" element={<FilesPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route path="/runs/:runId" element={<RunDetails />} />
         </Routes>
       </main>

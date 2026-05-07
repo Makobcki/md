@@ -113,7 +113,7 @@ export default function Dashboard() {
       <PageHeader
         eyebrow="Operations"
         title="Dashboard"
-        description="Single control surface for generation, training, cache preparation, artifacts and run history."
+        description="Runs, outputs and history."
         meta={<StatusPill status={activeRun?.status || "stopped"} />}
       />
 
@@ -134,8 +134,8 @@ export default function Dashboard() {
         <div className="panel active-run-panel">
           <div className="panel-header">
             <div>
-              <h2>Runtime</h2>
-              <p>Current job state and latest live metrics.</p>
+              <h2>Runtime thread</h2>
+              <p>Current job state and latest live metrics in one conversation-like stream.</p>
             </div>
             {activeRun ? (
               <button type="button" className="danger" onClick={handleStop}>
@@ -198,7 +198,7 @@ export default function Dashboard() {
         <div className="panel">
           <div className="panel-header">
             <div>
-              <h2>Recent Generations</h2>
+              <h2>Recent outputs</h2>
               <p>Latest previewable images from sample artifacts.</p>
             </div>
             <Link className="text-link" to="/generate">
@@ -227,7 +227,7 @@ export default function Dashboard() {
         <div className="panel">
           <div className="panel-header">
             <div>
-              <h2>Runs</h2>
+              <h2>Run history</h2>
               <p>
                 {inventory.training} training, {inventory.generation} generation, {inventory.latentCache} cache.
               </p>

@@ -23,8 +23,8 @@ export default function TrainSamplesPage() {
     <div className="page">
       <PageHeader
         eyebrow="Artifacts"
-        title="Train Samples"
-        description="Preview and download images emitted by training sample hooks."
+        title="Samples"
+        description="Training previews."
         actions={<Link className="text-link" to="/train">Back to Train</Link>}
       />
       <div className="card">
