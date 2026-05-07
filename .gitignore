@@ -13,6 +13,8 @@ vae_sd_mse/
 md-dev/
 *.egg-info/
 .codex
+.playwright-mcp/
+AGENTS.md
 report.md
 **__pycache__/
 *.egg-info
