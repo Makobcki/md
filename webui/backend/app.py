@@ -84,6 +84,30 @@ ws_manager = WSManager()
 job_manager = JobManager(ROOT_DIR, ws_manager, RUNS_DIR)
 
 
+def validate_family_workflow(family: str, task: str, sampler: str) -> None:
+    """Validate model-family capabilities for WebUI/API workflow requests."""
+    family = str(family or "mmdit")
+    task = str(task or "txt2img")
+    sampler = str(sampler or "flow_heun")
+    if family == "mmdit":
+        if sampler not in {"flow_euler", "flow_heun"}:
+            raise ValueError("model.family=mmdit requires a diffusion flow sampler.")
+        return
+    if family == "pixart_sigma":
+        if task != "txt2img":
+            raise ValueError(f"model.family=pixart_sigma does not support {task}.")
+        if sampler not in {"flow_euler", "flow_heun"}:
+            raise ValueError("model.family=pixart_sigma requires a diffusion flow sampler.")
+        return
+    if family == "var":
+        if sampler != "var_autoregressive":
+            raise ValueError("model.family=var does not support diffusion samplers.")
+        if task != "txt2img":
+            raise ValueError("model.family=var supports only txt2img token generation.")
+        return
+    raise ValueError("Unknown model family. Allowed: mmdit, pixart_sigma, var.")
+
+
 def _cors_allowed_origins() -> list[str]:
     origins = [
         item.strip()
@@ -366,7 +390,8 @@ class SampleArgs(BaseModel):
     neg_prompt: str = ""
     cfg: float = Field(default=5.0, ge=0.0, le=30.0)
     shift: Optional[float] = Field(default=None, gt=0.0, le=100.0)
-    sampler: Literal["flow_euler", "flow_heun"] = "flow_heun"
+    sampler: Literal["flow_euler", "flow_heun", "var_autoregressive"] = "flow_heun"
+    family: Literal["mmdit", "pixart_sigma", "var"] = "mmdit"
     seed: Optional[int] = 42
     device: Literal["auto", "cpu", "cuda"] = "auto"
     width: Optional[int] = Field(default=None, ge=1)
@@ -410,6 +435,7 @@ class SampleArgs(BaseModel):
             raise ValueError(f"task={self.task} requires: {', '.join(missing)}")
         if extra:
             raise ValueError(f"task={self.task} does not allow: {', '.join(extra)}")
+        validate_family_workflow(self.family, self.task, self.sampler)
         out_suffix = Path(self.out or "").suffix.lower()
         if self.latent_only and out_suffix and out_suffix not in {".pt", ".pth"}:
             raise ValueError("latent-only outputs must use .pt or .pth extension")
@@ -917,6 +943,11 @@ def get_train_config(_: None = Depends(_require_token)) -> Dict[str, Any]:
     return {"path": str(cfg_path), "content": config_service.read_config_text(ROOT_DIR)}
 
 
+@app.get("/api/config/presets")
+def get_config_presets(_: None = Depends(_require_token)) -> Dict[str, Any]:
+    return config_service.list_config_presets(ROOT_DIR)
+
+
 @app.put("/api/config")
 def update_train_config(payload: Dict[str, Any], _: None = Depends(_require_token)) -> Dict[str, Any]:
     content = payload.get("content")
@@ -1023,8 +1054,9 @@ def _sample_arg_specs() -> list[Dict[str, Any]]:
     return [
         {"name": "ckpt", "flags": ["--ckpt"], "type": "str", "default": None, "required": True, "help": "Checkpoint path", "choices": None},
         {"name": "out", "flags": ["--out"], "type": "str", "default": "", "required": False, "help": "Optional output path. Defaults to this WebUI run samples directory.", "choices": None},
+        {"name": "family", "flags": ["--family"], "type": "str", "default": "mmdit", "required": False, "help": "Model family", "choices": ["mmdit", "pixart_sigma", "var"]},
         {"name": "task", "flags": ["--task"], "type": "str", "default": "txt2img", "required": False, "help": "Generation task", "choices": ["txt2img", "img2img", "inpaint", "control"]},
-        {"name": "sampler", "flags": ["--sampler"], "type": "str", "default": "flow_heun", "required": False, "help": "Flow sampler", "choices": ["flow_euler", "flow_heun"]},
+        {"name": "sampler", "flags": ["--sampler"], "type": "str", "default": "flow_heun", "required": False, "help": "Sampler", "choices": ["flow_euler", "flow_heun", "var_autoregressive"]},
         {"name": "n", "flags": ["--n"], "type": "int", "default": 1, "required": False, "help": "Number of images", "choices": None},
         {"name": "steps", "flags": ["--steps"], "type": "int", "default": 30, "required": False, "help": "Sampling steps", "choices": None},
         {"name": "cfg", "flags": ["--cfg"], "type": "float", "default": 5.0, "required": False, "help": "Classifier-free guidance scale", "choices": None},

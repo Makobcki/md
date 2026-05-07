@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
+import PageHeader from "../components/PageHeader.jsx";
 import StatusPill from "../components/StatusPill.jsx";
 import useLogBuffer from "../hooks/useLogBuffer.js";
 import useRunLogStream from "../hooks/useRunLogStream.js";
@@ -81,7 +82,11 @@ export default function FilesPage() {
 
   return (
     <div className="page">
-      <h1 className="page-title">Logs</h1>
+      <PageHeader
+        eyebrow="Run history"
+        title="Logs"
+        description="Filter live and historical stdout/stderr streams by run, level, text and timestamp."
+      />
       {error && <div className="muted">{error}</div>}
       <div className="split">
         <div className="card">

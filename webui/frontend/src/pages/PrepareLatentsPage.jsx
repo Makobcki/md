@@ -4,6 +4,8 @@ import LogViewer from "../components/LogViewer.jsx";
 import useLogBuffer from "../hooks/useLogBuffer.js";
 import useRunLogStream from "../hooks/useRunLogStream.js";
 import ArgField from "../components/ArgField.jsx";
+import MetricTile from "../components/MetricTile.jsx";
+import PageHeader from "../components/PageHeader.jsx";
 import StatusPill from "../components/StatusPill.jsx";
 import { isMetricEvent, mergeMetricEvents } from "../utils/metrics.js";
 
@@ -174,7 +176,12 @@ export default function PrepareLatentsPage() {
 
   return (
     <div className="page">
-      <h1 className="page-title">Prepare Latents</h1>
+      <PageHeader
+        eyebrow="Dataset cache"
+        title="Prepare Latents"
+        description="Prepare latent cache shards with live progress, throughput and rebuild controls."
+        meta={<StatusPill status={status.active ? "running" : "stopped"} />}
+      />
       <div className="two-col">
         <div className="page">
           <div className="card">
@@ -206,12 +213,9 @@ export default function PrepareLatentsPage() {
               </div>
             ) : null}
             {command.length > 0 && <div className="muted">Latent cache task prepared.</div>}
-            <div className="grid">
+            <div className="compact-metrics">
               {overview.map((item) => (
-                <div key={item.label}>
-                  <div className="muted">{item.label}</div>
-                  <div>{item.value}</div>
-                </div>
+                <MetricTile key={item.label} label={item.label} value={item.value} />
               ))}
             </div>
           </div>

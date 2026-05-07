@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, wsUrl } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 import LineChart from "../components/LineChart.jsx";
+import MetricTile from "../components/MetricTile.jsx";
+import PageHeader from "../components/PageHeader.jsx";
 import YamlEditor from "../components/YamlEditor.jsx";
 import useLogBuffer from "../hooks/useLogBuffer.js";
 import useRunLogStream from "../hooks/useRunLogStream.js";
@@ -19,6 +21,131 @@ import {
   metricStep,
   metricThroughput,
 } from "../utils/metrics.js";
+import { extractConfigUses } from "../utils/uiModel.js";
+
+const presetKindOrder = ["model", "training", "data", "text", "sampler", "webui"];
+
+const presetKindLabels = {
+  model: "Model",
+  training: "Training",
+  data: "Data",
+  text: "Text",
+  sampler: "Sampler",
+  webui: "WebUI",
+};
+
+function insertPresetUse(content, kind, name) {
+  const section = kind === "sampler" ? "sampling" : kind;
+  const lines = String(content || "").split("\n");
+  const useLine = `    use "${name}"`;
+  let depth = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const startsSection = depth === 1 && new RegExp(`^\\s*${section}\\s*\\{`).test(line);
+    if (startsSection) {
+      lines.splice(index + 1, 0, useLine);
+      return lines.join("\n");
+    }
+    depth += (line.match(/\{/g) || []).length;
+    depth -= (line.match(/\}/g) || []).length;
+  }
+
+  const insertAt = Math.max(1, lines.findIndex((line) => /^\s*}\s*$/.test(line)));
+  const block = [`  ${section} {`, `    use "${name}"`, "  }", ""];
+  if (insertAt > 0) {
+    lines.splice(insertAt, 0, ...block);
+    return lines.join("\n");
+  }
+  return `${content.trimEnd()}\n\n${block.join("\n")}`;
+}
+
+function PresetLibrary({
+  presets,
+  selectedKind,
+  selectedName,
+  onSelectKind,
+  onSelectPreset,
+  activeUses,
+  onInsert,
+}) {
+  const groups = presets?.groups || {};
+  const kinds = presetKindOrder.filter((kind) => (groups[kind] || []).length > 0);
+  const items = groups[selectedKind] || [];
+  const selected = items.find((item) => item.name === selectedName) || items[0] || null;
+  const isActive = (item) => {
+    const activeKind = item.kind === "sampler" ? "sampling" : item.kind;
+    return (activeUses[activeKind] || activeUses[item.kind] || []).includes(item.name);
+  };
+
+  return (
+    <div className="preset-library">
+      <div className="preset-kind-tabs" role="tablist" aria-label="Preset groups">
+        {kinds.map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            className={kind === selectedKind ? "active" : ""}
+            onClick={() => onSelectKind(kind)}
+          >
+            {presetKindLabels[kind] || kind}
+          </button>
+        ))}
+      </div>
+
+      <div className="preset-browser">
+        <div className="preset-list">
+          {items.map((item) => {
+            const active = isActive(item);
+            return (
+              <button
+                key={`${item.kind}:${item.name}`}
+                type="button"
+                className={`preset-list-item ${selected?.name === item.name ? "selected" : ""}`}
+                onClick={() => onSelectPreset(item.name)}
+              >
+                <span>
+                  <strong>{item.name}</strong>
+                  <small>{item.summary || item.relative_path}</small>
+                </span>
+                {active ? <em>active</em> : null}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="preset-detail">
+          {selected ? (
+            <>
+              <div className="preset-detail-head">
+                <div>
+                  <h3>{selected.name}</h3>
+                  <p>{selected.summary || selected.relative_path}</p>
+                </div>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => onInsert(selected)}
+                  disabled={isActive(selected)}
+                >
+                  Insert use
+                </button>
+              </div>
+              <div className="preset-meta-row">
+                <span className="badge">{selected.kind}</span>
+                <span className="badge">v{selected.version ?? "?"}</span>
+                <span className="badge">{selected.relative_path}</span>
+              </div>
+              <pre className="preset-preview">{selected.content}</pre>
+            </>
+          ) : (
+            <div className="empty-state">No presets in this group.</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function TrainPage() {
   const [config, setConfig] = useState("");
@@ -31,6 +158,9 @@ export default function TrainPage() {
   const [checkpoints, setCheckpoints] = useState([]);
   const [resumeCkpt, setResumeCkpt] = useState("");
   const [saving, setSaving] = useState(false);
+  const [presets, setPresets] = useState({ groups: {}, active: {} });
+  const [selectedPresetKind, setSelectedPresetKind] = useState("model");
+  const [selectedPresetName, setSelectedPresetName] = useState("");
 
   const saveTimeoutRef = useRef(null);
   const metricOffsetRef = useRef(0);
@@ -41,10 +171,20 @@ export default function TrainPage() {
 
   useEffect(() => {
     const load = async () => {
-      const [cfg, ckpts] = await Promise.all([api.getConfig(), api.listCheckpoints()]);
+      const [cfg, ckpts, presetData] = await Promise.all([
+        api.getConfig(),
+        api.listCheckpoints(),
+        api.getConfigPresets(),
+      ]);
       setConfig(cfg.content);
       setLastSaved(cfg.content);
       setCheckpoints(ckpts.items || []);
+      setPresets(presetData);
+      const firstKind = presetKindOrder.find((kind) => (presetData.groups?.[kind] || []).length > 0);
+      if (firstKind) {
+        setSelectedPresetKind(firstKind);
+        setSelectedPresetName(presetData.groups[firstKind][0]?.name || "");
+      }
     };
     load();
     const poll = async () => {
@@ -181,19 +321,64 @@ export default function TrainPage() {
   const progressValue = metricStep(lastMetric) ?? 0;
   const activeRun = status.active ? status.run : null;
   const activeRunType = activeRun?.run_type;
+  const activeUses = useMemo(() => extractConfigUses(config), [config]);
+  const activeUseEntries = useMemo(
+    () =>
+      Object.entries(activeUses).flatMap(([kind, names]) =>
+        names.map((name) => ({ kind, name }))
+      ),
+    [activeUses]
+  );
+
+  const handleInsertPreset = (preset) => {
+    setConfig((prev) => insertPresetUse(prev, preset.kind, preset.name));
+  };
 
   return (
     <div className="page">
-      <h1 className="page-title">Train</h1>
-      <div className="two-col">
+      <PageHeader
+        eyebrow="Training"
+        title="Train"
+        description="Edit the active config, start or resume training, and monitor loss, throughput and logs."
+        meta={<StatusPill status={status.active ? "running" : "stopped"} />}
+      />
+      <div className="two-col train-page-grid">
         <div className="page">
-          <div className="card">
+          <div className="card train-config-card">
             <div className="card-header">
-              <h2 className="card-title">Config Editor</h2>
-              <span className="muted">{isDirty ? "Unsaved changes" : "Saved"}</span>
+              <div>
+                <h2 className="card-title">Config Editor</h2>
+                <div className="muted">Primary config plus section-scoped preset library.</div>
+              </div>
+              <span className={isDirty ? "badge dirty" : "badge"}>{isDirty ? "Unsaved" : "Saved"}</span>
             </div>
-            <div className="train-config-editor">
-              <YamlEditor value={config} onChange={setConfig} onSave={() => handleSave(false)} />
+            <div className="active-presets-row">
+              {activeUseEntries.length > 0 ? (
+                activeUseEntries.map((item) => (
+                  <span key={`${item.kind}:${item.name}`} className="badge active-preset">
+                    {item.kind}: {item.name}
+                  </span>
+                ))
+              ) : (
+                <span className="muted">No direct preset use lines detected.</span>
+              )}
+            </div>
+            <div className="train-editor-layout">
+              <div className="train-config-editor">
+                <YamlEditor value={config} onChange={setConfig} onSave={() => handleSave(false)} />
+              </div>
+              <PresetLibrary
+                presets={presets}
+                selectedKind={selectedPresetKind}
+                selectedName={selectedPresetName}
+                onSelectKind={(kind) => {
+                  setSelectedPresetKind(kind);
+                  setSelectedPresetName(presets.groups?.[kind]?.[0]?.name || "");
+                }}
+                onSelectPreset={setSelectedPresetName}
+                activeUses={activeUses}
+                onInsert={handleInsertPreset}
+              />
             </div>
             <div className="row" style={{ marginTop: "12px" }}>
               <button onClick={() => handleSave(false)} disabled={saving}>
@@ -250,31 +435,22 @@ export default function TrainPage() {
             </div>
             {command.length > 0 && <div className="muted">Training command prepared.</div>}
             {lastMetric && (
-              <div className="grid train-metrics-grid">
-                <div>
-                  <div className="muted">step</div>
-                  <div>{formatStep(lastMetric)}</div>
-                </div>
-                <div>
-                  <div className="muted">elapsed</div>
-                  <div>{metricElapsed(lastMetric)}</div>
-                </div>
-                <div>
-                  <div className="muted">ETA</div>
-                  <div>{metricEta(lastMetric)}</div>
-                </div>
-                <div>
-                  <div className="muted">s/step</div>
-                  <div>{Number.isFinite(metricSecondsPerStep(lastMetric)) ? metricSecondsPerStep(lastMetric).toFixed(3) : "—"}</div>
-                </div>
-                <div>
-                  <div className="muted">samples/s</div>
-                  <div>{Number.isFinite(metricThroughput(lastMetric)) ? metricThroughput(lastMetric).toFixed(2) : "—"}</div>
-                </div>
-                <div>
-                  <div className="muted">loss</div>
-                  <div>{Number.isFinite(metricLoss(lastMetric)) ? metricLoss(lastMetric).toFixed(4) : "—"}</div>
-                </div>
+              <div className="compact-metrics train-metrics-grid">
+                <MetricTile label="step" value={formatStep(lastMetric)} />
+                <MetricTile label="elapsed" value={metricElapsed(lastMetric)} />
+                <MetricTile label="ETA" value={metricEta(lastMetric)} />
+                <MetricTile
+                  label="s/step"
+                  value={Number.isFinite(metricSecondsPerStep(lastMetric)) ? metricSecondsPerStep(lastMetric).toFixed(3) : "—"}
+                />
+                <MetricTile
+                  label="samples/s"
+                  value={Number.isFinite(metricThroughput(lastMetric)) ? metricThroughput(lastMetric).toFixed(2) : "—"}
+                />
+                <MetricTile
+                  label="loss"
+                  value={Number.isFinite(metricLoss(lastMetric)) ? metricLoss(lastMetric).toFixed(4) : "—"}
+                />
               </div>
             )}
           </div>

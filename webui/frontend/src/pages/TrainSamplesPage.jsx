@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, absoluteFileUrl, absoluteDownloadUrl } from "../api.js";
+import PageHeader from "../components/PageHeader.jsx";
 
 
 export default function TrainSamplesPage() {
@@ -20,12 +21,12 @@ export default function TrainSamplesPage() {
 
   return (
     <div className="page">
-      <div className="row">
-        <h1 className="page-title">Train Samples</h1>
-        <Link className="muted" to="/train">
-          Back to Train
-        </Link>
-      </div>
+      <PageHeader
+        eyebrow="Artifacts"
+        title="Train Samples"
+        description="Preview and download images emitted by training sample hooks."
+        actions={<Link className="text-link" to="/train">Back to Train</Link>}
+      />
       <div className="card">
         {filtered.length === 0 ? (
           <div className="muted">No samples yet.</div>

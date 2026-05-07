@@ -3,9 +3,10 @@ import { api, wsUrl, absoluteFileUrl, absoluteDownloadUrl, API_ORIGIN } from "..
 import useLogBuffer from "../hooks/useLogBuffer.js";
 import useRunLogStream from "../hooks/useRunLogStream.js";
 import ArgField from "../components/ArgField.jsx";
+import PageHeader from "../components/PageHeader.jsx";
 import { isMetricEvent, mergeMetricEvents } from "../utils/metrics.js";
 
-const quickFields = ["task", "ckpt", "steps", "n", "seed"];
+const quickFields = ["family", "task", "ckpt", "steps", "n", "seed"];
 const promptFields = ["prompt", "neg_prompt"];
 const hiddenPathFields = new Set(["init-image", "mask", "control-image"]);
 
@@ -15,6 +16,19 @@ const TASK_HELP = {
   inpaint: "Inpaint generation. Upload an image and draw the white mask over regions to regenerate.",
   control: "Control generation with a control image.",
 };
+
+function familyAwareSpec(spec, family) {
+  if (spec.name === "task" && family !== "mmdit") {
+    return { ...spec, choices: ["txt2img"] };
+  }
+  if (spec.name === "sampler" && family === "var") {
+    return { ...spec, choices: ["var_autoregressive"] };
+  }
+  if (spec.name === "sampler") {
+    return { ...spec, choices: ["flow_euler", "flow_heun"] };
+  }
+  return spec;
+}
 
 
 const absolutePreviewUrl = (value) => {
@@ -386,6 +400,18 @@ export default function GeneratePage() {
 
   const handleChange = (name, value) => {
     setArgs((prev) => {
+      if (name === "family") {
+        const sampler = value === "var" ? "var_autoregressive" : "flow_heun";
+        return {
+          ...prev,
+          family: value,
+          task: "txt2img",
+          sampler,
+          "init-image": "",
+          mask: "",
+          "control-image": "",
+        };
+      }
       if (name !== "task") return { ...prev, [name]: value };
       return {
         ...prev,
@@ -395,7 +421,7 @@ export default function GeneratePage() {
         "control-image": "",
       };
     });
-    if (name === "task") {
+    if (name === "task" || name === "family") {
       setInitFile(null);
       setControlFile(null);
       setInitPreview("");
@@ -429,6 +455,7 @@ export default function GeneratePage() {
   };
 
   const currentTask = args.task || "txt2img";
+  const currentFamily = args.family || "mmdit";
   const needsInit = currentTask === "img2img" || currentTask === "inpaint";
   const needsMask = currentTask === "inpaint";
   const needsControl = currentTask === "control";
@@ -511,8 +538,11 @@ export default function GeneratePage() {
     [argSpecs]
   );
   const quickSpecs = useMemo(
-    () => argSpecs.filter((spec) => quickFields.includes(spec.name)),
-    [argSpecs]
+    () =>
+      argSpecs
+        .filter((spec) => quickFields.includes(spec.name))
+        .map((spec) => familyAwareSpec(spec, currentFamily)),
+    [argSpecs, currentFamily]
   );
   const advancedSpecs = useMemo(
     () =>
@@ -521,9 +551,11 @@ export default function GeneratePage() {
           !quickFields.includes(spec.name) &&
           !promptFields.includes(spec.name) &&
           spec.name !== "out" &&
-          !hiddenPathFields.has(spec.name)
-      ),
-    [argSpecs]
+          !hiddenPathFields.has(spec.name) &&
+          !(currentFamily !== "mmdit" && ["strength", "control-strength", "control-type"].includes(spec.name)) &&
+          !(currentFamily === "var" && ["cfg", "shift", "width", "height", "fake-vae"].includes(spec.name))
+      ).map((spec) => familyAwareSpec(spec, currentFamily)),
+    [argSpecs, currentFamily]
   );
 
   useEffect(() => {
@@ -558,7 +590,11 @@ export default function GeneratePage() {
 
   return (
     <div className="page generate-page">
-      <h1 className="page-title">Generate</h1>
+      <PageHeader
+        eyebrow="Sampling"
+        title="Generate"
+        description="Prompt-first workspace for txt2img, img2img, inpaint, control and family-aware sampling."
+      />
       <div className="generate-workspace">
         <div className={`generate-stage ${isGenerating ? "is-generating" : ""} ${output ? "has-output" : ""}`}>
           <div className="settings-panel generate-panel settings-square">

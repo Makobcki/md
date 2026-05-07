@@ -21,9 +21,11 @@ const icons = {
 
 export default function StatusPill({ status, title }) {
   const icon = icons[status];
+  const label = status || "";
   return (
     <span className={`status-pill ${status || ""}`} title={title || status}>
-      {icon || status}
+      {icon || null}
+      {label ? <span>{label}</span> : null}
     </span>
   );
 }

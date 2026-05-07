@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { api, absoluteFileUrl, absoluteDownloadUrl } from "../api.js";
 import LogViewer from "../components/LogViewer.jsx";
 import LineChart from "../components/LineChart.jsx";
+import PageHeader from "../components/PageHeader.jsx";
 import StatusPill from "../components/StatusPill.jsx";
 import useRunLogStream from "../hooks/useRunLogStream.js";
 import { formatDate, formatRunId, formatRunType, parseRunDate } from "../utils/formatters.js";
@@ -65,6 +66,12 @@ export default function RunDetails() {
 
   return (
     <div className="page">
+      <PageHeader
+        eyebrow={formatRunType(run.run_type)}
+        title={formatRunId(runId)}
+        description="Captured config, metrics, logs, checkpoints and generated artifacts for this run."
+        meta={<StatusPill status={run.status} />}
+      />
       <div className="card">
         <div className="card-header">
           <h2 className="card-title" title={runId}>

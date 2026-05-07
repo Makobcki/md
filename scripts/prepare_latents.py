@@ -215,7 +215,7 @@ def _sharded_cache_mismatch_reason(
                 return f"missing shard metadata in {shard_path}"
             mismatch = _latent_meta_mismatch_reason(expected_meta, actual_meta)
             if mismatch is not None:
-                return f"{shard_path.name}: {mismatch}"
+                return mismatch
     except Exception as exc:
         return f"cannot read latent shards: {exc}"
     return None

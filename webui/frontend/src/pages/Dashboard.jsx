@@ -2,17 +2,29 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api, absoluteFileUrl, wsUrl } from "../api.js";
 import LineChart from "../components/LineChart.jsx";
+import MetricTile from "../components/MetricTile.jsx";
+import PageHeader from "../components/PageHeader.jsx";
 import StatusPill from "../components/StatusPill.jsx";
-import { isMetricEvent, mergeMetricEvents, metricChartData, metricStep, metricThroughput } from "../utils/metrics.js";
 import {
   formatDate,
   formatRelativeDate,
   formatRunId,
   formatRunType,
-  isToday,
   parseRunDate,
 } from "../utils/formatters.js";
-
+import {
+  isMetricEvent,
+  mergeMetricEvents,
+  metricChartData,
+  metricStep,
+  metricThroughput,
+} from "../utils/metrics.js";
+import {
+  buildRunInventory,
+  recentPreviewItems,
+  sortAndFilterRuns,
+  workflowCards,
+} from "../utils/uiModel.js";
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -20,6 +32,7 @@ export default function Dashboard() {
   const [status, setStatus] = useState({ active: false });
   const [metrics, setMetrics] = useState([]);
   const [samples, setSamples] = useState([]);
+  const [summary, setSummary] = useState(null);
   const [error, setError] = useState("");
   const [runFilters, setRunFilters] = useState({ failedOnly: false, todayOnly: false });
   const [sortDir, setSortDir] = useState("desc");
@@ -27,14 +40,17 @@ export default function Dashboard() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [runsData, statusData, samplesData] = await Promise.all([
+        const [runsData, statusData, samplesData, summaryData] = await Promise.all([
           api.listRuns(),
           api.getStatus(),
           api.listSamples(),
+          api.getOutDirSummary().catch(() => null),
         ]);
         setRuns(runsData);
         setStatus(statusData);
         setSamples(samplesData.items || []);
+        setSummary(summaryData);
+        setError("");
       } catch (err) {
         setError(err.message);
       }
@@ -47,9 +63,8 @@ export default function Dashboard() {
   const activeRun = status.active ? status.run : null;
 
   useEffect(() => {
-    if (!activeRun?.run_id) return;
-    const runId = activeRun.run_id;
-    const ws = new WebSocket(wsUrl(`/ws/metrics/${runId}`));
+    if (!activeRun?.run_id) return undefined;
+    const ws = new WebSocket(wsUrl(`/ws/metrics/${activeRun.run_id}`));
     ws.onmessage = (event) => {
       try {
         const metric = JSON.parse(event.data);
@@ -82,181 +97,208 @@ export default function Dashboard() {
   const lastMetric = metrics[metrics.length - 1];
   const progressValue = metricStep(lastMetric) ?? lastMetric?.processed ?? 0;
   const progressMax = lastMetric?.max_steps || lastMetric?.total || 0;
-
-  const recentSamples = useMemo(() => {
-    return [...samples].reverse().slice(0, 8);
-  }, [samples]);
-
-  const visibleRuns = useMemo(() => {
-    return [...runs]
-      .filter((run) => (runFilters.failedOnly ? run.status === "failed" : true))
-      .filter((run) => (runFilters.todayOnly ? isToday(parseRunDate(run)) : true))
-      .sort((a, b) => {
-        const left = parseRunDate(a)?.getTime() || 0;
-        const right = parseRunDate(b)?.getTime() || 0;
-        return sortDir === "desc" ? right - left : left - right;
-      });
-  }, [runs, runFilters, sortDir]);
+  const recentSamples = useMemo(() => recentPreviewItems(samples, 10), [samples]);
+  const inventory = useMemo(() => buildRunInventory(runs), [runs]);
+  const visibleRuns = useMemo(
+    () =>
+      sortAndFilterRuns(runs, {
+        ...runFilters,
+        sortDir,
+      }),
+    [runs, runFilters, sortDir]
+  );
 
   return (
-    <div className="page">
-      <h1 className="page-title">Dashboard</h1>
-      {(activeRun || status.active) && (
-        <div className="card">
-          <div className="card-header">
-            <h2 className="card-title">Active Task</h2>
-            {error && <span className="muted">{error}</span>}
+    <div className="page dashboard-page">
+      <PageHeader
+        eyebrow="Operations"
+        title="Dashboard"
+        description="Single control surface for generation, training, cache preparation, artifacts and run history."
+        meta={<StatusPill status={activeRun?.status || "stopped"} />}
+      />
+
+      {error ? <div className="alert error">{error}</div> : null}
+
+      <section className="overview-grid">
+        <MetricTile label="Runs" value={inventory.total} detail="total recorded jobs" />
+        <MetricTile label="Active" value={inventory.running} detail="currently running" tone="success" />
+        <MetricTile label="Failed" value={inventory.failed} detail="needs inspection" tone={inventory.failed ? "danger" : ""} />
+        <MetricTile
+          label="Artifacts"
+          value={summary?.sample_count ?? recentSamples.length}
+          detail={summary?.out_dir ? "from configured out_dir" : "recent previews"}
+        />
+      </section>
+
+      <section className="dashboard-grid">
+        <div className="panel active-run-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Runtime</h2>
+              <p>Current job state and latest live metrics.</p>
+            </div>
+            {activeRun ? (
+              <button type="button" className="danger" onClick={handleStop}>
+                Stop
+              </button>
+            ) : null}
           </div>
           {activeRun ? (
-            <div className="grid">
-              <div className="card soft">
-                <div className="row">
-                  <StatusPill status={activeRun.status} />
+            <div className="active-run-body">
+              <div className="run-identity">
+                <StatusPill status={activeRun.status} />
+                <div>
                   <strong>{formatRunType(activeRun.run_type)}</strong>
-                  <span className="muted">{formatRunId(activeRun.run_id)}</span>
-                </div>
-                <div className="row">
-                  <button onClick={handleStop} className="danger">
-                    Stop
-                  </button>
-                  <button className="secondary" disabled>
-                    Pause
-                  </button>
-                  <Link className="muted" to={`/runs/${activeRun.run_id}`}>
-                    Open run
-                  </Link>
-                </div>
-                {progressMax ? (
-                  <div className="progress">
-                    <span style={{ width: `${Math.min(100, (progressValue / progressMax) * 100)}%` }} />
-                  </div>
-                ) : (
-                  <div className="muted">Progress unavailable</div>
-                )}
-                <div className="grid">
-                  <div>
-                    <div className="muted">Step</div>
-                    <div>{metricStep(lastMetric) ?? "-"}</div>
-                  </div>
-                  <div>
-                    <div className="muted">ETA</div>
-                    <div>{lastMetric?.eta_h ? `${lastMetric.eta_h.toFixed(2)}h` : "-"}</div>
-                  </div>
-                  <div>
-                    <div className="muted">Speed</div>
-                    <div>{Number.isFinite(metricThroughput(lastMetric)) ? `${metricThroughput(lastMetric).toFixed(2)} it/s` : "-"}</div>
-                  </div>
-                  <div>
-                    <div className="muted">VRAM</div>
-                    <div>{lastMetric?.peak_mem_mb ? `${lastMetric.peak_mem_mb.toFixed(0)} MB` : "-"}</div>
-                  </div>
+                  <span title={activeRun.run_id}>{formatRunId(activeRun.run_id)}</span>
                 </div>
               </div>
-              {activeRun.run_type === "train" && (
-                <div className="card soft">
-                  <div className="card-header">
-                    <h2 className="card-title">Training Metrics</h2>
-                  </div>
-                  <LineChart data={metricChartData(metrics)} />
+              {progressMax ? (
+                <div className="progress">
+                  <span style={{ width: `${Math.min(100, (progressValue / progressMax) * 100)}%` }} />
                 </div>
+              ) : (
+                <div className="muted">Progress will appear after the first metric event.</div>
               )}
+              <div className="compact-metrics">
+                <MetricTile label="Step" value={metricStep(lastMetric) ?? "-"} />
+                <MetricTile label="ETA" value={lastMetric?.eta_h ? `${lastMetric.eta_h.toFixed(2)}h` : "-"} />
+                <MetricTile
+                  label="Speed"
+                  value={Number.isFinite(metricThroughput(lastMetric)) ? `${metricThroughput(lastMetric).toFixed(2)}/s` : "-"}
+                />
+                <MetricTile label="VRAM" value={lastMetric?.peak_mem_mb ? `${lastMetric.peak_mem_mb.toFixed(0)} MB` : "-"} />
+              </div>
+              {activeRun.run_type === "train" ? <LineChart data={metricChartData(metrics)} /> : null}
+              <Link className="text-link" to={`/runs/${activeRun.run_id}`}>
+                Open run details
+              </Link>
             </div>
           ) : (
-            <div className="muted">Job запускается...</div>
+            <div className="empty-state">
+              <strong>No job running</strong>
+              <span>Start generation, training or latent preparation from workflow cards.</span>
+            </div>
           )}
         </div>
-      )}
 
-      <div className="card">
-        <div className="card-header">
-          <h2 className="card-title">Recent Generations</h2>
+        <div className="workflow-grid">
+          {workflowCards.map((card) => (
+            <Link key={card.key} className="workflow-card" to={card.to}>
+              <div>
+                <h2>{card.title}</h2>
+                <p>{card.description}</p>
+              </div>
+              <span>{card.action}</span>
+            </Link>
+          ))}
         </div>
-        {recentSamples.length === 0 ? (
-          <div className="muted">Нет сгенерированных изображений.</div>
-        ) : (
-          <div className="gallery-grid">
-            {recentSamples.map((item) => {
-              const url = absoluteFileUrl(item);
-              return url ? (
-                <div key={item.path || item.url || item} className="image-card">
-                  <img src={url} alt="sample" />
-                  <div className="image-meta">
-                    <span className="badge">{String(item.path || item).split("/").pop()}</span>
-                  </div>
-                </div>
-              ) : null;
-            })}
-          </div>
-        )}
-      </div>
+      </section>
 
-      <div className="card">
-        <div className="card-header">
-          <h2 className="card-title">Runs</h2>
-          <div className="row">
-            <label className="chip-control">
-              <input
-                type="checkbox"
-                checked={runFilters.failedOnly}
-                onChange={(event) =>
-                  setRunFilters((prev) => ({ ...prev, failedOnly: event.target.checked }))
-                }
-              />
-              Только ошибки
-            </label>
-            <label className="chip-control">
-              <input
-                type="checkbox"
-                checked={runFilters.todayOnly}
-                onChange={(event) =>
-                  setRunFilters((prev) => ({ ...prev, todayOnly: event.target.checked }))
-                }
-              />
-              За сегодня
-            </label>
-            <button
-              className="ghost"
-              type="button"
-              onClick={() => setSortDir((prev) => (prev === "desc" ? "asc" : "desc"))}
-            >
-              {sortDir === "desc" ? "Сначала новые" : "Сначала старые"}
-            </button>
+      <section className="content-grid">
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>Recent Generations</h2>
+              <p>Latest previewable images from sample artifacts.</p>
+            </div>
+            <Link className="text-link" to="/generate">
+              Generate
+            </Link>
           </div>
+          {recentSamples.length === 0 ? (
+            <div className="empty-state">No previewable generated images yet.</div>
+          ) : (
+            <div className="gallery-grid dense">
+              {recentSamples.map((item) => {
+                const url = absoluteFileUrl(item);
+                return url ? (
+                  <a key={item.path || item.url || item} className="image-card" href={url} target="_blank" rel="noreferrer">
+                    <img src={url} alt="sample" />
+                    <div className="image-meta">
+                      <span className="badge">{String(item.path || item).split("/").pop()}</span>
+                    </div>
+                  </a>
+                ) : null;
+              })}
+            </div>
+          )}
         </div>
-        <table className="table runs-table">
-          <thead>
-            <tr>
-              <th>Status</th>
-              <th>Type</th>
-              <th>Created</th>
-              <th>Run</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visibleRuns.map((run) => {
-              const created = parseRunDate(run);
-              return (
-                <tr
-                  key={run.run_id}
-                  className="clickable-row"
-                  onClick={() => navigate(`/runs/${run.run_id}`)}
-                >
-                  <td>
-                    <StatusPill status={run.status} title={run.status} />
-                  </td>
-                  <td>{formatRunType(run.run_type)}</td>
-                  <td title={created ? formatDate(created) : run.created_at}>
-                    {created ? formatRelativeDate(created) : "-"}
-                  </td>
-                  <td className="muted" title={run.run_id}>
-                    {formatRunId(run.run_id)}
-                  </td>
+
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <h2>Runs</h2>
+              <p>
+                {inventory.training} training, {inventory.generation} generation, {inventory.latentCache} cache.
+              </p>
+            </div>
+            <div className="row">
+              <label className="chip-control">
+                <input
+                  type="checkbox"
+                  checked={runFilters.failedOnly}
+                  onChange={(event) =>
+                    setRunFilters((prev) => ({ ...prev, failedOnly: event.target.checked }))
+                  }
+                />
+                Failed
+              </label>
+              <label className="chip-control">
+                <input
+                  type="checkbox"
+                  checked={runFilters.todayOnly}
+                  onChange={(event) =>
+                    setRunFilters((prev) => ({ ...prev, todayOnly: event.target.checked }))
+                  }
+                />
+                Today
+              </label>
+              <button
+                className="ghost"
+                type="button"
+                onClick={() => setSortDir((prev) => (prev === "desc" ? "asc" : "desc"))}
+              >
+                {sortDir === "desc" ? "Newest" : "Oldest"}
+              </button>
+            </div>
+          </div>
+          <div className="table-scroll">
+            <table className="table runs-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Type</th>
+                  <th>Created</th>
+                  <th>Run</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+              </thead>
+              <tbody>
+                {visibleRuns.map((run) => {
+                  const created = parseRunDate(run);
+                  return (
+                    <tr
+                      key={run.run_id}
+                      className="clickable-row"
+                      onClick={() => navigate(`/runs/${run.run_id}`)}
+                    >
+                      <td>
+                        <StatusPill status={run.status} title={run.status} />
+                      </td>
+                      <td>{formatRunType(run.run_type)}</td>
+                      <td title={created ? formatDate(created) : run.created_at}>
+                        {created ? formatRelativeDate(created) : "-"}
+                      </td>
+                      <td className="muted" title={run.run_id}>
+                        {formatRunId(run.run_id)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

@@ -117,6 +117,7 @@ export const api = {
     return fetchJson(`/api/runs/${id}/metrics${suffix}`);
   },
   getConfig: () => fetchJson("/api/config"),
+  getConfigPresets: () => fetchJson("/api/config/presets"),
   updateConfig: (content) =>
     fetchJson("/api/config", { method: "PUT", body: JSON.stringify({ content }) }),
   listCheckpoints: () => fetchJson("/api/checkpoints"),

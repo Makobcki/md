@@ -1,5 +1,19 @@
 # Configuration
 
+## Model Families
+
+New presets should use the nested canonical shape:
+
+```yaml
+model:
+  family: mmdit | pixart_sigma | var
+  variant: <family_variant>
+  architecture: {}
+```
+
+`mmdit` remains the default for legacy configs that do not declare `model.family`.
+See [Model Families](model_families.md) and [Checkpoint Metadata v2](checkpoint_metadata_v2.md) for the family matrix and metadata format.
+
 This project uses KDL target configs plus reusable presets for architecture, dataset, cache, training and sampling settings.
 
 ---
