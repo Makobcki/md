@@ -4,6 +4,55 @@ This project uses KDL target configs plus reusable presets for architecture, dat
 
 ---
 
+## Scoped preset inheritance
+
+Target configs now attach reusable presets to the section that consumes them. Use a short preset name inside the section instead of a top-level preset path:
+
+```kdl
+config target="train" version=2 {
+  model {
+    use "mmdit_576"
+    checkpoint null
+  }
+
+  training {
+    use "bf16_adamw"
+    batch_size 4
+    grad_accum_steps 1
+    max_steps 100000
+  }
+
+  data {
+    use "latent_cache_576"
+    dataset_path "data/train"
+  }
+
+  output {
+    dir "runs/train"
+  }
+}
+```
+
+A scoped `use` resolves to `configs/presets/<section>/<name>.kdl`. The `sampling` section maps to sampler presets, so both `sampler { use "rf_heun" }` and CLI overrides such as `--set sampling.use=rf_heun` use `configs/presets/sampler/rf_heun.kdl`.
+
+Legacy top-level path inheritance remains supported for older configs, but new configs and templates should prefer scoped preset names. CLI overrides should use `section.use=name`; `section.preset=name` remains accepted for compatibility.
+
+Reusable examples live under:
+
+```text
+configs/templates/
+  train_576_bf16.kdl
+  train_1024_bf16_text.kdl
+  train_debug.kdl
+  sample_txt2img.kdl
+  cache_prepare_576.kdl
+  presets/
+    model.kdl
+    training.kdl
+    data.kdl
+    text.kdl
+```
+
 ## Minimal latent MMDiT RF config
 
 ```yaml
@@ -166,7 +215,7 @@ python -m train.cli --config configs/train.kdl --dry-run
 Dry-run a profile:
 
 ```bash
-python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run --set training.use=single_gpu_debug
 ```
 
 ---

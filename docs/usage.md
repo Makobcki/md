@@ -62,24 +62,24 @@ bash scripts/check_project.sh
 Run dry-run profiles:
 
 ```bash
-python -m train.cli --dry-run --set training.preset=single_gpu_debug
-python -m train.cli --dry-run --set training.preset=single_gpu_debug --set training.max_steps=1000
-python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run --set training.use=single_gpu_debug
+python -m train.cli --dry-run --set training.use=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --dry-run --set training.use=single_gpu_debug
 python -m train.cli --dry-run
 ```
 
 Milestone profiles:
 
 ```bash
-python -m train.cli --dry-run --set training.preset=single_gpu_debug
-python -m train.cli --dry-run --set model.preset=mmdit_576
-python -m train.cli --dry-run --set model.preset=mmdit_1024
+python -m train.cli --dry-run --set training.use=single_gpu_debug
+python -m train.cli --dry-run --set model.use=mmdit_576
+python -m train.cli --dry-run --set model.use=mmdit_1024
 ```
 
 Distributed/FSDP templates:
 
 ```bash
-python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run --set training.use=single_gpu_debug
 python -m train.cli --dry-run
 ```
 
@@ -186,19 +186,19 @@ More details: [`cache.md`](cache.md).
 Smoke run:
 
 ```bash
-python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.use=single_gpu_debug
 ```
 
 Overfit run:
 
 ```bash
-python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --set training.use=single_gpu_debug --set training.max_steps=1000
 ```
 
 Development run:
 
 ```bash
-python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.use=single_gpu_debug
 ```
 
 Base run:

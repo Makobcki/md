@@ -11,9 +11,9 @@ Before starting real training, validate profiles and configs.
 Profiles:
 
 ```bash
-python -m train.cli --dry-run --set training.preset=single_gpu_debug
-python -m train.cli --dry-run --set training.preset=single_gpu_debug --set training.max_steps=1000
-python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run --set training.use=single_gpu_debug
+python -m train.cli --dry-run --set training.use=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --dry-run --set training.use=single_gpu_debug
 python -m train.cli --dry-run
 ```
 
@@ -30,19 +30,19 @@ python -m train.cli --config configs/train.kdl --dry-run
 Smoke run:
 
 ```bash
-python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.use=single_gpu_debug
 ```
 
 Overfit run:
 
 ```bash
-python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --set training.use=single_gpu_debug --set training.max_steps=1000
 ```
 
 Development run:
 
 ```bash
-python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.use=single_gpu_debug
 ```
 
 Base run:
@@ -54,9 +54,9 @@ python -m train.cli
 Milestone runs:
 
 ```bash
-python -m train.cli --set training.preset=single_gpu_debug
-python -m train.cli --set model.preset=mmdit_576
-python -m train.cli --set model.preset=mmdit_1024
+python -m train.cli --set training.use=single_gpu_debug
+python -m train.cli --set model.use=mmdit_576
+python -m train.cli --set model.use=mmdit_1024
 ```
 
 ---
@@ -162,9 +162,9 @@ python -m scripts.prepare_text_cache --config configs/train.kdl
 python -m scripts.prepare_latents --config configs/train.kdl
 python -m scripts.validate_cache --config configs/train.kdl
 
-python -m train.cli --set training.preset=single_gpu_debug
-python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
-python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.use=single_gpu_debug
+python -m train.cli --set training.use=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --set training.use=single_gpu_debug
 ```
 
 ---
@@ -189,7 +189,7 @@ model:
 Use a smaller profile first:
 
 ```bash
-python -m train.cli --set training.preset=single_gpu_debug
-python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
-python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.use=single_gpu_debug
+python -m train.cli --set training.use=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --set training.use=single_gpu_debug
 ```

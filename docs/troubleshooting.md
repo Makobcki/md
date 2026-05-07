@@ -171,9 +171,9 @@ model:
 Also use a smaller profile first:
 
 ```bash
-python -m train.cli --set training.preset=single_gpu_debug
-python -m train.cli --set training.preset=single_gpu_debug --set training.max_steps=1000
-python -m train.cli --set training.preset=single_gpu_debug
+python -m train.cli --set training.use=single_gpu_debug
+python -m train.cli --set training.use=single_gpu_debug --set training.max_steps=1000
+python -m train.cli --set training.use=single_gpu_debug
 ```
 
 ---

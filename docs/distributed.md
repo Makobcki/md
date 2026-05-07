@@ -7,7 +7,7 @@ Distributed training uses Accelerate.
 ## Dry-run distributed profile
 
 ```bash
-python -m train.cli --dry-run --set training.preset=single_gpu_debug
+python -m train.cli --dry-run --set training.use=single_gpu_debug
 ```
 
 ---
