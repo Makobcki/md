@@ -1,13 +1,15 @@
 config target="webui" version=2 {
-  use "presets/model/mmdit_576.kdl"
-  use "presets/sampler/rf_euler.kdl"
-  use "presets/webui/local.kdl"
-
   model {
+    use "mmdit_576"
     checkpoint "checkpoints/model.safetensors"
   }
 
+  sampler {
+    use "rf_euler"
+  }
+
   webui {
+    use "local"
     host "127.0.0.1"
     port 7860
     auto_open true

@@ -5,10 +5,7 @@ config target="train" version=2 {
   }
 
   training {
-    use "bf16_adamw"
-    batch_size 4
-    grad_accum_steps 1
-    max_steps 100000
+    use "single_gpu_bf16_debug"
   }
 
   data {
@@ -17,6 +14,6 @@ config target="train" version=2 {
   }
 
   output {
-    dir "runs/train"
+    dir "runs/debug"
   }
 }

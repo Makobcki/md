@@ -1,0 +1,6 @@
+preset kind="training" name="single_gpu_bf16_debug" version=1 {
+  training {
+    use "bf16_adamw"
+    use "single_gpu_debug"
+  }
+}

@@ -5,11 +5,11 @@ config target="sample" version=2 {
   }
 
   sampler {
-    use "rf_euler"
+    use "rf_heun"
   }
 
   sampling {
-    steps 30
+    steps 28
     guidance_scale 4.5
     seed 42
     n 1

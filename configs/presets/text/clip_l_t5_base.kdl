@@ -1,0 +1,23 @@
+preset kind="text" name="clip_l_t5_base" version=1 {
+  text {
+    text_dim 1024
+    pooled_dim 1024
+    cache true
+
+    encoder {
+      name "clip_l"
+      model_name "openai/clip-vit-large-patch14"
+      max_length 77
+      trainable false
+      cache true
+    }
+
+    encoder {
+      name "t5_base"
+      model_name "google/t5-v1_1-base"
+      max_length 256
+      trainable false
+      cache true
+    }
+  }
+}

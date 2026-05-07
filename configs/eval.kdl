@@ -1,9 +1,11 @@
 config target="eval" version=2 {
-  use "presets/model/mmdit_576.kdl"
-  use "presets/sampler/rf_heun.kdl"
-
   model {
+    use "mmdit_576"
     checkpoint null
+  }
+
+  sampler {
+    use "rf_heun"
   }
 
   eval {

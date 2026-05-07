@@ -1,0 +1,15 @@
+preset kind="text" name="my_text_encoder" version=1 {
+  text {
+    text_dim 1024
+    pooled_dim 1024
+    cache true
+
+    encoder {
+      name "clip_l"
+      model_name "openai/clip-vit-large-patch14"
+      max_length 77
+      trainable false
+      cache true
+    }
+  }
+}

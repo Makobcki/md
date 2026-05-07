@@ -1,22 +1,26 @@
 config target="train" version=2 {
   model {
-    use "mmdit_576"
+    use "mmdit_1024"
     checkpoint null
+  }
+
+  text {
+    use "clip_l_t5_base"
   }
 
   training {
     use "bf16_adamw"
-    batch_size 4
-    grad_accum_steps 1
+    batch_size 1
+    grad_accum_steps 8
     max_steps 100000
   }
 
   data {
-    use "latent_cache_576"
+    use "latent_cache_1024"
     dataset_path "data/train"
   }
 
   output {
-    dir "runs/train"
+    dir "runs/train_1024"
   }
 }
