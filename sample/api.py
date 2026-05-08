@@ -387,6 +387,160 @@ def _load_latent_mask(path: str, *, latent_h: int, latent_w: int, device: Any) -
     return torch.from_numpy(arr).unsqueeze(0).unsqueeze(0).to(device)
 
 
+def _load_registry_family_model(options: SampleOptions, device: Any) -> tuple[Any, dict[str, Any]]:
+    import torch
+
+    from config.train import TrainConfig
+    from diffusion.utils import load_ckpt
+    from model.registry import build_model
+
+    ck = load_ckpt(options.ckpt, torch.device("cpu"))
+    cfg = TrainConfig.from_dict(ck["cfg"]).to_dict()
+    family = str(cfg.get("model_family", _cfg_section(cfg, "model").get("family", "")))
+    if family != options.family:
+        raise RuntimeError(
+            f"Checkpoint family {family!r} does not match requested family {options.family!r}."
+        )
+    model = build_model(cfg)
+    state = ck.get("ema") if options.use_ema and isinstance(ck.get("ema"), dict) else ck.get("model")
+    if not isinstance(state, dict):
+        raise RuntimeError("Checkpoint does not contain a model state_dict.")
+    model.load_state_dict(state, strict=True)
+    model.to(device).eval()
+    return model, {"ckpt": ck, "cfg": cfg}
+
+
+def _registry_family_metadata(
+    options: SampleOptions,
+    *,
+    cfg: dict[str, Any],
+    checkpoint: dict[str, Any],
+    seed: int,
+    latent_shape: list[int] | None = None,
+) -> dict[str, object]:
+    return {
+        "checkpoint_path": str(options.ckpt),
+        "checkpoint_step": int(checkpoint.get("step", 0) or 0),
+        "ckpt": str(options.ckpt),
+        "family": str(options.family),
+        "architecture": str(cfg.get("architecture", _cfg_section(cfg, "model").get("variant", ""))),
+        "prompt": str(options.prompt),
+        "sampler": str(options.sampler),
+        "steps": int(options.steps),
+        "cfg": float(options.cfg),
+        "seed": int(seed),
+        "n": int(options.n),
+        "task": str(options.task),
+        "latent_only": bool(options.latent_only),
+        "use_ema": bool(options.use_ema),
+        "latent_shape": latent_shape or [],
+    }
+
+
+def _run_var_sample(
+    options: SampleOptions,
+    *,
+    device: Any,
+    base_seed: int,
+    event_bus: Any,
+    quiet: bool,
+) -> dict[str, object]:
+    import torch
+
+    from model.var import deterministic_decode
+
+    if not options.latent_only:
+        raise RuntimeError("VAR sampling writes token tensors and requires --latent-only.")
+    model, payload = _load_registry_family_model(options, device)
+    tokens = deterministic_decode(model, batch_size=int(options.n), device=device)
+    out = Path(options.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"tokens": [item.cpu() for item in tokens]}, out)
+    meta = _registry_family_metadata(
+        options,
+        cfg=payload["cfg"],
+        checkpoint=payload["ckpt"],
+        seed=base_seed,
+        latent_shape=[int(tokens[-1].shape[1])],
+    )
+    sidecar = _write_sample_metadata(out, meta)
+    event_bus.emit({"type": "status", "status": "done", "path": str(out), "metadata": str(sidecar)})
+    if not quiet:
+        print(f"[OK] saved {out}")
+        print(f"[OK] saved metadata {sidecar}")
+    return {"path": str(out), "metadata_path": str(sidecar), "metadata": meta, "seed": base_seed}
+
+
+def _run_pixart_sigma_sample(
+    options: SampleOptions,
+    *,
+    device: Any,
+    base_seed: int,
+    event_bus: Any,
+    quiet: bool,
+) -> dict[str, object]:
+    import torch
+
+    from .build import FakeVAE
+
+    model, payload = _load_registry_family_model(options, device)
+    cfg = payload["cfg"]
+    image_size = int(cfg.get("image_size", 512))
+    latent_downsample = int(cfg.get("latent_downsample_factor", 8))
+    latent_h = int(options.height or image_size) // latent_downsample
+    latent_w = int(options.width or image_size) // latent_downsample
+    latent_channels = int(cfg.get("latent_channels", 4))
+    generator = torch.Generator(device=device)
+    generator.manual_seed(base_seed)
+    z = torch.randn(
+        int(options.n),
+        latent_channels,
+        latent_h,
+        latent_w,
+        device=device,
+        generator=generator,
+    )
+    caption_channels = int(getattr(getattr(model, "cfg", object()), "caption_channels", 4096))
+    max_text_tokens = int(getattr(getattr(model, "cfg", object()), "max_text_tokens", 300))
+    text = torch.zeros(int(options.n), max_text_tokens, caption_channels, device=device)
+    with torch.no_grad():
+        for step in range(int(options.steps)):
+            t_value = 1.0 - float(step) / float(max(int(options.steps), 1))
+            t = torch.full((int(options.n),), t_value, device=device, dtype=z.dtype)
+            z = z - model(x=z, t=t, text=text) / float(max(int(options.steps), 1))
+            event_bus.emit(
+                {
+                    "type": "metric",
+                    "step": step + 1,
+                    "max_steps": int(options.steps),
+                    "sampler": str(options.sampler),
+                }
+            )
+
+    out = Path(options.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if options.latent_only:
+        torch.save(z.detach().cpu(), out)
+    else:
+        if not options.fake_vae:
+            raise RuntimeError("PixArt-Sigma image sampling requires --fake-vae or --latent-only.")
+        vae = FakeVAE(latent_channels=latent_channels, latent_h=latent_h, latent_w=latent_w).to(device)
+        _save_image_grid(vae.decode(z), out, nrow=max(1, int(math.sqrt(options.n))))
+    meta = _registry_family_metadata(
+        options,
+        cfg=cfg,
+        checkpoint=payload["ckpt"],
+        seed=base_seed,
+        latent_shape=[latent_channels, latent_h, latent_w],
+    )
+    sidecar = _write_sample_metadata(out, meta)
+    event_bus.emit({"type": "status", "status": "done", "path": str(out), "metadata": str(sidecar)})
+    if not quiet:
+        print(f"[OK] saved {out}")
+        print(f"[OK] saved metadata {sidecar}")
+    return {"path": str(out), "metadata_path": str(sidecar), "metadata": meta, "seed": base_seed}
+
+
 def run_sample(
     options: SampleOptions,
     event_callback: Callable[[dict[str, object]], None] | None = None,
@@ -432,6 +586,14 @@ def run_sample(
             "task": options.task,
         }
     )
+    if options.family == "var":
+        return _run_var_sample(
+            options, device=device, base_seed=base_seed, event_bus=event_bus, quiet=quiet
+        )
+    if options.family == "pixart_sigma":
+        return _run_pixart_sigma_sample(
+            options, device=device, base_seed=base_seed, event_bus=event_bus, quiet=quiet
+        )
 
     built = build_all(
         options.ckpt,
