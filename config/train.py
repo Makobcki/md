@@ -285,9 +285,8 @@ def _flatten_nested_config(data: dict[str, Any]) -> dict[str, Any]:
                 flat[dst] = hierarchical[src]
 
     loss = data.get("loss")
-    if isinstance(loss, dict):
-        if "x0_aux_weight" in loss and "x0_aux_weight" not in flat:
-            flat["x0_aux_weight"] = loss["x0_aux_weight"]
+    if isinstance(loss, dict) and "x0_aux_weight" in loss and "x0_aux_weight" not in flat:
+        flat["x0_aux_weight"] = loss["x0_aux_weight"]
 
     flow = data.get("flow")
     if isinstance(flow, dict):
@@ -818,6 +817,14 @@ class TrainConfig:
         if self.model_family not in allowed_families:
             allowed = ", ".join(("mmdit", "pixart_sigma", "var"))
             raise ValueError(f"Unknown model family {self.model_family!r}. Allowed: {allowed}.")
+        if self.eval_every < 0:
+            raise ValueError("eval_every must be non-negative.")
+        if self.eval_steps <= 0:
+            raise ValueError("eval_steps must be positive.")
+        if self.eval_cfg < 0:
+            raise ValueError("eval_cfg must be non-negative.")
+        if self.eval_n <= 0:
+            raise ValueError("eval_n must be positive.")
         if self.model_family == "var":
             self._validate_var_family()
             return
