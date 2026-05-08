@@ -1,11 +1,11 @@
 config target="sample" version=2 {
   model {
-    use "mmdit_576"
-    checkpoint "checkpoints/model.safetensors"
+    use "../presets/model/mmdit_576.kdl"
+    checkpoint "runs/mmdit_base/2026-05-04_164714_001/ckpt_0038000.pt"
   }
 
   sampler {
-    use "rf_heun"
+    use "../presets/sampler/rf_heun.kdl"
   }
 
   sampling {
