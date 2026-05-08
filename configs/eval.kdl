@@ -1,7 +1,7 @@
 config target="eval" version=2 {
   model {
     use "mmdit_576"
-    checkpoint null
+    checkpoint "runs/mmdit_base/2026-05-04_164714_001/ckpt_0038000.pt"
   }
 
   sampler {
