@@ -75,6 +75,7 @@ where = ["."]
 namespaces = true
 include = [
     "config*",
+    "control*",
     "data_loader*",
     "diffusion*",
     "model*",
