@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from diffusion.defaults import DEFAULT_VAE_PRETRAINED, DEFAULT_VAE_SCALING_FACTOR
+
 
 class SampleValidationError(ValueError, RuntimeError):
     """Stable sampler validation error type accepted by API and legacy callers."""
@@ -261,9 +263,14 @@ def _vae_config_for_metadata(
     else:
         vae = _cfg_section(cfg, "vae")
         out = {
-            "pretrained": str(cfg.get("vae_pretrained", vae.get("pretrained", ""))),
+            "pretrained": str(
+                cfg.get("vae_pretrained") or vae.get("pretrained") or DEFAULT_VAE_PRETRAINED
+            ),
             "scaling_factor": float(
-                cfg.get("vae_scaling_factor", vae.get("scaling_factor", 0.18215))
+                cfg.get(
+                    "vae_scaling_factor",
+                    vae.get("scaling_factor", DEFAULT_VAE_SCALING_FACTOR),
+                )
             ),
         }
     if latent_only:

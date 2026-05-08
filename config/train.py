@@ -3,6 +3,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
+from diffusion.defaults import (
+    DEFAULT_VAE_DOWNSAMPLE_FACTOR,
+    DEFAULT_VAE_LATENT_CHANNELS,
+    DEFAULT_VAE_PRETRAINED,
+    DEFAULT_VAE_SCALING_FACTOR,
+)
+
 TEXT_ENCODER_PRESETS: dict[str, dict[str, Any]] = {
     "clip_l_t5_base": {
         "text_dim": 1024,
@@ -671,8 +678,8 @@ class TrainConfig:
 
     mode: str = "latent"
     image_size: int = 512
-    latent_channels: int = 4
-    latent_downsample_factor: int = 8
+    latent_channels: int = DEFAULT_VAE_LATENT_CHANNELS
+    latent_downsample_factor: int = DEFAULT_VAE_DOWNSAMPLE_FACTOR
     latent_patch_size: int = 2
     latent_cache: bool = True
     latent_cache_dir: str = ".cache/latents"
@@ -683,9 +690,9 @@ class TrainConfig:
     latent_cache_fallback: bool = False
     latent_cache_strict: bool = True
     latent_shard_cache_size: int = 2
-    vae_pretrained: str = ""
+    vae_pretrained: str = DEFAULT_VAE_PRETRAINED
     vae_freeze: bool = True
-    vae_scaling_factor: float = 0.18215
+    vae_scaling_factor: float = DEFAULT_VAE_SCALING_FACTOR
 
     hidden_dim: int = 1024
     depth: int = 24
@@ -813,6 +820,8 @@ class TrainConfig:
     extra: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
+        if not str(self.vae_pretrained or "").strip():
+            self.vae_pretrained = DEFAULT_VAE_PRETRAINED
         allowed_families = {"mmdit", "pixart_sigma", "var"}
         if self.model_family not in allowed_families:
             allowed = ", ".join(("mmdit", "pixart_sigma", "var"))

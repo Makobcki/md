@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from config.train import TrainConfig
+from diffusion.defaults import DEFAULT_VAE_PRETRAINED, DEFAULT_VAE_SCALING_FACTOR
 from diffusion.utils import EMA, load_ckpt
 from diffusion.vae import VAEWrapper
 from model.registry import build_model
@@ -104,22 +105,17 @@ def build_vae(
     backend = str(vae_section.get("backend", cfg.get("vae_backend", ""))).lower()
     if latent_only:
         return None
-    if (
-        fake_vae
-        or backend == "fake"
-        or str(cfg.get("vae_pretrained", vae_section.get("pretrained", ""))).lower() == "fake"
-    ):
+    configured_vae = str(
+        cfg.get("vae_pretrained") or vae_section.get("pretrained") or DEFAULT_VAE_PRETRAINED
+    )
+    if fake_vae or backend == "fake" or configured_vae.lower() == "fake":
         return FakeVAE(
             latent_channels=int(cfg.get("latent_channels", 4)),
             latent_h=int(latent_h),
             latent_w=int(latent_w),
         ).to(device)
 
-    vae_pretrained = str(cfg.get("vae_pretrained", vae_section.get("pretrained", "")))
-    if not vae_pretrained:
-        raise RuntimeError(
-            "MMDiT RF image sampling requires vae_pretrained, --fake-vae, or --latent-only."
-        )
+    vae_pretrained = configured_vae
 
     amp_dtype = str(cfg.get("amp_dtype", "")).lower()
     dtype = (
@@ -131,7 +127,7 @@ def build_vae(
         pretrained=vae_pretrained,
         freeze=True,
         scaling_factor=float(
-            cfg.get("vae_scaling_factor", vae_section.get("scaling_factor", 0.18215))
+            cfg.get("vae_scaling_factor", vae_section.get("scaling_factor", DEFAULT_VAE_SCALING_FACTOR))
         ),
         device=device,
         dtype=dtype,

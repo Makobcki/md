@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from diffusion.defaults import DEFAULT_VAE_PRETRAINED, DEFAULT_VAE_SCALING_FACTOR
 from diffusion.objectives import RectifiedFlowObjective, rectified_flow_loss
 from diffusion.utils import EMA
 from model.mmdit import MMDiTFlowModel
@@ -119,11 +120,12 @@ def build_mmdit_checkpoint(
             self.pooled_dim = int(
                 data.get("pooled_dim", data.get("text", {}).get("pooled_dim", 1024))
             )
+            vae = data.get("vae", {}) if isinstance(data.get("vae", {}), dict) else {}
             self.vae_pretrained = str(
-                data.get("vae_pretrained", data.get("vae", {}).get("pretrained", ""))
+                data.get("vae_pretrained") or vae.get("pretrained") or DEFAULT_VAE_PRETRAINED
             )
             self.vae_scaling_factor = float(
-                data.get("vae_scaling_factor", data.get("vae", {}).get("scaling_factor", 0.18215))
+                data.get("vae_scaling_factor", vae.get("scaling_factor", DEFAULT_VAE_SCALING_FACTOR))
             )
             flow = data.get("flow", {})
             self.flow_timestep_sampling = str(
