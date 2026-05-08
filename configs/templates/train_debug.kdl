@@ -1,16 +1,20 @@
 config target="train" version=2 {
   model {
-    use "mmdit_576"
+    use "../presets/model/mmdit_576.kdl"
     checkpoint null
   }
 
+  text {
+    use "../presets/text/fake_debug.kdl"
+  }
+
   training {
-    use "single_gpu_bf16_debug"
+    use "../presets/training/single_gpu_bf16_debug.kdl"
   }
 
   data {
-    use "latent_cache_576"
-    dataset_path "data/train"
+    use "../presets/data/latent_cache_576.kdl"
+    dataset_path "data/dataset"
   }
 
   output {
