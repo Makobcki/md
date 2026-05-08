@@ -70,10 +70,18 @@ class MMDiTFlowModel(nn.Module):
         d = int(cfg.hidden_dim)
         self.patch_embed = PatchEmbed(cfg.latent_channels, d, cfg.patch_size)
         self.source_patch_embed = PatchEmbed(cfg.latent_channels, d, cfg.source_patch_size)
-        self.source_mask_patch_embed = PatchEmbed(cfg.latent_channels + 1, d, cfg.source_patch_size)
+        self.source_mask_patch_embed = (
+            PatchEmbed(cfg.latent_channels + 1, d, cfg.source_patch_size)
+            if cfg.mask_as_source_channel
+            else None
+        )
         self.mask_patch_embed = PatchEmbed(1, d, cfg.mask_patch_size)
         self.control_patch_embed = PatchEmbed(cfg.latent_channels, d, cfg.control_patch_size)
-        self.coarse_patch_embed = PatchEmbed(cfg.latent_channels, d, cfg.coarse_patch_size)
+        self.coarse_patch_embed = (
+            PatchEmbed(cfg.latent_channels, d, cfg.coarse_patch_size)
+            if cfg.hierarchical_tokens_enabled
+            else None
+        )
         self.text_clip_in = nn.Linear(cfg.text_dim, d)
         self.text_t5_in = nn.Linear(cfg.text_dim, d)
         self.text_generic_in = nn.Linear(cfg.text_dim, d)
@@ -88,13 +96,21 @@ class MMDiTFlowModel(nn.Module):
         self.type_source = nn.Parameter(torch.zeros(1, 1, d))
         self.type_mask = nn.Parameter(torch.zeros(1, 1, d))
         self.type_control = nn.Parameter(torch.zeros(1, 1, d))
-        self.type_coarse = nn.Parameter(torch.zeros(1, 1, d))
-        self.control_type_embed = nn.Embedding(len(_CONTROL_TYPE_TO_ID), d)
+        self.type_coarse = (
+            nn.Parameter(torch.zeros(1, 1, d)) if cfg.hierarchical_tokens_enabled else None
+        )
+        self.control_type_embed = (
+            nn.Embedding(len(_CONTROL_TYPE_TO_ID), d) if cfg.control_type_embed else None
+        )
         self.control_adapter = (
             ControlAdapter(d, cfg.control_adapter_ratio) if cfg.control_adapter else nn.Identity()
         )
         self.task_embed = nn.Embedding(len(_TASK_TO_ID), d)
-        self.strength_in = nn.Sequential(nn.Linear(3, d), nn.SiLU(), nn.Linear(d, d))
+        self.strength_in = (
+            nn.Sequential(nn.Linear(3, d), nn.SiLU(), nn.Linear(d, d))
+            if cfg.strength_embed
+            else None
+        )
         self.cond_norm = build_norm(d, rms_norm=cfg.rms_norm)
         self.text_resampler = (
             TextResampler(
@@ -384,6 +400,8 @@ class MMDiTFlowModel(nn.Module):
         m = None if mask is None else (mask.unsqueeze(1) if mask.dim() == 3 else mask)
         source_mask_fused = False
         if source_latent is not None and m is not None and self.cfg.mask_as_source_channel:
+            if self.source_mask_patch_embed is None:
+                raise RuntimeError("mask_as_source_channel is enabled without source mask embedder.")
             tokens, cond_grid = self._patch_image_like(
                 self.source_mask_patch_embed,
                 torch.cat([source_latent, m.to(source_latent)], dim=1),
@@ -468,6 +486,8 @@ class MMDiTFlowModel(nn.Module):
             for idx in range(controls.shape[1]):
                 type_token = self.type_control
                 if self.cfg.control_type_embed:
+                    if self.control_type_embed is None:
+                        raise RuntimeError("control_type_embed is enabled without embedding table.")
                     type_token = type_token + self.control_type_embed(
                         control_ids[:, idx]
                     ).unsqueeze(1).to(dtype=x.dtype)
@@ -489,6 +509,8 @@ class MMDiTFlowModel(nn.Module):
                     )
                 )
         if self.cfg.hierarchical_tokens_enabled:
+            if self.coarse_patch_embed is None or self.type_coarse is None:
+                raise RuntimeError("hierarchical tokens are enabled without coarse token modules.")
             coarse_tokens, coarse_grid = self._patch_image_like_base(
                 self.coarse_patch_embed,
                 x,
@@ -658,6 +680,8 @@ class MMDiTFlowModel(nn.Module):
                     device=x.device,
                     dtype=img.dtype,
                 )
+            if self.strength_in is None:
+                raise RuntimeError("strength_embed is enabled without strength embedder.")
             cond_parts = cond_parts + self.strength_in(
                 torch.stack([strength_v, mask_area, control_v], dim=1)
             )
