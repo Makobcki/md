@@ -3,13 +3,17 @@ config target="cache" version=2 {
     use "mmdit_576"
   }
 
+  text {
+    use "clip_l_t5_base"
+  }
+
   training {
     use "bf16_adamw"
   }
 
   data {
     use "latent_cache_576"
-    dataset_path "data/train"
+    dataset_path "data/dataset"
   }
 
   cache {
