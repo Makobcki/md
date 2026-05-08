@@ -102,11 +102,31 @@ class MMDiTConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MMDiTConfig:
-        model = data.get("model", data)
-        text = data.get("text", {})
+        model = data.get("model", {}) if isinstance(data.get("model", {}), dict) else {}
+        architecture = (
+            model.get("architecture", {}) if isinstance(model.get("architecture", {}), dict) else {}
+        )
+        text = data.get("text", {}) if isinstance(data.get("text", {}), dict) else {}
         rope_cfg = model.get("rope", {}) if isinstance(model.get("rope", {}), dict) else {}
+        conditioning = (
+            model.get("conditioning_tokens", {})
+            if isinstance(model.get("conditioning_tokens", {}), dict)
+            else {}
+        )
+        control = model.get("control", {}) if isinstance(model.get("control", {}), dict) else {}
+        hierarchical = (
+            model.get("hierarchical", {}) if isinstance(model.get("hierarchical", {}), dict) else {}
+        )
+        resampler = text.get("resampler", {}) if isinstance(text.get("resampler", {}), dict) else {}
+
+        def value(key: str, default: Any, *, arch_key: str | None = None) -> Any:
+            return data.get(key, model.get(key, architecture.get(arch_key or key, default)))
+
+        def text_value(key: str, default: Any) -> Any:
+            return data.get(key, text.get(key, default))
+
         raw_base_grid = rope_cfg.get(
-            "base_grid", model.get("rope_base_grid_hw", data.get("rope_base_grid_hw", (32, 32)))
+            "base_grid", data.get("rope_base_grid_hw", model.get("rope_base_grid_hw", (32, 32)))
         )
         if isinstance(raw_base_grid, int):
             base_grid = (int(raw_base_grid), int(raw_base_grid))
@@ -116,144 +136,132 @@ class MMDiTConfig:
                 raise ValueError("rope base_grid must contain two values.")
             base_grid = (int(seq[0]), int(seq[1]))
         kwargs = {
-            "latent_channels": int(data.get("latent_channels", model.get("latent_channels", 4))),
-            "patch_size": int(data.get("latent_patch_size", model.get("patch_size", 2))),
-            "hidden_dim": int(model.get("hidden_dim", 1024)),
-            "depth": int(model.get("depth", 24)),
-            "num_heads": int(model.get("num_heads", 16)),
-            "mlp_ratio": float(model.get("mlp_ratio", 4.0)),
-            "qk_norm": bool(model.get("qk_norm", True)),
-            "rms_norm": bool(model.get("rms_norm", True)),
-            "swiglu": bool(model.get("swiglu", True)),
-            "adaln_zero": bool(model.get("adaln_zero", True)),
-            "pos_embed": str(model.get("pos_embed", "rope_2d")),
-            "rope_scaling": str(rope_cfg.get("scaling", model.get("rope_scaling", "none"))),
-            "rope_base_grid_hw": base_grid,
-            "rope_theta": float(rope_cfg.get("theta", model.get("rope_theta", 10000.0))),
-            "double_stream_blocks": int(model.get("double_stream_blocks", 16)),
-            "single_stream_blocks": int(model.get("single_stream_blocks", 8)),
-            "dropout": float(model.get("dropout", 0.0)),
-            "attn_dropout": float(model.get("attn_dropout", 0.0)),
-            "gradient_checkpointing": bool(model.get("gradient_checkpointing", True)),
-            "text_dim": int(text.get("text_dim", data.get("text_dim", 1024))),
-            "pooled_dim": int(text.get("pooled_dim", data.get("pooled_dim", 1024))),
-            "zero_init_final": bool(model.get("zero_init_final", True)),
-            "text_resampler_enabled": bool(
-                text.get("resampler", {}).get(
-                    "enabled",
-                    data.get("text_resampler_enabled", model.get("text_resampler_enabled", False)),
+            "latent_channels": int(value("latent_channels", 4)),
+            "patch_size": int(data.get("latent_patch_size", value("patch_size", 2))),
+            "hidden_dim": int(value("hidden_dim", 1024, arch_key="hidden_size")),
+            "depth": int(value("depth", 24)),
+            "num_heads": int(value("num_heads", 16)),
+            "mlp_ratio": float(value("mlp_ratio", 4.0)),
+            "qk_norm": bool(value("qk_norm", True)),
+            "rms_norm": bool(value("rms_norm", True)),
+            "swiglu": bool(value("swiglu", True)),
+            "adaln_zero": bool(value("adaln_zero", True)),
+            "pos_embed": str(value("pos_embed", "rope_2d")),
+            "rope_scaling": str(
+                data.get(
+                    "rope_scaling",
+                    rope_cfg.get("scaling", model.get("rope_scaling", "none")),
                 )
-            )
-            if isinstance(text.get("resampler", {}), dict)
-            else bool(
-                data.get("text_resampler_enabled", model.get("text_resampler_enabled", False))
+            ),
+            "rope_base_grid_hw": base_grid,
+            "rope_theta": float(
+                data.get("rope_theta", rope_cfg.get("theta", model.get("rope_theta", 10000.0)))
+            ),
+            "double_stream_blocks": int(value("double_stream_blocks", 16)),
+            "single_stream_blocks": int(value("single_stream_blocks", 8)),
+            "dropout": float(value("dropout", 0.0)),
+            "attn_dropout": float(value("attn_dropout", 0.0)),
+            "gradient_checkpointing": bool(value("gradient_checkpointing", True)),
+            "text_dim": int(text_value("text_dim", 1024)),
+            "pooled_dim": int(text_value("pooled_dim", 1024)),
+            "zero_init_final": bool(value("zero_init_final", True)),
+            "text_resampler_enabled": bool(
+                data.get(
+                    "text_resampler_enabled",
+                    resampler.get("enabled", model.get("text_resampler_enabled", False)),
+                )
             ),
             "text_resampler_num_tokens": int(
-                text.get("resampler", {}).get(
-                    "num_tokens",
-                    data.get(
-                        "text_resampler_num_tokens", model.get("text_resampler_num_tokens", 128)
-                    ),
+                data.get(
+                    "text_resampler_num_tokens",
+                    resampler.get("num_tokens", model.get("text_resampler_num_tokens", 128)),
                 )
-            )
-            if isinstance(text.get("resampler", {}), dict)
-            else int(
-                data.get("text_resampler_num_tokens", model.get("text_resampler_num_tokens", 128))
             ),
             "text_resampler_depth": int(
-                text.get("resampler", {}).get(
-                    "depth", data.get("text_resampler_depth", model.get("text_resampler_depth", 2))
+                data.get(
+                    "text_resampler_depth",
+                    resampler.get("depth", model.get("text_resampler_depth", 2)),
                 )
-            )
-            if isinstance(text.get("resampler", {}), dict)
-            else int(data.get("text_resampler_depth", model.get("text_resampler_depth", 2))),
-            "text_resampler_mlp_ratio": float(
-                text.get("resampler", {}).get(
-                    "mlp_ratio",
-                    data.get(
-                        "text_resampler_mlp_ratio", model.get("text_resampler_mlp_ratio", 4.0)
-                    ),
-                )
-            )
-            if isinstance(text.get("resampler", {}), dict)
-            else float(
-                data.get("text_resampler_mlp_ratio", model.get("text_resampler_mlp_ratio", 4.0))
             ),
-            "attention_schedule": str(model.get("attention_schedule", "full")),
-            "early_joint_blocks": int(model.get("early_joint_blocks", 0)),
-            "late_joint_blocks": int(model.get("late_joint_blocks", 0)),
+            "text_resampler_mlp_ratio": float(
+                data.get(
+                    "text_resampler_mlp_ratio",
+                    resampler.get("mlp_ratio", model.get("text_resampler_mlp_ratio", 4.0)),
+                )
+            ),
+            "attention_schedule": str(value("attention_schedule", "full")),
+            "early_joint_blocks": int(value("early_joint_blocks", 0)),
+            "late_joint_blocks": int(value("late_joint_blocks", 0)),
             "source_patch_size": int(
-                model.get(
+                data.get(
                     "source_patch_size",
-                    model.get("conditioning_tokens", {}).get(
-                        "source_patch_size", model.get("patch_size", 2)
+                    model.get(
+                        "source_patch_size",
+                        conditioning.get("source_patch_size", value("patch_size", 2)),
                     ),
                 )
-                if isinstance(model.get("conditioning_tokens", {}), dict)
-                else model.get("source_patch_size", model.get("patch_size", 2))
             ),
             "mask_patch_size": int(
-                model.get(
+                data.get(
                     "mask_patch_size",
-                    model.get("conditioning_tokens", {}).get(
-                        "mask_patch_size", model.get("patch_size", 2)
+                    model.get(
+                        "mask_patch_size",
+                        conditioning.get("mask_patch_size", value("patch_size", 2)),
                     ),
                 )
-                if isinstance(model.get("conditioning_tokens", {}), dict)
-                else model.get("mask_patch_size", model.get("patch_size", 2))
             ),
             "control_patch_size": int(
-                model.get(
+                data.get(
                     "control_patch_size",
-                    model.get("conditioning_tokens", {}).get(
-                        "control_patch_size", model.get("patch_size", 2)
+                    model.get(
+                        "control_patch_size",
+                        conditioning.get("control_patch_size", value("patch_size", 2)),
                     ),
                 )
-                if isinstance(model.get("conditioning_tokens", {}), dict)
-                else model.get("control_patch_size", model.get("patch_size", 2))
             ),
             "mask_as_source_channel": bool(
-                model.get(
+                data.get(
                     "mask_as_source_channel",
-                    model.get("conditioning_tokens", {}).get("mask_as_source_channel", False),
+                    model.get(
+                        "mask_as_source_channel",
+                        conditioning.get("mask_as_source_channel", False),
+                    ),
                 )
-            )
-            if isinstance(model.get("conditioning_tokens", {}), dict)
-            else bool(model.get("mask_as_source_channel", False)),
-            "conditioning_rope": bool(model.get("conditioning_rope", True)),
-            "strength_embed": bool(model.get("strength_embed", data.get("strength_embed", False))),
+            ),
+            "conditioning_rope": bool(
+                data.get("conditioning_rope", model.get("conditioning_rope", True))
+            ),
+            "strength_embed": bool(data.get("strength_embed", model.get("strength_embed", False))),
             "control_type_embed": bool(
-                model.get("control_type_embed", model.get("control", {}).get("type_embed", False))
-            )
-            if isinstance(model.get("control", {}), dict)
-            else bool(model.get("control_type_embed", False)),
+                data.get(
+                    "control_type_embed",
+                    model.get("control_type_embed", control.get("type_embed", False)),
+                )
+            ),
             "control_adapter": bool(
-                model.get("control_adapter", model.get("control", {}).get("adapter", False))
-            )
-            if isinstance(model.get("control", {}), dict)
-            else bool(model.get("control_adapter", False)),
+                data.get(
+                    "control_adapter",
+                    model.get("control_adapter", control.get("adapter", False)),
+                )
+            ),
             "control_adapter_ratio": float(
-                model.get(
-                    "control_adapter_ratio", model.get("control", {}).get("adapter_ratio", 0.25)
+                data.get(
+                    "control_adapter_ratio",
+                    model.get("control_adapter_ratio", control.get("adapter_ratio", 0.25)),
                 )
-            )
-            if isinstance(model.get("control", {}), dict)
-            else float(model.get("control_adapter_ratio", 0.25)),
+            ),
             "hierarchical_tokens_enabled": bool(
-                model.get(
+                data.get(
                     "hierarchical_tokens_enabled",
-                    model.get("hierarchical", {}).get("enabled", False),
+                    model.get("hierarchical_tokens_enabled", hierarchical.get("enabled", False)),
                 )
-            )
-            if isinstance(model.get("hierarchical", {}), dict)
-            else bool(model.get("hierarchical_tokens_enabled", False)),
+            ),
             "coarse_patch_size": int(
-                model.get(
-                    "coarse_patch_size", model.get("hierarchical", {}).get("coarse_patch_size", 4)
+                data.get(
+                    "coarse_patch_size",
+                    model.get("coarse_patch_size", hierarchical.get("coarse_patch_size", 4)),
                 )
-            )
-            if isinstance(model.get("hierarchical", {}), dict)
-            else int(model.get("coarse_patch_size", 4)),
+            ),
             "x0_aux_weight": float(
                 data.get("x0_aux_weight", data.get("loss", {}).get("x0_aux_weight", 0.0))
             )
