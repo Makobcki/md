@@ -1,5 +1,7 @@
 preset kind="text" name="clip_l_t5_base" version=1 {
   text {
+    enabled true
+    backend "real"
     text_dim 1024
     pooled_dim 1024
     cache true
