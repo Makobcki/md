@@ -1,7 +1,7 @@
 config target="webui" version=2 {
   model {
     use "mmdit_576"
-    checkpoint "checkpoints/model.safetensors"
+    checkpoint "runs/mmdit_base/2026-05-04_164714_001/ckpt_0038000.pt"
   }
 
   sampler {
