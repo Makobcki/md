@@ -31,14 +31,14 @@ config target="train" version=2 {
 
   training {
     use "bf16_adamw"
-    batch_size 4
-    grad_accum_steps 1
+    batch_size 1
+    grad_accum_steps 4
     max_steps 100000
   }
 
   data {
     use "latent_cache_576"
-    dataset_path "data/train"
+    dataset_path "data/dataset"
   }
 
   output {
