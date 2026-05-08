@@ -18,6 +18,8 @@ def test_main_train_config_is_mmdit_rectified_flow() -> None:
     assert cfg.text_cache is True
     assert cfg.cache_auto_prepare is True
     assert cfg.cache_rebuild_if_stale is False
+    assert cfg.data_root == "data/dataset"
+    assert cfg.latent_cache_sharded is True
 
 
 def test_unsupported_architecture_is_rejected() -> None:
