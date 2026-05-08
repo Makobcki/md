@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 
 torch = pytest.importorskip("torch")
+from config.loader import load_train_config
 from diffusion.utils import save_ckpt
 from model.mmdit import MMDiTConfig, MMDiTFlowModel
+from model.registry import build_model
+from sample.api import SampleOptions, run_sample
 from sample.cli import _main_impl as sample_cli_main
 from train.loop_mmdit import build_mmdit_checkpoint
 
@@ -58,6 +61,12 @@ def _write_tiny_checkpoint(path: Path, *, data_root: str | None = None) -> None:
         model=model, ema=None, optimizer=None, scheduler=None, step=7, cfg_dict=cfg
     )
     save_ckpt(str(path), ckpt)
+
+
+def _write_registry_checkpoint(path: Path, config_path: str, *, step: int = 5) -> None:
+    cfg = load_train_config(config_path)
+    model = build_model(cfg.to_dict())
+    save_ckpt(str(path), {"model": model.state_dict(), "cfg": cfg.to_dict(), "step": step})
 
 
 def _run_sample(
@@ -246,3 +255,54 @@ def test_sample_cli_shift_override_is_used_in_sampler_and_metadata(
     assert meta_a["sampling_shift"] == 1.0
     assert meta_b["sampling_shift"] == 2.0
     assert torch.equal(torch.load(out_a, map_location="cpu"), torch.load(out_b, map_location="cpu"))
+
+
+def test_sample_api_var_family_smoke_writes_tokens(tmp_path: Path) -> None:
+    ckpt = tmp_path / "var_tiny.pt"
+    _write_registry_checkpoint(ckpt, "configs/train_var_tiny.kdl")
+    out = tmp_path / "var_tokens.pt"
+
+    result = run_sample(
+        SampleOptions(
+            ckpt=str(ckpt),
+            out=str(out),
+            n=1,
+            steps=1,
+            sampler="var_autoregressive",
+            family="var",
+            latent_only=True,
+            device="cpu",
+        ),
+        quiet=True,
+    )
+
+    payload = torch.load(out, map_location="cpu")
+    assert out.exists()
+    assert len(payload["tokens"]) == 2
+    assert result["metadata"]["family"] == "var"
+    assert result["metadata"]["checkpoint_step"] == 5
+
+
+def test_sample_api_pixart_sigma_family_smoke_writes_fake_vae_image(tmp_path: Path) -> None:
+    ckpt = tmp_path / "pixart_tiny.pt"
+    _write_registry_checkpoint(ckpt, "configs/train_pixart_sigma_tiny.kdl")
+    out = tmp_path / "pixart.png"
+
+    result = run_sample(
+        SampleOptions(
+            ckpt=str(ckpt),
+            out=str(out),
+            n=1,
+            steps=1,
+            sampler="flow_euler",
+            family="pixart_sigma",
+            fake_vae=True,
+            device="cpu",
+        ),
+        quiet=True,
+    )
+
+    assert out.exists()
+    assert out.stat().st_size > 0
+    assert result["metadata"]["family"] == "pixart_sigma"
+    assert result["metadata"]["latent_shape"] == [4, 4, 4]
