@@ -1,0 +1,17 @@
+preset kind="text" name="fake_debug" version=1 {
+  text {
+    enabled true
+    backend "fake"
+    text_dim 32
+    pooled_dim 32
+    cache true
+
+    encoder {
+      name "fake"
+      model_name "fake"
+      max_length 8
+      trainable false
+      cache true
+    }
+  }
+}
