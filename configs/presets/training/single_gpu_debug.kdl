@@ -12,4 +12,12 @@ preset kind="training" name="single_gpu_debug" version=1 {
   debug {
     dataset_limit 8
   }
+
+  prepare_latents {
+    batch_size 1
+    num_workers 0
+    prefetch_factor 1
+    pin_memory false
+    shard_size 1
+  }
 }
