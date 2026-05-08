@@ -1,0 +1,48 @@
+config target="train" version=2 {
+  model {
+    family "mmdit"
+    variant "mmdit_tiny"
+    architecture {
+      image_size 32
+      latent_channels 4
+      patch_size 2
+      hidden_size 32
+      depth 1
+      num_heads 4
+      mlp_ratio 2.0
+      qk_norm true
+      rms_norm true
+      swiglu true
+      adaln_zero true
+      double_stream_blocks 1
+      single_stream_blocks 0
+      gradient_checkpointing false
+    }
+    diffusion {
+      objective "rectified_flow"
+      prediction_type "velocity"
+    }
+  }
+  text {
+    enabled true
+    text_dim 32
+    pooled_dim 32
+  }
+  training {
+    batch_size 2
+    max_steps 1
+    eval_every 0
+    amp false
+  }
+  flow {
+    timestep_sampling "uniform"
+  }
+  sampling {
+    steps 2
+    cfg_scale 1.0
+    shift 1.0
+  }
+  output {
+    dir "runs/train_mmdit_tiny"
+  }
+}
