@@ -9,6 +9,29 @@ from model.mmdit.pos_embed import add_2d_pos_embed
 from model.text.conditioning import TextConditioning
 
 
+def test_mmdit_config_from_train_dict_prefers_flat_runtime_fields() -> None:
+    cfg = MMDiTConfig.from_dict(
+        {
+            "model": {"family": "mmdit", "variant": "tiny"},
+            "latent_channels": 4,
+            "latent_patch_size": 2,
+            "hidden_dim": 32,
+            "depth": 1,
+            "num_heads": 4,
+            "double_stream_blocks": 1,
+            "single_stream_blocks": 0,
+            "text_dim": 16,
+            "pooled_dim": 16,
+            "gradient_checkpointing": False,
+        }
+    )
+
+    assert cfg.hidden_dim == 32
+    assert cfg.depth == 1
+    assert cfg.num_heads == 4
+    assert cfg.text_dim == 16
+
+
 def test_mmdit_forward_shape() -> None:
     cfg = MMDiTConfig(
         latent_channels=4,
@@ -32,6 +55,54 @@ def test_mmdit_forward_shape() -> None:
     )
     out = model(x, t, text)
     assert out.shape == x.shape
+
+
+def test_mmdit_default_state_dict_keeps_optional_conditioning_modules_absent() -> None:
+    cfg = MMDiTConfig(
+        latent_channels=4,
+        patch_size=2,
+        hidden_dim=32,
+        depth=1,
+        num_heads=4,
+        double_stream_blocks=1,
+        single_stream_blocks=0,
+        text_dim=16,
+        pooled_dim=16,
+        gradient_checkpointing=False,
+    )
+    keys = set(MMDiTFlowModel(cfg).state_dict())
+
+    assert "source_mask_patch_embed.proj.weight" not in keys
+    assert "coarse_patch_embed.proj.weight" not in keys
+    assert "type_coarse" not in keys
+    assert "control_type_embed.weight" not in keys
+    assert "strength_in.0.weight" not in keys
+
+
+def test_mmdit_enabled_conditioning_modules_are_checkpointed() -> None:
+    cfg = MMDiTConfig(
+        latent_channels=4,
+        patch_size=2,
+        hidden_dim=32,
+        depth=1,
+        num_heads=4,
+        double_stream_blocks=1,
+        single_stream_blocks=0,
+        text_dim=16,
+        pooled_dim=16,
+        gradient_checkpointing=False,
+        mask_as_source_channel=True,
+        control_type_embed=True,
+        hierarchical_tokens_enabled=True,
+        strength_embed=True,
+    )
+    keys = set(MMDiTFlowModel(cfg).state_dict())
+
+    assert "source_mask_patch_embed.proj.weight" in keys
+    assert "coarse_patch_embed.proj.weight" in keys
+    assert "type_coarse" in keys
+    assert "control_type_embed.weight" in keys
+    assert "strength_in.0.weight" in keys
 
 
 def test_mmdit_pos_embed_default_is_sincos_and_rope_is_attention_applied() -> None:
