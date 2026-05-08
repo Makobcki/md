@@ -4,6 +4,7 @@ import pytest
 
 from config.loader import load_train_config, resolve_target_config
 from config.resolver import resolve_config
+from diffusion.defaults import DEFAULT_VAE_PRETRAINED
 
 
 def test_explicit_presets_and_main_config_merge() -> None:
@@ -11,6 +12,7 @@ def test_explicit_presets_and_main_config_merge() -> None:
     assert resolved.data["model"]["variant"] == "576"
     assert resolved.data["training"]["batch_size"] == 1
     assert resolved.data["data"]["dataset_path"] == "data/dataset"
+    assert resolved.data["vae"]["pretrained"] == DEFAULT_VAE_PRETRAINED
     assert resolved.data["output"]["dir"] == "runs/train"
 
 
@@ -19,6 +21,7 @@ def test_model_preset_alias_overrides_explicit_use() -> None:
     assert cfg.image_size == 1024
     assert cfg.hidden_dim == 1536
     assert cfg.depth == 28
+    assert cfg.vae_pretrained == DEFAULT_VAE_PRETRAINED
 
 
 def test_cycle_detection(tmp_path) -> None:
@@ -49,6 +52,7 @@ def test_scoped_preset_uses_merge_full_preset_payload() -> None:
     assert resolved.data["latent_dtype"] == "bf16"
     assert resolved.data["latent_cache_dir"] == ".cache/latents_576"
     assert resolved.data["latent_cache_sharded"] is True
+    assert resolved.data["vae"]["pretrained"] == DEFAULT_VAE_PRETRAINED
     assert resolved.data["text"]["backend"] == "real"
     assert resolved.data["model"]["checkpoint"] is None
     assert "__uses__" not in resolved.data["model"]

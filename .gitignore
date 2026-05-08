@@ -9,7 +9,7 @@ data_loader/raw/
 samples/
 runs/
 webui_runs/
-vae_sd_mse/
+sd-vae-ft-mse/
 md-dev/
 *.egg-info/
 .codex

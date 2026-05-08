@@ -121,13 +121,13 @@ More details: [`dataset.md`](dataset.md).
 
 ## 4. Configure VAE and text encoders
 
-Real latent training requires a VAE compatible with `diffusers.AutoencoderKL.from_pretrained`.
+Real latent training defaults to `stabilityai/sd-vae-ft-mse`, which is compatible with `diffusers.AutoencoderKL.from_pretrained`.
 
 Example:
 
 ```yaml
 vae:
-  pretrained: ./vae_sd_mse
+  pretrained: stabilityai/sd-vae-ft-mse
   freeze: true
   scaling_factor: 0.18215
 ```

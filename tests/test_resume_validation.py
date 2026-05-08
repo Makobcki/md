@@ -38,7 +38,7 @@ def test_missing_sharded_latent_index_reports_auto_prepare_setting(tmp_path) -> 
         latent_cache=True,
         latent_cache_sharded=True,
         latent_cache_index="index.jsonl",
-        vae_pretrained="./vae_sd_mse",
+        vae_pretrained="stabilityai/sd-vae-ft-mse",
         cache_auto_prepare=False,
     )
 
@@ -115,7 +115,7 @@ def test_sharded_cache_metadata_mismatch_reports_dtype(tmp_path) -> None:
             "format_version": 3,
             "meta_common": {
                 "format_version": 3,
-                "vae_pretrained": "./vae_sd_mse",
+                "vae_pretrained": "stabilityai/sd-vae-ft-mse",
                 "scaling_factor": 0.18215,
                 "latent_shape": [4, 64, 64],
                 "dtype": "fp16",
@@ -130,7 +130,7 @@ def test_sharded_cache_metadata_mismatch_reports_dtype(tmp_path) -> None:
         shard_dir=shard_dir,
         expected_meta={
             "format_version": 3,
-            "vae_pretrained": "./vae_sd_mse",
+            "vae_pretrained": "stabilityai/sd-vae-ft-mse",
             "scaling_factor": 0.18215,
             "latent_shape": [4, 64, 64],
             "dtype": "bf16",

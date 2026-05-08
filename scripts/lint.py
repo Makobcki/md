@@ -33,7 +33,7 @@ EXCLUDED_PATH_PARTS: frozenset[str] = frozenset(
         "data_loader/raw",
         "runs",
         "samples",
-        "vae_sd_mse",
+        "sd-vae-ft-mse",
         "webui/frontend/dist",
         "webui/frontend/node_modules",
         "webui_runs",

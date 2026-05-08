@@ -3,6 +3,13 @@ config target="cache" version=2 {
     use "../presets/model/mmdit_576.kdl"
   }
 
+  vae {
+    pretrained "stabilityai/sd-vae-ft-mse"
+    scaling_factor 0.18215
+    downsample_factor 8
+    latent_channels 4
+  }
+
   text {
     use "../presets/text/clip_l_t5_base.kdl"
   }

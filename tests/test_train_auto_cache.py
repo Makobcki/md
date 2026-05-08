@@ -19,7 +19,7 @@ def test_train_auto_prepares_missing_caches(
         latent_cache_dir=".cache/latents",
         latent_cache=True,
         latent_cache_sharded=True,
-        vae_pretrained="./vae_sd_mse",
+        vae_pretrained="stabilityai/sd-vae-ft-mse",
         cache_auto_prepare=True,
     )
     entries = [{"md5": "abc123"}]

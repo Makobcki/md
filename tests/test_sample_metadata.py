@@ -4,6 +4,7 @@ import json
 from argparse import Namespace
 from pathlib import Path
 
+from diffusion.defaults import DEFAULT_VAE_PRETRAINED
 from sample.api import _metadata_sidecar_path, _sample_metadata, _write_sample_metadata
 
 
@@ -37,7 +38,6 @@ def test_sample_metadata_helpers_write_reproducible_json(tmp_path: Path) -> None
             "hidden_dim": 64,
             "depth": 1,
             "num_heads": 4,
-            "vae_pretrained": "./vae_sd_mse",
             "sampling_shift": 3.0,
             "text": {"backend": "fake", "text_dim": 32, "pooled_dim": 32, "encoders": []},
         },
@@ -72,5 +72,5 @@ def test_sample_metadata_helpers_write_reproducible_json(tmp_path: Path) -> None
     assert payload["model_config"]["hidden_dim"] == 64
     assert payload["model_config"]["depth"] == 1
     assert payload["model_config"]["num_heads"] == 4
-    assert payload["vae_config"]["pretrained"] == "./vae_sd_mse"
+    assert payload["vae_config"]["pretrained"] == DEFAULT_VAE_PRETRAINED
     assert payload["text_encoder_config"] == {"backend": "fake", "encoders": [], "text_dim": 32, "pooled_dim": 32}
