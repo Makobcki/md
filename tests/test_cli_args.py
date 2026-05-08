@@ -29,6 +29,9 @@ def test_train_config_accepts_default_kdl() -> None:
     assert cfg.hidden_dim == 1152
     assert cfg.pos_embed == "rope_2d"
     assert cfg.eval_sampler == "flow_heun"
+    assert cfg.data_root == "data/dataset"
+    assert cfg.latent_cache_sharded is True
+    assert cfg.text_dim == 1024
 
 
 def test_train_config_accepts_kdl_preset_overrides() -> None:
