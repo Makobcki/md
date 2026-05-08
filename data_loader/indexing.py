@@ -165,10 +165,6 @@ def _metadata_image_path(root: Path, img_dir: Path, meta: dict, md5: str) -> Pat
         else:
             candidates.append(root / raw)
             candidates.append(img_dir / raw.name)
-    if md5:
-        candidates.extend(
-            sorted(p for p in img_dir.glob(f"{md5}.*") if p.suffix.lower() in _ALLOWED_EXTS)
-        )
     seen: set[Path] = set()
     for candidate in candidates:
         if candidate in seen:
@@ -176,6 +172,12 @@ def _metadata_image_path(root: Path, img_dir: Path, meta: dict, md5: str) -> Pat
         seen.add(candidate)
         if candidate.suffix.lower() in _ALLOWED_EXTS and candidate.exists():
             return candidate
+    if md5:
+        for candidate in sorted(
+            p for p in img_dir.glob(f"{md5}.*") if p.suffix.lower() in _ALLOWED_EXTS
+        ):
+            if candidate.exists():
+                return candidate
     return None
 
 

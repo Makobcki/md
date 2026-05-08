@@ -28,11 +28,16 @@ from data_loader import (
     parse_buckets,
     validate_buckets,
 )
+from data_loader.token_cache import (
+    MultiscaleTokenDataset,
+    TokenCacheMetadata,
+    build_synthetic_token_entries,
+)
 from diffusion.io.ckpt import _torch_load
 from diffusion.objectives import RectifiedFlowObjective
 from diffusion.perf import PerfConfig, configure_performance
 from diffusion.perf.triton_compat import patch_triton_cuda_python_include_order
-from diffusion.utils import EMA, build_run_metadata, seed_everything
+from diffusion.utils import EMA, build_run_metadata, seed_everything, unwrap_model
 from diffusion.vae import VAEWrapper
 from model.mmdit import MMDiTConfig
 from model.registry import build_model
@@ -40,12 +45,15 @@ from model.text.cache import TextCache
 from model.text.conditioning import TextConditioning, TrainBatch
 from model.text.pretrained import FrozenTextEncoderBundle
 from train.checkpoint import (
+    _prune_checkpoints,
     load_ckpt,
     normalize_state_dict_for_keys,
     normalize_state_dict_for_model,
     resolve_resume_path,
+    save_ckpt,
 )
 from train.checkpoint_mmdit import validate_mmdit_checkpoint_compatibility
+from train.checkpoint_metadata import build_model_checkpoint_metadata
 from train.dist import DistributedContext, create_distributed_context
 from train.eval import _resolve_eval_prompts
 from train.inpaint_masks import InpaintMaskConfig, generate_inpaint_mask
@@ -96,6 +104,46 @@ def _atomic_write_yaml(path: Path, payload: dict) -> None:
 
 def _count_params(module: torch.nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
+
+
+def _assert_finite(name: str, x: torch.Tensor) -> None:
+    if not torch.isfinite(x).all():
+        raise RuntimeError(f"{name} has NaN/Inf values")
+
+
+def _move_text_conditioning(text: TextConditioning, device: torch.device) -> TextConditioning:
+    return TextConditioning(
+        tokens=text.tokens.to(device),
+        mask=text.mask.to(device),
+        pooled=text.pooled.to(device),
+        is_uncond=text.is_uncond.to(device) if text.is_uncond is not None else None,
+        token_types=text.token_types.to(device) if text.token_types is not None else None,
+    )
+
+
+def _move_train_batch(batch: TrainBatch, device: torch.device) -> TrainBatch:
+    return TrainBatch(
+        x0=batch.x0.to(device=device, dtype=torch.float32),
+        text=_move_text_conditioning(batch.text, device),
+        source_latent=batch.source_latent.to(device=device, dtype=torch.float32)
+        if batch.source_latent is not None
+        else None,
+        mask=batch.mask.to(device=device, dtype=torch.float32) if batch.mask is not None else None,
+        control_latents=batch.control_latents.to(device=device, dtype=torch.float32)
+        if batch.control_latents is not None
+        else None,
+        control_type=batch.control_type.to(device=device, dtype=torch.long)
+        if batch.control_type is not None
+        else None,
+        task=batch.task,
+        strength=batch.strength.to(device=device, dtype=torch.float32)
+        if batch.strength is not None
+        else None,
+        control_strength=batch.control_strength.to(device=device, dtype=torch.float32)
+        if batch.control_strength is not None
+        else None,
+        metadata=batch.metadata,
+    )
 
 
 def _linear_params(in_dim: int, out_dim: int, bias: bool = True) -> int:
@@ -699,6 +747,37 @@ def _ensure_latent_cache_ready_for_mmdit(
 def _ensure_mmdit_caches_ready(cfg: TrainConfig, entries: list[dict], device: torch.device) -> None:
     _ensure_text_cache_ready(cfg, entries, device)
     _ensure_latent_cache_ready_for_mmdit(cfg, entries, device)
+
+
+def _build_data_config(cfg: TrainConfig, *, use_text_conditioning: bool = True) -> DataConfig:
+    return DataConfig(
+        root=str(cfg.data_root),
+        image_dir=str(cfg.image_dir),
+        meta_dir=str(cfg.meta_dir),
+        tags_dir=str(cfg.tags_dir),
+        caption_field=str(cfg.caption_field),
+        text_field=str(cfg.text_field),
+        text_fields=list(cfg.text_fields),
+        images_only=False,
+        use_text_conditioning=bool(use_text_conditioning),
+        min_tag_count=int(cfg.min_tag_count),
+        require_512=bool(cfg.require_512),
+        val_ratio=float(cfg.val_ratio),
+        seed=int(cfg.seed),
+        cache_dir=str(cfg.cache_dir),
+        failed_list=str(cfg.failed_list),
+    )
+
+
+def _load_train_entries(
+    cfg: TrainConfig, *, use_text_conditioning: bool = True
+) -> tuple[list[dict], list[dict]]:
+    train_entries, val_entries = build_or_load_index(
+        _build_data_config(cfg, use_text_conditioning=use_text_conditioning)
+    )
+    if int(cfg.dataset_limit) > 0:
+        return train_entries[: int(cfg.dataset_limit)], []
+    return train_entries, val_entries
 
 
 class _MMDiTCachedDataset(torch.utils.data.Dataset):
@@ -1467,11 +1546,434 @@ def dry_run(cfg: TrainConfig) -> None:
     )
 
 
+def _family_checkpoint(
+    *,
+    cfg: TrainConfig,
+    cfg_dict: dict[str, Any],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    step: int,
+    loss: float,
+) -> dict[str, Any]:
+    metadata = build_model_checkpoint_metadata(
+        cfg.model_family,
+        cfg_dict,
+        unwrap_model(model),
+        training_state={"step": int(step), "loss": float(loss)},
+        optimizer_config={
+            "name": str(cfg.optimizer),
+            "lr": float(cfg.lr),
+            "weight_decay": float(cfg.weight_decay),
+        },
+    )
+    return {
+        "model": unwrap_model(model).state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "step": int(step),
+        "loss": float(loss),
+        "cfg": cfg_dict,
+        "metadata": metadata,
+        "architecture": str(cfg.architecture),
+        "objective": str(
+            cfg.objective if cfg.model_family == "pixart_sigma" else cfg.autoregressive_objective
+        ),
+        "prediction_type": str(
+            cfg.prediction_type
+            if cfg.model_family == "pixart_sigma"
+            else cfg.autoregressive_prediction_type
+        ),
+    }
+
+
+def _save_family_checkpoint(
+    *,
+    cfg: TrainConfig,
+    cfg_dict: dict[str, Any],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    checkpoint_dir: Path,
+    step: int,
+    loss: float,
+    final: bool = False,
+) -> None:
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    ckpt = _family_checkpoint(
+        cfg=cfg,
+        cfg_dict=cfg_dict,
+        model=model,
+        optimizer=optimizer,
+        step=step,
+        loss=loss,
+    )
+    if final:
+        save_ckpt(str(checkpoint_dir / "final.pt"), ckpt)
+    else:
+        save_ckpt(str(checkpoint_dir / f"step_{step:06d}.pt"), ckpt)
+        _prune_checkpoints(checkpoint_dir, int(cfg.ckpt_keep_last))
+    save_ckpt(str(checkpoint_dir / "latest.pt"), ckpt)
+
+
+def _prepare_family_run(
+    cfg: TrainConfig,
+    *,
+    device: torch.device,
+    perf_active: dict[str, Any],
+    dist: DistributedContext | None = None,
+) -> tuple[DistributedContext, TrainRunPaths, Path, dict[str, Any]]:
+    dist = dist or DistributedContext(device=device)
+    cfg_dict = cfg.to_dict()
+    cache_manifest_source = Path(cfg.data_root) / str(cfg.cache_dir) / "training_cache_manifest.json"
+    run_paths: TrainRunPaths | None = None
+    if dist.should_write():
+        run_paths = prepare_train_run_structure(
+            base_out_dir=cfg.out_dir,
+            cfg_dict=cfg_dict,
+            run_name=str(cfg.extra.get("run_name", cfg.extra.get("profile", "")) or ""),
+            cache_manifest_source=cache_manifest_source,
+            create_unique_subdir=bool(cfg.extra.get("run_dir_structure", True)),
+        )
+    run_dir_value = dist.broadcast_object(str(run_paths.run_dir) if run_paths is not None else None)
+    if run_dir_value is None:
+        raise RuntimeError("Distributed run directory was not created by the main process.")
+    out_dir = Path(str(run_dir_value))
+    if run_paths is None:
+        run_paths = TrainRunPaths(
+            base_dir=Path(cfg.out_dir),
+            run_dir=out_dir,
+            checkpoints_dir=out_dir / "checkpoints",
+            samples_dir=out_dir / "samples",
+            eval_dir=out_dir / "eval",
+            events_path=out_dir / "events.jsonl",
+            train_log_path=out_dir / "train.log",
+            cache_manifest_path=out_dir / "cache_manifest.json",
+        )
+    dist.wait_for_everyone()
+    seed_everything(int(cfg.seed) + int(dist.rank), deterministic=bool(cfg.deterministic))
+    run_meta = build_run_metadata(perf_active)
+    run_meta["architecture"] = str(cfg.architecture)
+    run_meta["model_family"] = str(cfg.model_family)
+    run_meta["base_out_dir"] = str(run_paths.base_dir)
+    run_meta["run_dir"] = str(run_paths.run_dir)
+    run_meta["distributed_backend"] = str(dist.backend)
+    run_meta["rank"] = int(dist.rank)
+    run_meta["world_size"] = int(dist.world_size)
+    if dist.should_write():
+        _atomic_write_yaml(out_dir / "run_meta.yaml", run_meta)
+    return dist, run_paths, out_dir, cfg_dict
+
+
+def _family_log_event(out_dir: Path, event: dict[str, Any]) -> None:
+    events_path = out_dir / "events.jsonl"
+    metrics_path = out_dir / "metrics" / "events.jsonl"
+    payload = json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    with events_path.open("a", encoding="utf-8") as f:
+        f.write(payload)
+    with metrics_path.open("a", encoding="utf-8") as f:
+        f.write(payload)
+
+
+def _run_pixart_sigma_rf(
+    cfg: TrainConfig,
+    *,
+    device: torch.device,
+    perf_active: dict[str, Any],
+    dist: DistributedContext | None = None,
+) -> None:
+    if int(cfg.text_dim) != int(cfg.caption_channels):
+        raise RuntimeError(
+            "pixart_sigma training requires text.text_dim to equal architecture.caption_channels."
+        )
+    dist, run_paths, out_dir, cfg_dict = _prepare_family_run(
+        cfg, device=device, perf_active=perf_active, dist=dist
+    )
+    train_entries, _ = _load_train_entries(cfg, use_text_conditioning=True)
+    if not train_entries:
+        raise RuntimeError("PixArt-Sigma training dataset is empty.")
+    _ensure_text_cache_ready(cfg, train_entries, device)
+    _ensure_latent_cache_ready_for_mmdit(cfg, train_entries, device)
+    latent_dtype = torch.bfloat16 if cfg.latent_dtype == "bf16" else torch.float16
+    latent_side = int(cfg.image_size) // int(cfg.latent_downsample_factor)
+    latent_ds = ImageTextDataset(
+        entries=train_entries,
+        tokenizer=None,
+        cond_drop_prob=1.0,
+        seed=int(cfg.seed),
+        latent_cache_dir=str(Path(cfg.data_root) / cfg.latent_cache_dir),
+        latent_cache_sharded=bool(cfg.latent_cache_sharded),
+        latent_cache_index_path=str(cfg.latent_cache_index),
+        latent_dtype=latent_dtype,
+        return_latents=True,
+        latent_cache_strict=bool(cfg.latent_cache_strict),
+        latent_cache_fallback=False,
+        latent_expected_meta=None
+        if bool(cfg.aspect_buckets_enabled)
+        else LatentCacheMetadata(
+            vae_pretrained=str(cfg.vae_pretrained),
+            scaling_factor=float(cfg.vae_scaling_factor),
+            latent_shape=(int(cfg.latent_channels), latent_side, latent_side),
+            dtype=str(cfg.latent_dtype),
+        ),
+        latent_expected_meta_by_md5=_latent_expected_metadata_by_md5(cfg, train_entries)
+        if bool(cfg.aspect_buckets_enabled)
+        else {},
+        include_is_latent=False,
+        latent_missing_log_path=out_dir / "latent_missing.txt",
+        latent_shard_cache_size=int(cfg.latent_shard_cache_size),
+        expected_image_size=int(cfg.image_size),
+    )
+    text_cache = TextCache(
+        Path(cfg.data_root) / str(cfg.text_cache_dir),
+        shard_cache_size=int(cfg.text_shard_cache_size),
+    )
+    ds = _MMDiTCachedDataset(
+        latent_ds,
+        text_cache,
+        dataset_tasks={"txt2img": 1.0},
+        seed=int(cfg.seed),
+    )
+    dataloader = _build_mmdit_dataloader(ds, cfg=cfg, shuffle=True, drop_last=True, seed=int(cfg.seed))
+    if len(dataloader) == 0:
+        raise RuntimeError("PixArt-Sigma training dataloader is empty.")
+
+    model = build_model(cfg).to(device)
+    optimizer = _build_optimizer(cfg, model, device)
+    if dist.backend != "none":
+        model, optimizer, dataloader = dist.prepare(model, optimizer, dataloader)
+    use_amp = bool(cfg.amp) and device.type == "cuda"
+    amp_dtype = torch.bfloat16 if cfg.amp_dtype == "bf16" else torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    objective = RectifiedFlowObjective(
+        timestep_sampling=str(cfg.flow_timestep_sampling),
+        logit_mean=float(cfg.flow_logit_mean),
+        logit_std=float(cfg.flow_logit_std),
+        train_t_min=float(cfg.flow_train_t_min),
+        train_t_max=float(cfg.flow_train_t_max),
+        loss_weighting=str(cfg.flow_loss_weighting),
+        timestep_shift=float(cfg.flow_timestep_shift),
+    )
+    max_steps = int(cfg.max_steps)
+    grad_accum = max(int(cfg.grad_accum_steps), 1)
+    step = 0
+    accum_idx = 0
+    last_loss = 0.0
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    while step < max_steps:
+        saw_batch = False
+        for raw in dataloader:
+            saw_batch = True
+            if step >= max_steps:
+                break
+            batch = _move_train_batch(raw, device)
+            train_tuple = objective.sample_training_tuple(batch.x0)
+            text = batch.text.tokens[:, : int(cfg.max_text_tokens)].to(
+                device=device, dtype=train_tuple.xt.dtype
+            )
+            with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
+                pred = model(x=train_tuple.xt, t=train_tuple.t, text=text)
+                _assert_finite("pixart_sigma_pred", pred)
+                loss = (
+                    (pred.float() - train_tuple.target.to(device=pred.device, dtype=torch.float32))
+                    .pow(2)
+                    .mean()
+                )
+            _assert_finite("pixart_sigma_loss", loss.detach())
+            scaler.scale(loss / grad_accum).backward()
+            last_loss = float(loss.detach().cpu())
+            accum_idx += 1
+            if accum_idx < grad_accum:
+                continue
+            if use_amp:
+                scaler.unscale_(optimizer)
+            if float(cfg.grad_clip_norm) > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+            accum_idx = 0
+            step += 1
+            if dist.should_write():
+                event = {
+                    "type": "train",
+                    "family": "pixart_sigma",
+                    "step": step,
+                    "max_steps": max_steps,
+                    "loss": last_loss,
+                }
+                _family_log_event(out_dir, event)
+                print(
+                    f"[TRAIN] family=pixart_sigma architecture={cfg.architecture} step={step}/{max_steps} loss={last_loss:.6f}",
+                    flush=True,
+                )
+                if int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:
+                    _save_family_checkpoint(
+                        cfg=cfg,
+                        cfg_dict=cfg_dict,
+                        model=model,
+                        optimizer=optimizer,
+                        checkpoint_dir=run_paths.checkpoints_dir,
+                        step=step,
+                        loss=last_loss,
+                    )
+        if not saw_batch:
+            raise RuntimeError("PixArt-Sigma training dataloader produced no batches.")
+    if dist.should_write():
+        _save_family_checkpoint(
+            cfg=cfg,
+            cfg_dict=cfg_dict,
+            model=model,
+            optimizer=optimizer,
+            checkpoint_dir=run_paths.checkpoints_dir,
+            step=step,
+            loss=last_loss,
+            final=True,
+        )
+    dist.wait_for_everyone()
+
+
+def _collate_var_tokens(batch: list[dict[str, Any]]) -> list[torch.Tensor]:
+    if not batch:
+        raise RuntimeError("VAR token batch is empty.")
+    scale_count = len(batch[0]["tokens"])
+    return [
+        torch.stack([item["tokens"][scale_idx] for item in batch], dim=0)
+        for scale_idx in range(scale_count)
+    ]
+
+
+def _run_var_ar(
+    cfg: TrainConfig,
+    *,
+    device: torch.device,
+    perf_active: dict[str, Any],
+    dist: DistributedContext | None = None,
+) -> None:
+    dist, run_paths, out_dir, cfg_dict = _prepare_family_run(
+        cfg, device=device, perf_active=perf_active, dist=dist
+    )
+    train_entries, _ = _load_train_entries(cfg, use_text_conditioning=False)
+    if not train_entries:
+        raise RuntimeError("VAR training dataset is empty.")
+    tokenizer_kind = str(cfg.tokenizer_kind)
+    tokenizer_checkpoint = str(cfg.tokenizer_checkpoint or "")
+    if tokenizer_kind == "vq" and not tokenizer_checkpoint:
+        print(
+            "[WARN] VAR tokenizer.kind='vq' has no tokenizer.checkpoint; "
+            "using deterministic placeholder token entries for the real training loop.",
+            flush=True,
+        )
+    elif tokenizer_kind != "synthetic":
+        raise RuntimeError(
+            "VAR real training currently requires tokenizer.kind='synthetic' or "
+            "tokenizer.kind='vq' with tokenizer.checkpoint=null placeholder tokens."
+        )
+    token_metadata = TokenCacheMetadata(
+        kind=tokenizer_kind,
+        codebook_size=int(cfg.codebook_size),
+        codebook_dim=int(cfg.codebook_dim),
+        scale_schedule=tuple(int(v) for v in cfg.scale_schedule),
+        max_token_length=int(cfg.max_token_length),
+    )
+    token_entries = build_synthetic_token_entries(
+        token_metadata, count=len(train_entries), seed=int(cfg.seed)
+    )
+    ds = MultiscaleTokenDataset(token_entries, token_metadata)
+    dataloader = DataLoader(
+        ds,
+        batch_size=int(cfg.batch_size),
+        shuffle=True,
+        drop_last=True,
+        num_workers=_resolve_num_workers(int(cfg.num_workers)),
+        pin_memory=bool(cfg.pin_memory),
+        persistent_workers=bool(cfg.persistent_workers) and int(cfg.num_workers) != 0,
+        prefetch_factor=int(cfg.prefetch_factor) if int(cfg.num_workers) != 0 else None,
+        collate_fn=_collate_var_tokens,
+    )
+    if len(dataloader) == 0:
+        raise RuntimeError("VAR training dataloader is empty.")
+    model = build_model(cfg).to(device)
+    optimizer = _build_optimizer(cfg, model, device)
+    if dist.backend != "none":
+        model, optimizer, dataloader = dist.prepare(model, optimizer, dataloader)
+    from model.var import next_scale_cross_entropy
+
+    max_steps = int(cfg.max_steps)
+    grad_accum = max(int(cfg.grad_accum_steps), 1)
+    step = 0
+    accum_idx = 0
+    last_loss = 0.0
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    while step < max_steps:
+        saw_batch = False
+        for tokens in dataloader:
+            saw_batch = True
+            if step >= max_steps:
+                break
+            moved_tokens = [item.to(device=device, dtype=torch.long) for item in tokens]
+            logits = model(moved_tokens)
+            loss = next_scale_cross_entropy(logits, moved_tokens[-1])
+            _assert_finite("var_loss", loss.detach())
+            (loss / grad_accum).backward()
+            last_loss = float(loss.detach().cpu())
+            accum_idx += 1
+            if accum_idx < grad_accum:
+                continue
+            if float(cfg.grad_clip_norm) > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.grad_clip_norm))
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            accum_idx = 0
+            step += 1
+            if dist.should_write():
+                event = {
+                    "type": "train",
+                    "family": "var",
+                    "step": step,
+                    "max_steps": max_steps,
+                    "loss": last_loss,
+                }
+                _family_log_event(out_dir, event)
+                print(
+                    f"[TRAIN] family=var architecture={cfg.architecture} step={step}/{max_steps} loss={last_loss:.6f}",
+                    flush=True,
+                )
+                if int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:
+                    _save_family_checkpoint(
+                        cfg=cfg,
+                        cfg_dict=cfg_dict,
+                        model=model,
+                        optimizer=optimizer,
+                        checkpoint_dir=run_paths.checkpoints_dir,
+                        step=step,
+                        loss=last_loss,
+                    )
+        if not saw_batch:
+            raise RuntimeError("VAR training dataloader produced no batches.")
+    if dist.should_write():
+        _save_family_checkpoint(
+            cfg=cfg,
+            cfg_dict=cfg_dict,
+            model=model,
+            optimizer=optimizer,
+            checkpoint_dir=run_paths.checkpoints_dir,
+            step=step,
+            loss=last_loss,
+            final=True,
+        )
+    dist.wait_for_everyone()
+
+
 def run(cfg: TrainConfig) -> None:
-    if cfg.model_family in {"pixart_sigma", "var"}:
-        _run_family_smoke(cfg)
-        return
-    if cfg.architecture != "mmdit_rf":
+    if cfg.model_family == "pixart_sigma":
+        if cfg.architecture != "pixart_sigma_rf":
+            raise RuntimeError("model.family=pixart_sigma requires architecture=pixart_sigma_rf.")
+    elif cfg.model_family == "var":
+        if cfg.architecture != "var_ar":
+            raise RuntimeError("model.family=var requires architecture=var_ar.")
+    elif cfg.architecture != "mmdit_rf":
         raise RuntimeError("Only architecture=mmdit_rf is supported.")
 
     os.environ.setdefault(
@@ -1501,54 +2003,10 @@ def run(cfg: TrainConfig) -> None:
         if bool(cfg.compile) and device.type == "cuda"
         else False
     )
-    _run_mmdit_rf(cfg, device=device, perf_active=perf_active, dist=dist)
-
-
-def _run_family_smoke(cfg: TrainConfig) -> None:
-    """Run a minimal CPU/GPU smoke train step for non-MMDiT v1 families."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model(cfg).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.lr))
-    optimizer.zero_grad(set_to_none=True)
     if cfg.model_family == "pixart_sigma":
-        x = torch.randn(
-            int(cfg.batch_size),
-            int(cfg.latent_channels),
-            int(cfg.image_size) // int(cfg.latent_downsample_factor),
-            int(cfg.image_size) // int(cfg.latent_downsample_factor),
-            device=device,
-        )
-        t = torch.rand(int(cfg.batch_size), device=device)
-        text = torch.randn(
-            int(cfg.batch_size),
-            min(int(cfg.max_text_tokens), 8),
-            int(cfg.caption_channels),
-            device=device,
-        )
-        loss = model(x=x, t=t, text=text).float().square().mean()
-    else:
-        from model.var import next_scale_cross_entropy
-
-        generator = torch.Generator(device=device)
-        generator.manual_seed(int(cfg.seed))
-        tokens = [
-            torch.randint(
-                0,
-                int(cfg.codebook_size),
-                (int(cfg.batch_size), int(scale) * int(scale)),
-                generator=generator,
-                device=device,
-            )
-            for scale in cfg.scale_schedule
-        ]
-        logits = model(tokens)
-        loss = next_scale_cross_entropy(logits, tokens[-1])
-    loss.backward()
-    optimizer.step()
-    out_dir = Path(cfg.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    print(
-        "[SMOKE-TRAIN] "
-        f"family={cfg.model_family} architecture={cfg.architecture} loss={float(loss.detach().cpu()):.6f}",
-        flush=True,
-    )
+        _run_pixart_sigma_rf(cfg, device=device, perf_active=perf_active, dist=dist)
+        return
+    if cfg.model_family == "var":
+        _run_var_ar(cfg, device=device, perf_active=perf_active, dist=dist)
+        return
+    _run_mmdit_rf(cfg, device=device, perf_active=perf_active, dist=dist)
