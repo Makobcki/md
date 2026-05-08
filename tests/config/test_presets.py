@@ -9,7 +9,8 @@ from config.resolver import resolve_config
 def test_explicit_presets_and_main_config_merge() -> None:
     resolved = resolve_target_config("train")
     assert resolved.data["model"]["variant"] == "576"
-    assert resolved.data["training"]["batch_size"] == 4
+    assert resolved.data["training"]["batch_size"] == 1
+    assert resolved.data["data"]["dataset_path"] == "data/dataset"
     assert resolved.data["output"]["dir"] == "runs/train"
 
 
@@ -47,6 +48,8 @@ def test_scoped_preset_uses_merge_full_preset_payload() -> None:
     assert resolved.data["training"]["optimizer"]["name"] == "adamw"
     assert resolved.data["latent_dtype"] == "bf16"
     assert resolved.data["latent_cache_dir"] == ".cache/latents_576"
+    assert resolved.data["latent_cache_sharded"] is True
+    assert resolved.data["text"]["backend"] == "real"
     assert resolved.data["model"]["checkpoint"] is None
     assert "__uses__" not in resolved.data["model"]
 
