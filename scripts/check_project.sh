@@ -22,10 +22,17 @@ run_checked 30 python -m scripts.prepare_training_cache --help >/dev/null
 run_checked 30 python -m scripts.validate_cache --help >/dev/null
 
 grep -RIn -E "unet|U-Net|DDPM|DDIM|DPM|BPE|v_prediction|min_snr" . \
+  --exclude='AGENTS.md' \
+  --exclude='README.md' \
   --exclude='check_project.sh' \
   --exclude-dir='.git' \
+  --exclude-dir='.venv' \
   --exclude-dir='.pytest_cache' \
   --exclude-dir='.cache' \
+  --exclude-dir='dist' \
+  --exclude-dir='md-dev' \
+  --exclude-dir='md_diffusion.egg-info' \
+  --exclude-dir='node_modules' \
   --exclude-dir='runs' \
   --exclude-dir='__pycache__' \
   --exclude='*.pyc' && exit 1 || true
