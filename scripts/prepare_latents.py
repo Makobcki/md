@@ -11,6 +11,11 @@ from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) in sys.path:
+    sys.path.remove(str(ROOT))
+sys.path.insert(0, str(ROOT))
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -62,6 +67,17 @@ def _config_text_enabled(cfg: TrainConfig) -> bool:
     if hasattr(cfg, "text_enabled"):
         return bool(cfg.text_enabled)
     return True
+
+
+def _config_uses_fake_vae(cfg: TrainConfig) -> bool:
+    """Return whether latent preparation should use the smoke-test fake VAE."""
+    extra = getattr(cfg, "extra", {})
+    vae_section = extra.get("vae", {}) if isinstance(extra, dict) else {}
+    backend = ""
+    if isinstance(vae_section, dict):
+        backend = str(vae_section.get("backend", "") or "").lower()
+    pretrained = str(getattr(cfg, "vae_pretrained", "") or "").lower()
+    return backend == "fake" or pretrained == "fake"
 
 
 @dataclass(frozen=True)
@@ -241,7 +257,7 @@ def _resolve_prepare_options(
     cli_values = {
         key: getattr(args, key)
         for key in provided_dests
-        if key != "config" and hasattr(args, key)
+        if key not in {"config", "set_values"} and hasattr(args, key)
     }
     if cli_values:
         options = replace(options, **cli_values)
@@ -543,7 +559,8 @@ def _main_impl(argv: list[str] | None = None, cfg_override: TrainConfig | None =
     options = _resolve_prepare_options(cfg, args, provided_dests)
     if cfg.mode != "latent":
         raise RuntimeError("prepare_latents requires mode=latent in config.")
-    if not cfg.vae_pretrained:
+    fake_vae = _config_uses_fake_vae(cfg)
+    if not cfg.vae_pretrained and not fake_vae:
         raise RuntimeError("vae_pretrained is required to prepare latents.")
 
     root = Path(cfg.data_root)
@@ -615,13 +632,22 @@ def _main_impl(argv: list[str] | None = None, cfg_override: TrainConfig | None =
     device = torch.device(device_str)
     dtype = _latent_dtype(options.latent_dtype)
     autocast_dtype = _latent_dtype(options.autocast_dtype)
-    vae = VAEWrapper(
-        pretrained=str(cfg.vae_pretrained),
-        freeze=True,
-        scaling_factor=float(cfg.vae_scaling_factor),
-        device=device,
-        dtype=dtype,
-    )
+    if fake_vae:
+        from sample.build import FakeVAE
+
+        vae = FakeVAE(
+            latent_channels=int(cfg.latent_channels),
+            latent_h=int(cfg.image_size) // int(cfg.latent_downsample_factor),
+            latent_w=int(cfg.image_size) // int(cfg.latent_downsample_factor),
+        ).to(device=device, dtype=dtype)
+    else:
+        vae = VAEWrapper(
+            pretrained=str(cfg.vae_pretrained),
+            freeze=True,
+            scaling_factor=float(cfg.vae_scaling_factor),
+            device=device,
+            dtype=dtype,
+        )
 
     dataset = _LatentPrepDataset(
         train_entries,
