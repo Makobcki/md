@@ -1,19 +1,25 @@
 config target="train" version=2 {
   model {
-    use "mmdit_576"
+    use "../presets/model/mmdit_576.kdl"
     checkpoint null
   }
 
+  text {
+    use "../presets/text/clip_l_t5_base.kdl"
+  }
+
   training {
-    use "bf16_adamw"
-    batch_size 4
-    grad_accum_steps 1
+    use "../presets/training/bf16_adamw.kdl"
+    batch_size 1
+    grad_accum_steps 4
     max_steps 100000
+    num_workers 0
+    persistent_workers false
   }
 
   data {
-    use "latent_cache_576"
-    dataset_path "data/train"
+    use "../presets/data/latent_cache_576.kdl"
+    dataset_path "data/dataset"
   }
 
   output {
