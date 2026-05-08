@@ -1,16 +1,25 @@
 preset kind="data" name="my_latent_cache" version=1 {
   image_size 576
   latent_cache true
+  latent_cache_sharded true
   latent_cache_dir ".cache/latents_576"
   latent_cache_index "index.jsonl"
   text_cache true
   text_cache_dir ".cache/text"
+  cache_auto_prepare true
+  cache_rebuild_if_stale false
+  cache_strict true
+  cache_validate_on_start true
 
   data {
+    dataset_path "data/dataset"
     image_dir "images"
     meta_dir ""
     tags_dir ""
     caption_field "caption"
     require_512 false
+    val_ratio 0.0
+    cache_dir ".cache"
+    failed_list "failed/md5.txt"
   }
 }
