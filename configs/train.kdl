@@ -1,7 +1,8 @@
-config target="train" version=2 {
+config target="train" version=1 {
   model {
-    use "mmdit_576"
+    use "var_d16"
     checkpoint null
+    architecture.image_size 512
   }
 
   vae {
@@ -25,7 +26,7 @@ config target="train" version=2 {
   }
 
   data {
-    use "latent_cache_576"
+    use "latent_cache_512"
     dataset_path "data/dataset"
   }
 

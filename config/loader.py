@@ -41,11 +41,11 @@ def load_train_config(
     path: str | Path | None = None,
     overrides: dict[str, Any] | None = None,
     *,
-    target: str = "train",
+    target: str | None = None,
 ) -> TrainConfig:
     """Load a train-compatible KDL config.
 
-    ``target`` defaults to ``train``. Cache preparation commands pass ``cache``
+    ``target`` defaults to ``None``. Cache preparation commands pass ``cache``
     so they can use ``configs/cache.kdl`` while the current cache code still
     receives the flat ``TrainConfig`` runtime object.
     """

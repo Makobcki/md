@@ -1,4 +1,4 @@
-config target="cache" version=2 {
+config target="cache" version=1 {
   model {
     use "../presets/model/mmdit_576.kdl"
   }

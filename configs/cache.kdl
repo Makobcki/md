@@ -1,6 +1,6 @@
-config target="cache" version=2 {
+config target="cache" version=1 {
   model {
-    use "mmdit_576"
+    use "var_d16"
   }
 
   vae {
@@ -19,7 +19,7 @@ config target="cache" version=2 {
   }
 
   data {
-    use "latent_cache_576"
+    use "latent_cache_512"
     dataset_path "data/dataset"
   }
 

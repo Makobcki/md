@@ -1,4 +1,4 @@
-config target="sample" version=2 {
+config target="sample" version=1 {
   model {
     family "var"
     variant "var_tiny"

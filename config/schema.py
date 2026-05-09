@@ -86,7 +86,7 @@ class SampleConfig:
         options.validate()
         return cls(
             target=str(data.get("target", "sample")),
-            version=int(data.get("version", 1)),
+            version=int(data.get("version") or 1),
             options=options,
             raw=dict(data),
         )
@@ -108,7 +108,7 @@ class WebUIConfig:
         webui = _section(data, "webui")
         return cls(
             target=str(data.get("target", "webui")),
-            version=int(data.get("version", 1)),
+            version=int(data.get("version") or 1),
             host=str(webui.get("host", "127.0.0.1")),
             port=int(webui.get("port", 7860)),
             auto_open=bool(webui.get("auto_open", True)),
@@ -128,7 +128,7 @@ class EvalConfig:
     def from_dict(cls, data: dict[str, Any]) -> EvalConfig:
         return cls(
             target=str(data.get("target", "eval")),
-            version=int(data.get("version", 1)),
+            version=int(data.get("version") or 1),
             raw=dict(data),
         )
 
@@ -145,6 +145,6 @@ class CacheConfig:
     def from_dict(cls, data: dict[str, Any]) -> CacheConfig:
         return cls(
             target=str(data.get("target", "cache")),
-            version=int(data.get("version", 1)),
+            version=int(data.get("version") or 1),
             raw=dict(data),
         )

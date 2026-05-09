@@ -1,4 +1,4 @@
-config target="train" version=2 {
+config target="train" version=1 {
   model {
     family "pixart_sigma"
     variant "pixart_sigma_tiny"

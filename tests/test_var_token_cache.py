@@ -42,4 +42,7 @@ def test_synthetic_multiscale_token_batches_load() -> None:
     batch = dataset[0]
 
     assert [tokens.shape for tokens in batch["tokens"]] == [torch.Size([1]), torch.Size([4])]
+    root_token = int(batch["tokens"][0][0].item())
+    expected_next = (root_token + 997 + torch.arange(4, dtype=torch.long)) % 16
+    assert torch.equal(batch["tokens"][1], expected_next)
     assert batch["metadata"].codebook_size == 16

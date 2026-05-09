@@ -1,4 +1,4 @@
-config target="train" version=2 {
+config target="train" version=1 {
   model {
     family "var"
     variant "var_tiny"

@@ -1858,16 +1858,16 @@ def _run_var_ar(
         raise RuntimeError("VAR training dataset is empty.")
     tokenizer_kind = str(cfg.tokenizer_kind)
     tokenizer_checkpoint = str(cfg.tokenizer_checkpoint or "")
-    if tokenizer_kind == "vq" and not tokenizer_checkpoint:
-        print(
-            "[WARN] VAR tokenizer.kind='vq' has no tokenizer.checkpoint; "
-            "using deterministic placeholder token entries for the real training loop.",
-            flush=True,
-        )
-    elif tokenizer_kind != "synthetic":
+    if tokenizer_kind == "vq":
         raise RuntimeError(
-            "VAR real training currently requires tokenizer.kind='synthetic' or "
-            "tokenizer.kind='vq' with tokenizer.checkpoint=null placeholder tokens."
+            "VAR tokenizer.kind='vq' training requires a real tokenizer/token cache path, "
+            "but VQ tokenization is not implemented in this trainer yet. Use "
+            "tokenizer.kind='synthetic' only for smoke/debug runs; placeholder VQ tokens "
+            "are disabled because they keep loss near log(codebook_size)."
+        )
+    if tokenizer_kind != "synthetic":
+        raise RuntimeError(
+            "VAR training currently supports tokenizer.kind='synthetic' smoke/debug tokens only."
         )
     token_metadata = TokenCacheMetadata(
         kind=tokenizer_kind,
@@ -1897,7 +1897,7 @@ def _run_var_ar(
     optimizer = _build_optimizer(cfg, model, device)
     if dist.backend != "none":
         model, optimizer, dataloader = dist.prepare(model, optimizer, dataloader)
-    from model.var import next_scale_cross_entropy
+    from model.var import multiscale_next_scale_cross_entropy
 
     max_steps = int(cfg.max_steps)
     grad_accum = max(int(cfg.grad_accum_steps), 1)
@@ -1913,8 +1913,7 @@ def _run_var_ar(
             if step >= max_steps:
                 break
             moved_tokens = [item.to(device=device, dtype=torch.long) for item in tokens]
-            logits = model(moved_tokens)
-            loss = next_scale_cross_entropy(logits, moved_tokens[-1])
+            loss = multiscale_next_scale_cross_entropy(model, moved_tokens)
             _assert_finite("var_loss", loss.detach())
             (loss / grad_accum).backward()
             last_loss = float(loss.detach().cpu())

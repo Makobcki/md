@@ -1,4 +1,4 @@
-config target="train" version=2 {
+config target="train" version=1 {
   model {
     use "../presets/model/mmdit_1024.kdl"
     checkpoint null

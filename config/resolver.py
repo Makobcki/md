@@ -260,8 +260,8 @@ def _validate_target(
     source: Path,
 ) -> tuple[str, int]:
     meta = data.get("__meta__") if isinstance(data.get("__meta__"), dict) else {}
-    target = str(meta.get("target", data.get("target", "")) or "")
-    version = int(meta.get("version", data.get("version", 1)) or 1)
+    target = str(meta.get("target") or "")
+    version = int(meta.get("version") or 1)
     if not target:
         raise RuntimeError(
             f"Missing config target metadata in {source}; expected root like "

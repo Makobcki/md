@@ -18,7 +18,7 @@ preset kind="data" name="latent_cache_576" version=1 {
     tags_dir ""
     caption_field "caption"
     require_512 false
-    val_ratio 0.0
+    val_ratio 0.1
     cache_dir ".cache"
     failed_list "failed/md5.txt"
   }

@@ -1,7 +1,7 @@
-config target="sample" version=2 {
+config target="sample" version=1 {
   model {
-    use "mmdit_576"
-    checkpoint "runs/mmdit_base/2026-05-04_164714_001/ckpt_0038000.pt"
+    use "var_d16"
+    checkpoint "./runs/train/2026-05-08_201645_001/checkpoints/step_002000.pt"
   }
 
   vae {
