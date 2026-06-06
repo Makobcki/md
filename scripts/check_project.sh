@@ -24,7 +24,7 @@ run_checked 30 python -m scripts.validate_cache --help >/dev/null
 grep -RIn -E "unet|U-Net|DDPM|DDIM|DPM|BPE|v_prediction|min_snr" . \
   --exclude='AGENTS.md' \
   --exclude='README.md' \
-  --exclude='SKILLS.md' \
+  --exclude='SKILL.md' \
   --exclude='check_project.sh' \
   --exclude-dir='.git' \
   --exclude-dir='.venv' \
