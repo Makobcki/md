@@ -85,123 +85,110 @@ function togglePresetUse(content, kind, name, active) {
   const lines = String(content || "").split("\n");
   const useLine = `    use "${name}"`;
   
+  let depth = 0;
+  let inSection = false;
+
   if (active) {
     // Активируем пресет (вставляем/заменяем существующий)
-    let inConfig = false;
-    let inSection = false;
-    let configDepth = 0;
-    let sectionDepth = 0;
-
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const openBrackets = (line.match(/\{/g) || []).length;
       const closeBrackets = (line.match(/\}/g) || []).length;
       
-      if (/^\s*config\s*\{/.test(line)) {
-        inConfig = true;
-        configDepth = 1;
+      const prevDepth = depth;
+      depth += openBrackets - closeBrackets;
+
+      // Если мы на уровне 1 (внутри config) и строка начинает нужную секцию
+      if (prevDepth === 1 && new RegExp(`^\\s*${section}\\s*(?:[^{]*)\\{`).test(line)) {
+        inSection = true;
+        const inlineUse = line.match(/use\s+"([^"]+)"/);
+        if (inlineUse) {
+          lines[i] = line.replace(/use\s+"[^"]+"/, `use "${name}"`);
+          return lines.join("\n");
+        }
         continue;
       }
-      
-      if (inConfig) {
-        configDepth += openBrackets - closeBrackets;
-        if (configDepth <= 0) {
-          inConfig = false;
-          continue;
+
+      if (inSection) {
+        if (/^\s*use\s+"[^"]+"/.test(line)) {
+          lines[i] = line.replace(/use\s+"[^"]+"/, `use "${name}"`);
+          return lines.join("\n");
         }
         
-        if (new RegExp(`^\\s*${section}\\s*\\{`).test(line)) {
-          inSection = true;
-          sectionDepth = 1;
-          const inlineUse = line.match(/use\s+"([^"]+)"/);
-          if (inlineUse) {
-            lines[i] = line.replace(/use\s+"[^"]+"/, `use "${name}"`);
-            return lines.join("\n");
-          }
-          continue;
-        }
-        
-        if (inSection) {
-          if (/^\s*use\s+"[^"]+"/.test(line)) {
-            lines[i] = line.replace(/use\s+"[^"]+"/, `use "${name}"`);
-            return lines.join("\n");
-          }
-          
-          sectionDepth += openBrackets - closeBrackets;
-          if (sectionDepth <= 0) {
-            inSection = false;
-          }
+        if (depth <= 1) {
+          inSection = false;
         }
       }
     }
 
-    // Fallback to insertion
-    let depth = 0;
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index];
-      const startsSection = depth === 1 && new RegExp(`^\\s*${section}\\s*\\{`).test(line);
-      if (startsSection) {
-        lines.splice(index + 1, 0, useLine);
+    // Если секция найдена, но в ней нет строки `use`
+    depth = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const openBrackets = (line.match(/\{/g) || []).length;
+      const closeBrackets = (line.match(/\}/g) || []).length;
+      
+      const prevDepth = depth;
+      depth += openBrackets - closeBrackets;
+
+      if (prevDepth === 1 && new RegExp(`^\\s*${section}\\s*(?:[^{]*)\\{`).test(line)) {
+        lines.splice(i + 1, 0, useLine);
         return lines.join("\n");
       }
-      depth += (line.match(/\{/g) || []).length;
-      depth -= (line.match(/\}/g) || []).length;
     }
 
-    const insertAt = Math.max(1, lines.findIndex((line) => /^\s*}\s*$/.test(line)));
-    const block = [`  ${section} {`, `    use "${name}"`, "  }", ""];
-    if (insertAt > 0) {
-      lines.splice(insertAt, 0, ...block);
-      return lines.join("\n");
-    }
-    return `${content.trimEnd()}\n\n${block.join("\n")}`;
-  } else {
-    // Деактивируем пресет (удаляем)
-    let inConfig = false;
-    let inSection = false;
-    let configDepth = 0;
-    let sectionDepth = 0;
-
+    // Если секция вообще не найдена в файле, создаем её внутри config
+    depth = 0;
+    let configCloseIndex = -1;
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const openBrackets = (line.match(/\{/g) || []).length;
       const closeBrackets = (line.match(/\}/g) || []).length;
       
-      if (/^\s*config\s*\{/.test(line)) {
-        inConfig = true;
-        configDepth = 1;
+      const prevDepth = depth;
+      depth += openBrackets - closeBrackets;
+      if (prevDepth === 1 && depth === 0) {
+        configCloseIndex = i;
+        break;
+      }
+    }
+
+    const block = [`  ${section} {`, `    use "${name}"`, "  }"];
+    if (configCloseIndex !== -1) {
+      lines.splice(configCloseIndex, 0, ...block);
+      return lines.join("\n");
+    }
+
+    return `${content.trimEnd()}\n\nconfig {\n${block.map(b => `  ${b}`).join("\n")}\n}`;
+  } else {
+    // Деактивируем пресет (удаляем)
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const openBrackets = (line.match(/\{/g) || []).length;
+      const closeBrackets = (line.match(/\}/g) || []).length;
+      
+      const prevDepth = depth;
+      depth += openBrackets - closeBrackets;
+
+      if (prevDepth === 1 && new RegExp(`^\\s*${section}\\s*(?:[^{]*)\\{`).test(line)) {
+        inSection = true;
+        const inlineUsePattern = new RegExp(`use\\s+"${name}"`);
+        if (inlineUsePattern.test(line)) {
+          lines[i] = line.replace(inlineUsePattern, "").replace(/\{\s*\}/, "{}");
+          return lines.join("\n");
+        }
         continue;
       }
-      
-      if (inConfig) {
-        configDepth += openBrackets - closeBrackets;
-        if (configDepth <= 0) {
-          inConfig = false;
-          continue;
+
+      if (inSection) {
+        const usePattern = new RegExp(`^\\s*use\\s+"${name}"`);
+        if (usePattern.test(line)) {
+          lines.splice(i, 1);
+          return lines.join("\n");
         }
         
-        if (new RegExp(`^\\s*${section}\\s*\\{`).test(line)) {
-          inSection = true;
-          sectionDepth = 1;
-          const inlineUsePattern = new RegExp(`use\\s+"${name}"`);
-          if (inlineUsePattern.test(line)) {
-            lines[i] = line.replace(inlineUsePattern, "").replace(/\{\s*\}/, "{}");
-            return lines.join("\n");
-          }
-          continue;
-        }
-        
-        if (inSection) {
-          const usePattern = new RegExp(`^\\s*use\\s+"${name}"`);
-          if (usePattern.test(line)) {
-            lines.splice(i, 1);
-            return lines.join("\n");
-          }
-          
-          sectionDepth += openBrackets - closeBrackets;
-          if (sectionDepth <= 0) {
-            inSection = false;
-          }
+        if (depth <= 1) {
+          inSection = false;
         }
       }
     }
