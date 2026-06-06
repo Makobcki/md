@@ -139,6 +139,18 @@ def next_scale_cross_entropy(logits: torch.Tensor, target: torch.Tensor) -> torc
     return F.cross_entropy(logits.reshape(-1, logits.shape[-1]), target.reshape(-1))
 
 
+def multiscale_next_scale_cross_entropy(
+    model: VARTransformer, tokens: list[torch.Tensor]
+) -> torch.Tensor:
+    if len(tokens) < 2:
+        raise ValueError("VAR multiscale loss requires at least two token scales.")
+    losses = [
+        next_scale_cross_entropy(model(tokens[: scale_idx + 1]), tokens[scale_idx])
+        for scale_idx in range(1, len(tokens))
+    ]
+    return torch.stack(losses).mean()
+
+
 @torch.no_grad()
 def deterministic_decode(
     model: VARTransformer,

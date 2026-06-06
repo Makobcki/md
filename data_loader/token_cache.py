@@ -59,19 +59,26 @@ def build_synthetic_token_entries(
     generator.manual_seed(int(seed))
     entries: list[dict[str, object]] = []
     for idx in range(int(count)):
+        root = torch.randint(
+            0,
+            int(metadata.codebook_size),
+            (int(metadata.scale_schedule[0]) * int(metadata.scale_schedule[0]),),
+            generator=generator,
+            dtype=torch.long,
+        )
+        scale_tokens = [root]
+        source = int(root[0].item()) if root.numel() else idx
+        for scale_idx, scale in enumerate(metadata.scale_schedule[1:], start=1):
+            length = int(scale) * int(scale)
+            offset = 997 * scale_idx
+            scale_tokens.append(
+                (source + offset + torch.arange(length, dtype=torch.long))
+                % int(metadata.codebook_size)
+            )
         entries.append(
             {
                 "id": f"synthetic-{idx}",
-                "tokens": [
-                    torch.randint(
-                        0,
-                        int(metadata.codebook_size),
-                        (int(scale) * int(scale),),
-                        generator=generator,
-                        dtype=torch.long,
-                    )
-                    for scale in metadata.scale_schedule
-                ],
+                "tokens": scale_tokens,
             }
         )
     return entries
