@@ -49,7 +49,8 @@ def load_train_config(
     so they can use ``configs/cache.kdl`` while the current cache code still
     receives the flat ``TrainConfig`` runtime object.
     """
-    return build_train_config(_resolve_target_data(path, target=target, overrides=overrides))
+    actual_target = "train" if target is None else target
+    return build_train_config(_resolve_target_data(path, target=actual_target, overrides=overrides))
 
 
 def load_cache_train_config(
