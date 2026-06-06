@@ -27,6 +27,7 @@ grep -RIn -E "unet|U-Net|DDPM|DDIM|DPM|BPE|v_prediction|min_snr" . \
   --exclude='SKILL.md' \
   --exclude='check_project.sh' \
   --exclude-dir='.git' \
+  --exclude-dir='.agents' \
   --exclude-dir='.venv' \
   --exclude-dir='.pytest_cache' \
   --exclude-dir='.cache' \
