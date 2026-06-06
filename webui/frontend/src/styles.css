@@ -502,19 +502,26 @@ nav a.active {
   background: var(--danger-soft);
 }
 
-.dashboard-grid {
+.dashboard-grid,
+.content-grid {
   display: grid;
-  grid-template-columns: minmax(320px, 0.88fr) minmax(420px, 1.42fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
   gap: 16px;
+}
+
+.dashboard-grid {
   align-items: stretch;
 }
 
 .content-grid,
 .split {
-  display: grid;
-  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.35fr);
-  gap: 16px;
   align-items: start;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  gap: 16px;
 }
 
 .workflow-grid {
@@ -790,16 +797,18 @@ nav a.active {
 
 .train-monitor-square {
   overflow: hidden;
-  grid-template-rows: auto minmax(130px, 0.38fr) minmax(0, 1fr);
+  grid-template-rows: auto 120px 1fr;
+  gap: 12px;
 }
 
 .train-chart-panel {
   min-height: 0;
+  height: 120px;
+  overflow: hidden;
 }
 
 .train-chart-panel .chart {
   height: 100%;
-  min-height: 150px;
 }
 
 .train-log-panel {
@@ -1323,35 +1332,22 @@ nav a.active {
   height: 100%;
   min-height: 180px;
   border-radius: var(--radius);
-  background:
-    linear-gradient(
-      120deg,
-      transparent 0%,
-      rgba(255, 255, 255, 0.1) 38%,
-      transparent 72%
-    ),
-    linear-gradient(
-      135deg,
-      var(--panel-alt),
-      var(--panel-strong),
-      var(--accent-soft)
-    );
-  background-size:
-    240% 100%,
-    100% 100%;
-  animation: previewFlow 1.8s ease-in-out infinite;
+  background: linear-gradient(
+    90deg,
+    var(--panel-alt) 25%,
+    var(--panel-strong) 50%,
+    var(--panel-alt) 75%
+  );
+  background-size: 200% 100%;
+  animation: previewShimmer 1.5s infinite linear;
 }
 
-@keyframes previewFlow {
+@keyframes previewShimmer {
   0% {
-    background-position:
-      160% 0,
-      0 0;
+    background-position: 200% 0;
   }
   100% {
-    background-position:
-      -120% 0,
-      0 0;
+    background-position: -200% 0;
   }
 }
 
@@ -1714,15 +1710,28 @@ button.secondary.mask-toggle.active {
   display: inline-flex;
   min-height: 32px;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 4px 12px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  color: var(--muted);
+  background: var(--panel-alt);
+  color: var(--text);
   font-family: 'Space Grotesk', sans-serif;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.chip-control:hover {
+  background: var(--panel-strong);
+}
+
+.chip-control:has(input:checked) {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .status-pill {
@@ -1851,13 +1860,14 @@ button.warning:hover:not(:disabled) {
 }
 
 button.ghost {
-  border: 1px solid var(--border);
-  background: transparent;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-alt);
   color: var(--text);
 }
 
 button.ghost:hover:not(:disabled) {
-  background: var(--panel-alt);
+  background: var(--panel-strong);
+  border-color: var(--text);
 }
 
 button.danger {
@@ -2012,14 +2022,10 @@ textarea {
 
 .log-controls {
   display: grid;
-  grid-template-columns:
-    minmax(110px, 150px)
-    minmax(140px, 1fr)
-    minmax(150px, 190px)
-    minmax(150px, 190px);
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
   align-items: end;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 
 .log-controls label.row {
@@ -2029,8 +2035,8 @@ textarea {
   align-items: start;
 }
 
-.log-controls input,
-.log-controls select {
+.log-controls .row > input:not([type="checkbox"]),
+.log-controls .row > select {
   width: 100%;
   min-width: 0;
   flex: initial;
@@ -2104,10 +2110,12 @@ textarea {
   max-width: 100%;
   overflow: hidden;
   padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--panel);
-  color: var(--muted);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--panel-strong);
+  color: var(--text);
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 500;
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;

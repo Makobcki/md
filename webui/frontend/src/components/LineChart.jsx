@@ -1,19 +1,19 @@
 import React from "react";
 
-export default function LineChart({ data, height = 140 }) {
+export default function LineChart({ data, height = 110 }) {
   const cleaned = data
     .filter((d) => Number.isFinite(d.step) && Number.isFinite(d.loss))
     .sort((a, b) => a.step - b.step);
 
   if (!cleaned.length) {
-    return <div className="chart muted" style={{ display: "grid", placeItems: "center", height, border: "2px solid var(--border)", background: "var(--panel-alt)", fontFamily: "JetBrains Mono, monospace", fontSize: "12px" }}>No metric data</div>;
+    return <div className="chart muted" style={{ display: "grid", placeItems: "center", height, border: "1px solid var(--border)", background: "var(--panel-alt)", fontFamily: "Space Grotesk, sans-serif", fontSize: "12px", borderRadius: "var(--radius)" }}>No metric data</div>;
   }
 
   const width = 600;
   const paddingLeft = 45;
   const paddingRight = 15;
-  const paddingTop = 15;
-  const paddingBottom = 20;
+  const paddingTop = 10;
+  const paddingBottom = 16;
 
   const xs = cleaned.map((d) => d.step);
   const ys = cleaned.map((d) => d.loss);
