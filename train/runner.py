@@ -1854,9 +1854,12 @@ def _run_var_ar(
         cfg, device=device, perf_active=perf_active, dist=dist
     )
     train_entries, _ = _load_train_entries(cfg, use_text_conditioning=False)
-    if not train_entries:
-        raise RuntimeError("VAR training dataset is empty.")
     tokenizer_kind = str(cfg.tokenizer_kind)
+    if not train_entries:
+        if tokenizer_kind == "synthetic":
+            train_entries = [{"id": f"dummy-{i}"} for i in range(100)]
+        else:
+            raise RuntimeError("VAR training dataset is empty.")
     tokenizer_checkpoint = str(cfg.tokenizer_checkpoint or "")
     if tokenizer_kind == "vq":
         raise RuntimeError(
