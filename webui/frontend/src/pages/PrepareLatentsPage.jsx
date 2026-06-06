@@ -134,7 +134,6 @@ export default function PrepareLatentsPage() {
         eyebrow="Dataset cache"
         title="Latents"
         description="Build cache shards."
-        meta={<StatusPill status={isLatentActive ? activeRun?.status || "running" : "stopped"} />}
       />
       <div className="split latents-page-grid">
         <div className="stack-page latents-main-column">

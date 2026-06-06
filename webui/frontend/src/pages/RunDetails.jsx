@@ -70,7 +70,6 @@ export default function RunDetails() {
         eyebrow={formatRunType(run.run_type)}
         title={formatRunId(runId)}
         description="Config, logs and artifacts."
-        meta={<StatusPill status={run.status} />}
       />
       <div className="card">
         <div className="card-header">

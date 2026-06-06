@@ -114,7 +114,6 @@ export default function Dashboard() {
         eyebrow="Operations"
         title="Dashboard"
         description="Runs, outputs and history."
-        meta={<StatusPill status={activeRun?.status || "stopped"} />}
       />
 
       {error ? <div className="alert error">{error}</div> : null}

@@ -435,7 +435,6 @@ export default function SettingsPage() {
         eyebrow="Settings"
         title="Settings"
         description="Profiles and config."
-        meta={<StatusPill status={configDirty || sampleDirty || latentDirty ? "pending" : "ready"} />}
       />
 
       {error ? <div className="alert error">{error}</div> : null}

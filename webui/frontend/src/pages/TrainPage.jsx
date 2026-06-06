@@ -160,7 +160,6 @@ export default function TrainPage() {
         eyebrow="Training"
         title="Train"
         description="Start, resume and monitor."
-        meta={<StatusPill status={isTrainActive ? activeRun?.status || "running" : "stopped"} />}
       />
       <div className="train-workspace">
         {error ? <div className="alert error">{error}</div> : null}
