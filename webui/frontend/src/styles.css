@@ -77,6 +77,25 @@
   --shadow-soft: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
+:root[data-theme="dark"] .chip-control,
+:root[data-theme="dark"] button.ghost,
+:root[data-theme="dark"] .badge {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--text);
+}
+
+:root[data-theme="dark"] .chip-control:hover,
+:root[data-theme="dark"] button.ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+:root[data-theme="dark"] .chip-control:active,
+:root[data-theme="dark"] button.ghost:active:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -940,6 +959,61 @@ nav a.active {
 .settings-groups {
   display: grid;
   gap: 20px;
+}
+
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-alt);
+  margin-bottom: 8px;
+}
+
+.settings-tabs button {
+  min-height: 28px;
+  padding: 5px 12px;
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--muted);
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.settings-tabs button:hover {
+  color: var(--text);
+  background: var(--panel);
+}
+
+.settings-tabs button.active {
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow-soft);
+}
+
+.settings-layout {
+  display: grid;
+  gap: 16px;
+  min-height: 0;
+}
+
+.settings-page .card {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+  align-items: center;
 }
 
 .settings-section {
@@ -1823,12 +1897,17 @@ a.secondary {
   font-family: 'Space Grotesk', sans-serif;
   font-weight: 600;
   font-size: 13px;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease, opacity 0.1s ease;
 }
 
 a.secondary:hover {
   background: var(--secondary-hover);
   color: var(--text);
+  border-color: var(--border-strong);
+}
+
+a.secondary:active {
+  opacity: 0.75;
 }
 
 button:hover:not(:disabled) {
@@ -2022,7 +2101,7 @@ textarea {
 
 .log-controls {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
   align-items: end;
   margin-bottom: 12px;
@@ -2035,14 +2114,17 @@ textarea {
   align-items: start;
 }
 
-.log-controls .row > input:not([type="checkbox"]),
+.log-controls .row > input,
 .log-controls .row > select {
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   flex: initial;
 }
 
 .log-controls input[type="datetime-local"] {
+  box-sizing: border-box;
+  width: 100%;
   min-width: 0;
   font-size: 13px;
 }
@@ -2386,13 +2468,33 @@ textarea {
   vertical-align: middle;
 }
 
+.runs-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
 .runs-table td,
 .runs-table th {
   white-space: nowrap;
 }
 
+.runs-table th:nth-child(1),
+.runs-table td:nth-child(1) {
+  width: 100px;
+}
+
+.runs-table th:nth-child(2),
+.runs-table td:nth-child(2) {
+  width: 100px;
+}
+
+.runs-table th:nth-child(3),
+.runs-table td:nth-child(3) {
+  width: 120px;
+}
+
+.runs-table th:nth-child(4),
 .runs-table td:nth-child(4) {
-  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
 }

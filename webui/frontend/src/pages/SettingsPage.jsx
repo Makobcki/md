@@ -80,79 +80,133 @@ function stableSnapshot(value) {
   return JSON.stringify(value || {}, Object.keys(value || {}).sort());
 }
 
-function insertPresetUse(content, kind, name) {
+function togglePresetUse(content, kind, name, active) {
   const section = kind === "sampler" ? "sampling" : kind;
   const lines = String(content || "").split("\n");
   const useLine = `    use "${name}"`;
   
-  let inConfig = false;
-  let inSection = false;
-  let configDepth = 0;
-  let sectionDepth = 0;
+  if (active) {
+    // Активируем пресет (вставляем/заменяем существующий)
+    let inConfig = false;
+    let inSection = false;
+    let configDepth = 0;
+    let sectionDepth = 0;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const openBrackets = (line.match(/\{/g) || []).length;
-    const closeBrackets = (line.match(/\}/g) || []).length;
-    
-    if (/^\s*config\s*\{/.test(line)) {
-      inConfig = true;
-      configDepth = 1;
-      continue;
-    }
-    
-    if (inConfig) {
-      configDepth += openBrackets - closeBrackets;
-      if (configDepth <= 0) {
-        inConfig = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const openBrackets = (line.match(/\{/g) || []).length;
+      const closeBrackets = (line.match(/\}/g) || []).length;
+      
+      if (/^\s*config\s*\{/.test(line)) {
+        inConfig = true;
+        configDepth = 1;
         continue;
       }
       
-      if (new RegExp(`^\\s*${section}\\s*\\{`).test(line)) {
-        inSection = true;
-        sectionDepth = 1;
-        const inlineUse = line.match(/use\s+"([^"]+)"/);
-        if (inlineUse) {
-          lines[i] = line.replace(/use\s+"[^"]+"/, `use "${name}"`);
-          return lines.join("\n");
-        }
-        continue;
-      }
-      
-      if (inSection) {
-        if (/^\s*use\s+"[^"]+"/.test(line)) {
-          lines[i] = line.replace(/use\s+"[^"]+"/, `use "${name}"`);
-          return lines.join("\n");
+      if (inConfig) {
+        configDepth += openBrackets - closeBrackets;
+        if (configDepth <= 0) {
+          inConfig = false;
+          continue;
         }
         
-        sectionDepth += openBrackets - closeBrackets;
-        if (sectionDepth <= 0) {
-          inSection = false;
+        if (new RegExp(`^\\s*${section}\\s*\\{`).test(line)) {
+          inSection = true;
+          sectionDepth = 1;
+          const inlineUse = line.match(/use\s+"([^"]+)"/);
+          if (inlineUse) {
+            lines[i] = line.replace(/use\s+"[^"]+"/, `use "${name}"`);
+            return lines.join("\n");
+          }
+          continue;
+        }
+        
+        if (inSection) {
+          if (/^\s*use\s+"[^"]+"/.test(line)) {
+            lines[i] = line.replace(/use\s+"[^"]+"/, `use "${name}"`);
+            return lines.join("\n");
+          }
+          
+          sectionDepth += openBrackets - closeBrackets;
+          if (sectionDepth <= 0) {
+            inSection = false;
+          }
         }
       }
     }
-  }
 
-  // Fallback to insertion
-  let depth = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const startsSection = depth === 1 && new RegExp(`^\\s*${section}\\s*\\{`).test(line);
-    if (startsSection) {
-      lines.splice(index + 1, 0, useLine);
+    // Fallback to insertion
+    let depth = 0;
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      const startsSection = depth === 1 && new RegExp(`^\\s*${section}\\s*\\{`).test(line);
+      if (startsSection) {
+        lines.splice(index + 1, 0, useLine);
+        return lines.join("\n");
+      }
+      depth += (line.match(/\{/g) || []).length;
+      depth -= (line.match(/\}/g) || []).length;
+    }
+
+    const insertAt = Math.max(1, lines.findIndex((line) => /^\s*}\s*$/.test(line)));
+    const block = [`  ${section} {`, `    use "${name}"`, "  }", ""];
+    if (insertAt > 0) {
+      lines.splice(insertAt, 0, ...block);
       return lines.join("\n");
     }
-    depth += (line.match(/\{/g) || []).length;
-    depth -= (line.match(/\}/g) || []).length;
-  }
+    return `${content.trimEnd()}\n\n${block.join("\n")}`;
+  } else {
+    // Деактивируем пресет (удаляем)
+    let inConfig = false;
+    let inSection = false;
+    let configDepth = 0;
+    let sectionDepth = 0;
 
-  const insertAt = Math.max(1, lines.findIndex((line) => /^\s*}\s*$/.test(line)));
-  const block = [`  ${section} {`, `    use "${name}"`, "  }", ""];
-  if (insertAt > 0) {
-    lines.splice(insertAt, 0, ...block);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const openBrackets = (line.match(/\{/g) || []).length;
+      const closeBrackets = (line.match(/\}/g) || []).length;
+      
+      if (/^\s*config\s*\{/.test(line)) {
+        inConfig = true;
+        configDepth = 1;
+        continue;
+      }
+      
+      if (inConfig) {
+        configDepth += openBrackets - closeBrackets;
+        if (configDepth <= 0) {
+          inConfig = false;
+          continue;
+        }
+        
+        if (new RegExp(`^\\s*${section}\\s*\\{`).test(line)) {
+          inSection = true;
+          sectionDepth = 1;
+          const inlineUsePattern = new RegExp(`use\\s+"${name}"`);
+          if (inlineUsePattern.test(line)) {
+            lines[i] = line.replace(inlineUsePattern, "").replace(/\{\s*\}/, "{}");
+            return lines.join("\n");
+          }
+          continue;
+        }
+        
+        if (inSection) {
+          const usePattern = new RegExp(`^\\s*use\\s+"${name}"`);
+          if (usePattern.test(line)) {
+            lines.splice(i, 1);
+            return lines.join("\n");
+          }
+          
+          sectionDepth += openBrackets - closeBrackets;
+          if (sectionDepth <= 0) {
+            inSection = false;
+          }
+        }
+      }
+    }
     return lines.join("\n");
   }
-  return `${content.trimEnd()}\n\n${block.join("\n")}`;
 }
 
 function familyAwareSpec(spec, family) {
@@ -275,9 +329,8 @@ function PresetLibrary({
                   type="button"
                   className={isActive(selected) ? "secondary" : ""}
                   onClick={() => onInsert(selected)}
-                  disabled={isActive(selected)}
                 >
-                  {isActive(selected) ? "Active" : "Activate preset"}
+                  {isActive(selected) ? "Deactivate" : "Activate preset"}
                 </button>
               </div>
               <div className="preset-meta-row">
@@ -474,8 +527,10 @@ export default function SettingsPage() {
     setSavedMessage("Настройки кэша сброшены");
   };
 
-  const handleInsertPreset = (preset) => {
-    setConfig((prev) => insertPresetUse(prev, preset.kind, preset.name));
+  const handleTogglePreset = (preset) => {
+    const activeKind = preset.kind === "sampler" ? "sampling" : preset.kind;
+    const isCurrentlyActive = (activeUses[activeKind] || activeUses[preset.kind] || []).includes(preset.name);
+    setConfig((prev) => togglePresetUse(prev, preset.kind, preset.name, !isCurrentlyActive));
   };
 
   return (
@@ -532,7 +587,7 @@ export default function SettingsPage() {
                 }}
                 onSelectPreset={setSelectedPresetName}
                 activeUses={activeUses}
-                onInsert={handleInsertPreset}
+                onInsert={handleTogglePreset}
               />
             </div>
             <div className="settings-actions">
